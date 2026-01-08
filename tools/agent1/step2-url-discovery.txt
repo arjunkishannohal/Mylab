@@ -30,6 +30,8 @@ JSluice (Deep JS) - To analyze JavaScript structure.
 
 XnLinkFinder (JS Regex) - To extract endpoints from JS text.
 
+Wafw00f (WAF Detection) - To detect WAF/CDN protections so scan speed can be adjusted.
+
 Installation Commands (For Jules)
 
 # Go tools
@@ -58,6 +60,9 @@ pip install uro
 
 # Python tools
 pip install waymore
+
+# WAF detection (recommended before heavy active scans)
+pip install wafw00f
 
 # Hidden parameter discovery
 pip install arjun
@@ -158,6 +163,7 @@ Normalization rule (important):
 # - screenshots/ (gowitness output)
 # - takeover_candidates_raw.txt
 # - live_seeds.txt
+# - waf_results.txt
 # - host_fingerprints.txt
 # - known_files_hits.txt
 # - raw_history.txt
@@ -290,6 +296,21 @@ Instruction:
 Output:
 - temp/agent1/host_fingerprints.txt
 
+Step A1b: WAF Detection (Mandatory)
+Tool: wafw00f
+
+Goal:
+- Detect WAF/CDN protections early so later heavy tools (Katana/Ffuf/Kiterunner/Naabu) do not get you blocked and produce false negatives.
+
+Instruction:
+- Run wafw00f against temp/agent1/live_seeds.txt and save results.
+- Recommended output file:
+	- temp/agent1/waf_results.txt
+- Note: WAF detection is not perfect; treat it as a signal, not absolute truth.
+
+Output:
+- temp/agent1/waf_results.txt
+
 Brain Stop #3 (Mandatory): Fingerprint-Based Prioritization
 Instruction to Jules:
 - STOP running tools.
@@ -298,6 +319,10 @@ Instruction to Jules:
 	- API-looking hosts/paths (e.g., api., gateway., /api)
 	- WAF/CDN hints and rate-limit behavior
 - Use this to prioritize crawling/bruteforcing effort.
+- ALSO review temp/agent1/waf_results.txt:
+	- If WAF/CDN is detected on many hosts, reduce aggressiveness for subsequent steps.
+	  Apply safer settings such as: lower concurrency, add delays, and/or per-host rate-limits.
+	  (Exact flags differ by tool version; choose the closest supported options.)
 - Append your prioritized host list + why to: outputs/reports/agent1-recon-report.md
 
 Step A2: HTML Extractor (Save HTML for offline analysis)
