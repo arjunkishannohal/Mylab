@@ -1,0 +1,16 @@
+https://new-site.bestfiends.com/robots.txt
+http://dontdownload.bestfiends.com/sitemap_index.xml
+http://dontdownload.bestfiends.com/security.txt
+http://dontdownload.bestfiends.com/sitemap.xml
+http://dontdownload.bestfiends.com/.well-known/security.txt
+http://dontdownload.bestfiends.com/robots.txt
+http://oceana.bestfiends.com/security.txt
+http://oceana.bestfiends.com/robots.txt
+http://oceana.bestfiends.com/sitemap_index.xml
+http://oceana.bestfiends.com/.well-known/security.txt
+http://oceana.bestfiends.com/sitemap.xml
+https://bestfiends.com/robots.txt
+https://service-support.bestfiends.com/robots.txt
+https://support.bestfiends.com/robots.txt
+https://bestfiends.com/robots.txt
+https://support.bestfiends.com/robots.txt

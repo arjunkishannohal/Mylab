@@ -1,0 +1,12 @@
+http://dontdownload.bestfiends.com/swagger.json
+http://dontdownload.bestfiends.com/api-docs
+http://dontdownload.bestfiends.com/openapi.json
+http://dontdownload.bestfiends.com/v3/api-docs
+http://dontdownload.bestfiends.com/v2/api-docs
+http://dontdownload.bestfiends.com/swagger-ui.html
+http://dontdownload.bestfiends.com/swagger
+http://dontdownload.bestfiends.com/swagger-ui
+http://oceana.bestfiends.com/swagger-ui.html
+http://oceana.bestfiends.com/swagger.json
+http://oceana.bestfiends.com/v3/api-docs
+http://oceana.bestfiends.com/openapi.json
