@@ -1,0 +1,9 @@
+service-support.bestfiends.com:25
+support.bestfiends.com:25
+support2.bestfiends.com:9100
+oceana.bestfiends.com:9100
+rivals.bestfiends.com:9100
+support3.bestfiends.com:9100
+dontdownload.bestfiends.com:9100
+vote.bestfiends.com:9100
+bestfiends.com:445
