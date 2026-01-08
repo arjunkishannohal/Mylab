@@ -1,0 +1,510 @@
+httpx (Prober) - To filter live sites.
+
+Waymore (Deep History) - To find old URLs from Wayback Machine.
+
+Gau (Fast History) - To find URLs from AlienVault/CommonCrawl.
+
+ParamSpider (Mining) - To find URLs specifically with parameters (e.g., ?id=).
+
+Katana (Active Crawler) - To crawl live sites and discover endpoints (incl. JS parsing modes).
+
+Hakrawler (Fast Crawler) - To cross-check Katana quickly.
+
+GitDorker (GitHub Leaks) - To find internal URLs leaked in code.
+
+Ffuf (Brute Force) - To guess hidden folders.
+
+Naabu (Ports) - To find open ports/services beyond 80/443.
+
+Nmap (Validate) - To validate and fingerprint ports/services (external install).
+
+TLSX (TLS/Cert Intel) - To collect certificate SANs + TLS hints.
+
+Gowitness (Screenshots) - To quickly triage what is actually running.
+
+Subjack (Takeover candidates) - To detect potential subdomain takeover indicators (scope-aware).
+
+Kiterunner (API Routes) - To bruteforce modern API routes/methods beyond classic dir/file fuzzing.
+
+JSluice (Deep JS) - To analyze JavaScript structure.
+
+XnLinkFinder (JS Regex) - To extract endpoints from JS text.
+
+Installation Commands (For Jules)
+
+# Go tools
+go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+go install -v github.com/lc/gau/v2/cmd/gau@latest
+go install -v github.com/projectdiscovery/katana/cmd/katana@latest
+go install -v github.com/hakluke/hakrawler@latest
+go install -v github.com/ffuf/ffuf/v2@latest
+go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
+go install -v github.com/projectdiscovery/tlsx/cmd/tlsx@latest
+go install -v github.com/sensepost/gowitness@latest
+go install -v github.com/haccer/subjack@latest
+go install -v github.com/assetnote/kiterunner/cmd/kiterunner@latest
+go install -v github.com/bishopfox/jsluice/cmd/jsluice@latest
+go install -v github.com/tomnomnom/anew@latest
+
+# Kiterunner CLI name note:
+# - The upstream project compiles the CLI into a binary typically used as `kr`.
+# - If your install produces a `kiterunner` binary name, rename/symlink it to `kr` so commands below work.
+
+# Recommended (quality): URL normalization helpers
+# - unfurl helps extract hosts/paths/params cleanly (great for allowlisting)
+go install -v github.com/tomnomnom/unfurl@latest
+# - uro normalizes URLs and reduces duplicates (great before bucketing)
+pip install uro
+
+# Python tools
+pip install waymore
+
+# Hidden parameter discovery
+pip install arjun
+
+# ParamSpider
+git clone https://github.com/devanshbatham/ParamSpider tools/ParamSpider
+pip install -r tools/ParamSpider/requirements.txt
+
+# GitDorker
+git clone https://github.com/obheda12/GitDorker.git tools/GitDorker
+pip install -r tools/GitDorker/requirements.txt
+
+# XnLinkFinder (Python)
+git clone https://github.com/xnl-h4ck3r/xnLinkFinder.git tools/xnLinkFinder
+pip install -r tools/xnLinkFinder/requirements.txt
+
+2. Strategic Instructions (The "Brain" Logic)
+Input: outputs/activesubdomain.txt (List of subdomains).
+
+Core rule:
+- Stay in-scope. Do not follow links to out-of-scope domains.
+
+Before running:
+- Ensure folders exist: temp/agent1 and outputs
+- Ensure you have a content wordlist for ffuf (example: raft-small/medium, common.txt)
+	Save to: temp/agent1/content_wordlist.txt
+
+External files / credentials (download + place)
+
+1) FFUF content wordlist (required for Step F)
+- Recommended source: SecLists
+	https://github.com/danielmiessler/SecLists
+- Good choices (pick ONE and copy/rename to content_wordlist.txt):
+	- Discovery/Web-Content/raft-small-directories.txt
+	- Discovery/Web-Content/raft-medium-directories.txt
+	- Discovery/Web-Content/common.txt
+- Optional (if scope/time allows):
+	- Discovery/Web-Content/raft-large-directories.txt
+	- Discovery/Web-Content/raft-medium-files.txt (for file fuzzing)
+	- Discovery/Web-Content/api/ (API endpoint wordlists)
+	- Discovery/Web-Content/Logins.fuzz.txt (login/admin variations)
+- Save as: temp/agent1/content_wordlist.txt
+
+1b) Known-files + API-docs micro wordlist (required for Step A3)
+- You can create this manually (recommended) as a small list of high-signal paths:
+	- robots.txt
+	- sitemap.xml
+	- sitemap_index.xml
+	- .well-known/security.txt
+	- security.txt
+	- humans.txt
+	- swagger
+	- swagger-ui
+	- swagger-ui.html
+	- api-docs
+	- v2/api-docs
+	- v3/api-docs
+	- openapi.json
+	- swagger.json
+	- redoc
+- Save as: temp/agent1/knownfiles_and_apidocs.txt
+
+Wordlist strategy (recommended):
+- Start with raft-small/medium for fast wins.
+- If you see many 404s/no findings, switch to a more targeted list (api/, logins) instead of only going larger.
+- You can also combine multiple lists into temp/agent1/content_wordlist.txt (dedupe lines) for a single ffuf run.
+
+2) GitHub token (optional but recommended for Step E: GitDorker)
+- Create a token with appropriate permissions for search.
+- Provide to the tool via its expected config/env var mechanism.
+- If no token is available, skip GitDorker and log that it was skipped.
+
+3) Kiterunner wordlist (required for Step J)
+- Recommended: Assetnote compiled routes wordlists
+	- routes-small (faster): https://wordlists-cdn.assetnote.io/data/kiterunner/routes-small.kite.tar.gz
+	- routes-large (best coverage): https://wordlists-cdn.assetnote.io/data/kiterunner/routes-large.kite.tar.gz
+- Download ONE and extract the .kite file.
+- Save extracted file as:
+	temp/agent1/routes.kite
+
+Scope enforcement rule (important):
+- Build an allowlist of hosts from outputs/activesubdomain.txt
+- When collecting URLs (history/crawl/js/ffuf/git), DROP any URL whose host is not in that allowlist
+	(This prevents the pipeline from drifting into third-party SaaS/CDN domains)
+
+Normalization rule (important):
+- Before final output + before bucketing, normalize URLs (remove obvious dupes, standardize)
+- Use uro on URL lists whenever you merge sources
+
+# File contract (Step 2)
+# Input:
+# - outputs/activesubdomain.txt (from step 1)
+#
+# Intermediates written to temp/agent1/:
+# - ports_raw.txt
+# - ports_open.txt
+# - tlsx.txt
+# - screenshots/ (gowitness output)
+# - takeover_candidates_raw.txt
+# - live_seeds.txt
+# - host_fingerprints.txt
+# - known_files_hits.txt
+# - raw_history.txt
+# - all_urls.txt (merged + deduped, in-scope only)
+# - js_files.txt
+# - html_responses/ (saved HTML responses)
+# - js_responses/ (saved JS responses)
+# - response_manifest.txt (URL -> saved file mapping)
+# - hidden_params_raw.txt
+# - kiterunner_raw.txt
+#
+# Final analysis buckets (write to outputs/):
+# - outputs/open_ports.txt
+# - outputs/non_http_services.txt
+# - outputs/tls_hosts.txt
+# - outputs/takeover_candidates.txt
+# - outputs/screenshots_index.txt
+# - outputs/reports/agent1-recon-report.md (running report / decisions)
+# - outputs/endpoints.txt
+# - outputs/login_panels.txt
+# - outputs/cloud_buckets.txt
+# - outputs/sensitive_files.txt
+# - outputs/static_assets.txt
+# - outputs/hidden_params.txt
+# - outputs/api_docs_hits.txt
+# - outputs/robots_sitemaps_security.txt
+# - outputs/kiterunner_endpoints.txt
+
+Reporting (Mandatory)
+Goal:
+- Save the agent’s analysis decisions and key findings in ONE place for later vulnerability testing.
+
+Instruction:
+- Maintain a running report file during Step 2:
+	- outputs/reports/agent1-recon-report.md
+- At every Brain Stop (#2–#6), append a short section:
+	- What you observed (counts + notable responses)
+	- What you decided (rate/parallelism, which hosts to prioritize)
+	- What you will do next (next steps + which output files matter)
+
+Step 0: Coverage Checks (Mandatory before web vuln testing)
+Goal:
+- Ensure you do NOT miss exposure on non-default ports, non-HTTP services, TLS/cert hints, and takeover candidates.
+
+Core rule:
+- Stay in-scope. Do not scan or follow redirects to out-of-scope hosts.
+
+Step 0A: Port discovery (Mandatory)
+Tools: naabu (+ optional nmap)
+
+Instruction:
+- Run naabu on outputs/activesubdomain.txt to find open ports.
+- Keep it conservative (rate/parallelism) if Brain Stop #2 indicated WAF/rate limits.
+- Save raw + cleaned lists:
+	- temp/agent1/ports_raw.txt
+	- temp/agent1/ports_open.txt (host:port)
+
+Outputs:
+- outputs/open_ports.txt (clean, unique host:port)
+- outputs/non_http_services.txt (anything clearly not web: ssh, smtp, rdp, db ports)
+
+Optional validation:
+- If you find high-value ports/services, validate with nmap for accuracy.
+
+Step 0B: TLS/Certificate intel (Recommended)
+Tool: tlsx
+
+Instruction:
+- Run tlsx on hosts from outputs/activesubdomain.txt (or on web targets derived from ports).
+- Use it to extract certificate SANs/subjects and spot extra hostnames.
+- Any new hostnames must still pass scope rules before adding to Step 1/2 inputs.
+
+Outputs:
+- temp/agent1/tlsx.txt
+- outputs/tls_hosts.txt (any in-scope extra hostnames you can prove are in scope)
+
+Step 0C: Screenshot triage (Recommended)
+Tool: gowitness
+
+Instruction:
+- Screenshot the web targets (from temp/agent1/live_seeds.txt once created, and/or from outputs/open_ports.txt filtered to web ports).
+- Use this to quickly spot admin panels, staging apps, and distinct products.
+
+Outputs:
+- temp/agent1/screenshots/
+- outputs/screenshots_index.txt
+
+Step 0D: Subdomain takeover candidates (Scope-aware)
+Tool: subjack
+
+Instruction:
+- Run subjack on outputs/activesubdomain.txt to identify potential takeover indicators.
+- Treat results as candidates only; manual verification must follow program rules.
+
+Outputs:
+- temp/agent1/takeover_candidates_raw.txt
+- outputs/takeover_candidates.txt
+
+Step A: The Filter (Probing)
+Tool: httpx
+
+Logic: Do not scan dead domains. Check ports 80, 443, 8080, 8443.
+
+AI Decision: If a domain returns a 403 Forbidden or 401 Unauthorized, do not discard it. These are often Admin panels that are "live" but locked. Keep them.
+
+Output: Create a temp/agent1/live_seeds.txt list.
+
+Brain Stop #2 (Mandatory): Post-Probe Decisions
+Instruction to Jules:
+- STOP running tools.
+- Review temp/agent1/live_seeds.txt and quickly sanity-check:
+	- If temp/agent1/live_seeds.txt is empty: STOP. Do not continue Step 2.
+	  Re-check Step 1 output quality, scope, DNS resolution, and httpx flags/ports.
+	- Are many hosts returning 429/503/WAF pages?
+	- Any unexpected out-of-scope redirects?
+- Decide safe scan settings for later steps (rate/parallelism) based on this.
+- Append these decisions to: outputs/reports/agent1-recon-report.md
+
+Step A1: Fingerprinting (Mandatory)
+Tool: httpx
+
+Goal:
+- Capture quick fingerprints per live host to guide later testing (stack, server, redirects, WAF/CDN hints).
+
+Instruction:
+- Run httpx against temp/agent1/live_seeds.txt and write a fingerprint report.
+- Prefer enabling: status code, title, redirect location, IP, web-server header, tech detect.
+- Flag names vary by httpx version; choose the closest supported flags.
+
+Output:
+- temp/agent1/host_fingerprints.txt
+
+Brain Stop #3 (Mandatory): Fingerprint-Based Prioritization
+Instruction to Jules:
+- STOP running tools.
+- Review temp/agent1/host_fingerprints.txt and identify:
+	- Likely real apps vs parked/placeholder hosts
+	- API-looking hosts/paths (e.g., api., gateway., /api)
+	- WAF/CDN hints and rate-limit behavior
+- Use this to prioritize crawling/bruteforcing effort.
+- Append your prioritized host list + why to: outputs/reports/agent1-recon-report.md
+
+Step A2: HTML Extractor (Save HTML for offline analysis)
+Tool: httpx
+
+Goal:
+- Save the actual HTML responses from live targets for later manual review/diffing.
+
+Instruction:
+- Fetch live pages from temp/agent1/live_seeds.txt and store responses to temp/agent1/html_responses/
+- Prefer httpx response storage flags (names vary by version):
+	- `-sr` / `-store-response`
+	- `-srd temp/agent1/html_responses` / `-store-response-dir temp/agent1/html_responses`
+
+Output:
+- temp/agent1/html_responses/*
+
+Step A3: Known Files + API Docs Discovery (Mandatory)
+Tools: httpx + ffuf
+
+Goal:
+- Quickly find robots/sitemaps/security.txt and API documentation endpoints (Swagger/OpenAPI).
+
+Instruction:
+- Use temp/agent1/knownfiles_and_apidocs.txt as the wordlist.
+- For each live host, request https://HOST/FUZZ and/or http://HOST/FUZZ (keep in-scope only).
+- Store hits and split them into:
+	- robots/sitemap/security findings
+	- api docs findings (swagger/openapi)
+
+Outputs:
+- temp/agent1/known_files_hits.txt
+- outputs/robots_sitemaps_security.txt
+- outputs/api_docs_hits.txt
+
+Brain Stop #4 (Mandatory): API Docs / Sitemap Leverage
+Instruction to Jules:
+- STOP running tools.
+- If outputs/api_docs_hits.txt contains Swagger/OpenAPI docs, treat them as high-truth.
+- If robots/sitemaps reveal new paths, ensure they are added into the URL pool for merge.
+- Decide whether to focus crawling/ffuf/kiterunner on discovered basepaths (e.g., /api, /v1).
+- Append a short “API docs leverage” note to: outputs/reports/agent1-recon-report.md
+
+Step B: History Mining (The Time Machine)
+Tools: Waymore + Gau
+
+Logic: Developers often delete vulnerable pages but forget to remove them from archives.
+
+Instruction: Run Waymore for deeper archive pulls. Run Gau for broader pulls.
+Note: If you want to focus on recent history (e.g., last 2 years), do it via tool options if supported; otherwise post-filter by date.
+
+Output: Save to temp/agent1/raw_history.txt.
+
+Step C: Parameter Hunting (The Miner)
+Tool: ParamSpider
+
+Logic: We specifically want URLs that accept input (parameters), as these are attackable.
+
+Instruction: Run ParamSpider on the domains to extract parameterized URLs.
+Note: If ParamSpider does not support list input in your version, loop domains one-by-one.
+
+Step D: Active Crawling (The Spider)
+Tools: Katana + Hakrawler
+
+Logic: Visit the live sites now.
+
+AI Decision: Use Katana with JavaScript enabled (-jc). If Katana gets stuck or takes too long on a specific domain (e.g., > 10 mins), kill it and switch to Hakrawler for that domain.
+
+Step E: Source Code Recon (The Leak Hunter)
+Tool: GitDorker (Requires GitHub Token)
+
+Logic: Developers accidentally push internal links to GitHub.
+
+Instruction: Search GitHub for the domain name + keywords like "api", "secret", "admin".
+
+AI Note: If you don't have a GitHub token configured, skip this tool, but note in the logs that Source Code recon was skipped.
+
+Step F: Brute Force (The Guesser)
+Tool: Ffuf
+
+Logic: Crawlers can't see what isn't linked. You must guess.
+
+Instruction: Use a "Common Web Content" wordlist (temp/agent1/content_wordlist.txt). Fuzz for hidden directories (e.g., /.git, /backup, /api).
+
+AI Decision: Monitor response codes. If you see many 429 (Rate Limit) errors, automatically slow down the scan.
+
+Step G: Deep JS Analysis (The Surgeon)
+Tools: JSluice + XnLinkFinder
+
+Logic: Modern apps (React/Vue) hide all their logic in .js files.
+
+Instruction:
+
+Filter your current URL list to find all .js files.
+
+Run JSluice to extract secrets (AWS keys) and endpoints from within the code structure.
+
+Run XnLinkFinder as a backup to regex-match any strings that look like URLs.
+
+Step G2: JS Extractor (Save JS files for offline analysis)
+Tool: httpx
+
+Goal:
+- Save JavaScript files locally so you can re-run JSluice/XnLinkFinder later without refetching.
+
+Instruction:
+- Build temp/agent1/js_files.txt from the merged URL pool (only in-scope, only URLs ending with .js)
+- Fetch js_files.txt and store responses to temp/agent1/js_responses/
+- Prefer httpx response storage flags (names vary by version):
+	- `-sr` / `-store-response`
+	- `-srd temp/agent1/js_responses` / `-store-response-dir temp/agent1/js_responses`
+
+Output:
+- temp/agent1/js_files.txt
+- temp/agent1/js_responses/*
+
+Step G3: Response manifest (optional but recommended)
+Goal:
+- Make it easy to map saved files back to the URL that produced them.
+
+Instruction:
+- Write a simple manifest file listing URLs you fetched for HTML + JS and the corresponding stored filename.
+
+Output:
+- temp/agent1/response_manifest.txt
+
+Step J: API Route Bruteforcing (Mandatory)
+Tool: Kiterunner (kr)
+
+Goal:
+- Find API endpoints that classic crawling/ffuf often miss (method-specific routes, framework routes).
+
+Prereqs:
+- temp/agent1/routes.kite (downloaded + extracted)
+
+Instruction:
+- Run kr scan on temp/agent1/live_seeds.txt (or on the host list derived from it).
+- Use routes.kite and a sensible parallelism (avoid overloading targets).
+- Save raw output and extract discovered endpoints into a clean list.
+
+Outputs:
+- temp/agent1/kiterunner_raw.txt
+- outputs/kiterunner_endpoints.txt
+
+Step H: Merge + Dedupe (single corpus for analysis)
+Logic:
+- Merge outputs from: history, param mining, crawling, GitDorker, ffuf, JS extraction, known-files/api-docs hits, kiterunner endpoints
+- Remove duplicates (use anew if available)
+- Keep only in-scope URLs (enforce the allowlist: host must be in outputs/activesubdomain.txt)
+
+Recommended implementation detail:
+- Extract host with unfurl when enforcing allowlist
+- Run uro after merge (then dedupe again) to heavily reduce duplicates
+
+Output:
+- temp/agent1/all_urls.txt (deduped merged list)
+
+Brain Stop #5 (Mandatory): Final URL Corpus Quality Gate
+Instruction to Jules:
+- STOP running tools.
+- Verify temp/agent1/all_urls.txt is:
+	- In-scope only (host allowlist enforced)
+	- Normalized (uro applied)
+	- Duplicates minimized
+- If out-of-scope URLs exist, fix allowlist filtering and re-run merge.
+- Append corpus stats (line counts) + any filtering issues to: outputs/reports/agent1-recon-report.md
+
+3. The AI Analysis Task (Categorization) (Mandatory)
+Tell Jules to stop and process the data before continuing.
+
+Instruction: "Jules, now that you have collected URLs from these sources, merge them into temp/agent1/all_urls.txt, remove duplicates, keep only in-scope URLs, and intelligently sort them into these 5 priority buckets:"
+
+endpoints.txt -> High Priority. Any URL with parameters (?id=) or dynamic extensions (.php, .jsp). These will be used for SQLi/XSS testing.
+
+login_panels.txt -> High Priority. Any URL containing "admin", "login", "dashboard", "signin". These will be used for Auth testing.
+
+cloud_buckets.txt -> Medium Priority. URLs pointing to S3, Azure, or Google Cloud Storage. These will be checked for public access.
+
+sensitive_files.txt -> Critical Priority. URLs ending in .env, .json, .xml, .log. These often contain passwords.
+
+static_assets.txt -> Ignore. Images, CSS, Fonts. Separate these so we don't waste time scanning them.
+
+Step I: Hidden Parameter Discovery (Mandatory)
+Tool: Arjun
+
+Goal:
+- Discover hidden GET parameters on live endpoints that are not visible from crawling/archives.
+
+Instruction:
+- Run Arjun ONLY on high-value candidates (start from outputs/endpoints.txt; if that file is not created yet, use temp/agent1/all_urls.txt filtered to parameter-capable/dynamic endpoints).
+- Keep scope enforcement: only test URLs whose host is in outputs/activesubdomain.txt.
+- Save raw Arjun output for traceability, then generate a clean list of discovered parameterized URLs.
+
+Outputs:
+- temp/agent1/hidden_params_raw.txt
+- outputs/hidden_params.txt
+
+Brain Stop #6 (Mandatory): Testing Queue Preparation
+Instruction to Jules:
+- STOP running tools.
+- Review the high-value outputs:
+	- outputs/endpoints.txt
+	- outputs/login_panels.txt
+	- outputs/sensitive_files.txt
+	- outputs/hidden_params.txt
+	- outputs/api_docs_hits.txt
+	- outputs/kiterunner_endpoints.txt
+- Create a clear “next testing queue” plan (which files to test first and why).
+- Only after the plan is written, start vulnerability testing.
+- Write the final testing queue plan into: outputs/reports/agent1-recon-report.md
