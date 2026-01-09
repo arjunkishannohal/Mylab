@@ -1,2 +1,15 @@
-__pycache__/
+**/__pycache__/
 *.pyc
+
+# Recon artifacts / captures (do not commit)
+outputs/**
+temp/**
+manual/**
+
+# Keep directory skeleton
+!outputs/.gitkeep
+!outputs/reports/.gitkeep
+!temp/.gitkeep
+!temp/agent1/.gitkeep
+!manual/.gitkeep
+!manual/har/.gitkeep

@@ -1,5 +1,5 @@
 # Agent 2: HAR analysis (manual capture -> actionable testing data)
-# Goal: Take a large .har (50-100+ requests) and extract high-value testing data into ONE file.
+# Goal: Take a large .har (50-100+ requests) and extract high-value testing data into a small, consistent output set (one primary file + supporting report + JSON).
 # Scope: ONLY analyze data you captured in-scope.
 
 ## Inputs
@@ -7,7 +7,7 @@
 - Recon outputs (from Agent 1):
   - outputs/activesubdomain.txt (scope allowlist)
   - outputs/reports/agent1-recon-report.md (agent1 decisions)
-  - temp/agent1/all_urls.txt (merged URL corpus, if present)
+  - temp/agent1/url_corpus_all_in_scope.txt (merged URL corpus, if present)
 
 ## Outputs (Agent 2)
 - outputs/agent2/important_data.txt (single consolidated extraction)
@@ -53,10 +53,11 @@
 
 ## Execution
 1) Place your HAR file(s) into:
-   - manual/har/
+  - manual/har/ (create it if it doesn’t exist)
 
 2) Run the analyzer (Windows):
-   - python tools/agent2/har_analyzer.py --har manual/har/<file>.har
+  - python tools/agent2/har_analyzer.py --har manual/har/<file>.har
+  - If you run it from a different working directory, add: --workspace d:\\wallet\\Mylab
 
 3) Review outputs:
    - outputs/agent2/important_data.txt

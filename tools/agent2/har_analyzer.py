@@ -87,7 +87,7 @@ def _norm_host(host: str) -> str:
 def read_text_file_lines(path: str) -> List[str]:
     if not path or not os.path.exists(path):
         return []
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+    with open(path, "r", encoding="utf-8-sig", errors="ignore") as f:
         return [line.strip() for line in f if line.strip()]
 
 
@@ -227,14 +227,15 @@ def main() -> int:
     safe_mkdir(outdir)
 
     allowlist_hosts = load_allowlist_hosts(workspace)
+    has_allowlist = bool(allowlist_hosts)
 
     agent1_report_path = os.path.join(workspace, "outputs", "reports", "agent1-recon-report.md")
     agent1_report_text = ""
     if os.path.exists(agent1_report_path):
-        with open(agent1_report_path, "r", encoding="utf-8", errors="ignore") as f:
+        with open(agent1_report_path, "r", encoding="utf-8-sig", errors="ignore") as f:
             agent1_report_text = f.read()
 
-    with open(har_path, "r", encoding="utf-8", errors="ignore") as f:
+    with open(har_path, "r", encoding="utf-8-sig", errors="ignore") as f:
         har = json.load(f)
 
     entries = (((har.get("log") or {}).get("entries")) or [])
@@ -281,7 +282,7 @@ def main() -> int:
 
         if host:
             host_counter[host] += 1
-            if allowlist_hosts and host not in allowlist_hosts:
+            if has_allowlist and host not in allowlist_hosts:
                 out_of_scope_hosts.add(host)
 
         method_counter[method] += 1
@@ -408,11 +409,17 @@ def main() -> int:
         f.write(f"HAR: {os.path.relpath(har_path, workspace)}\n")
         f.write(f"Entries processed: {total_entries}\n")
         f.write("\n=== Scope ===\n")
-        f.write(f"Allowlist present: {'yes' if allowlist_hosts else 'no'}\n")
+        f.write(f"Allowlist present: {'yes' if has_allowlist else 'no'}\n")
         f.write(f"Unique hosts in HAR: {len(host_counter)}\n")
-        f.write("Out-of-scope hosts (DO NOT TEST unless explicitly in scope):\n")
-        for h in sorted(out_of_scope_hosts):
-            f.write(f"- {h}\n")
+        if has_allowlist:
+            f.write("Out-of-scope hosts (DO NOT TEST unless explicitly allowed):\n")
+            for h in sorted(out_of_scope_hosts):
+                f.write(f"- {h}\n")
+        else:
+            f.write(
+                "Allowlist file missing/empty (outputs/activesubdomain.txt). "
+                "Scope drift detection is skipped; follow the program scope manually.\n"
+            )
 
         f.write("\n=== Auth / Tokens (redacted previews) ===\n")
         if not auth_headers_found and not cookies_seen and not jwt_samples:
@@ -478,7 +485,9 @@ def main() -> int:
             f.write("\n".join(excerpt) + "\n\n")
 
         f.write("## Scope drift\n")
-        if out_of_scope_hosts:
+        if not has_allowlist:
+            f.write("Allowlist file missing/empty (outputs/activesubdomain.txt). Scope drift check skipped.\n")
+        elif out_of_scope_hosts:
             f.write("Out-of-scope hosts seen in HAR (do not test unless explicitly allowed):\n")
             for h in sorted(out_of_scope_hosts):
                 f.write(f"- {h}\n")

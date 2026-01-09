@@ -128,6 +128,46 @@ Instruction to Jules:
 - If quality is bad, re-run validation with tighter wildcard filtering and resolvers.
 - Only after this gate passes, start Step 2.
 
+Artifact retention (Mandatory)
+- Do NOT delete the temp folder after the run.
+- Keep all intermediate artifacts in: temp/agent1/
+	- This includes: list_*.txt, candidates_all.txt, resolved.txt, resolvers/wordlists used.
+- If disk space is an issue, compress/archive temp/agent1/ instead of removing it.
+
+Error / Skip Reporting (Mandatory)
+Goal:
+- If a tool fails (missing dependency, command not found, resolver/wordlist missing, timeouts) you must record it so the run is reproducible and fixable.
+
+Instruction:
+- Maintain a separate error/skip report during Step 1:
+	- outputs/reports/agent1-error-report.md
+
+When to write an entry:
+- Tool could not execute (install missing / command not found)
+- Prerequisite missing (temp/agent1/resolvers.txt or temp/agent1/subdomain_wordlist.txt missing)
+- Tool executed but output is empty due to errors/timeouts
+- Tool was intentionally skipped (e.g., reverse DNS not in scope)
+
+Required fields per entry (copy/paste template):
+
+### <Tool/Prereq Name>
+- Status: failed | skipped | partial
+- Step: (Passive | Archives | Bruteforce | ReverseDNS | Permutations | Validation)
+- Command(s):
+	- <exact command you ran>
+- Error (copy exact message):
+	- <stderr/stdout snippet>
+- Reason (one sentence):
+	- <why it failed or why you skipped>
+- Impact:
+	- <what coverage is missing / what outputs will be absent>
+- Mitigation / Next fix:
+	- <what to install/change next time>
+
+Rules:
+- Do not write secrets/tokens into the report.
+- If reverse DNS is out of scope, explicitly record it as "skipped (out of scope)".
+
 Final output requirements:
 - outputs/activesubdomain.txt must contain NO duplicates
 - outputs/activesubdomain.txt must contain ONLY DNS-resolving ("live") subdomains
