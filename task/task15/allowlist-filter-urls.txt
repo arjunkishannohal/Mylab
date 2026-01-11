@@ -36,6 +36,29 @@
 # Example C: filter a combined URL corpus
 #   python task\task21\allowlist_filter_urls.py --allowlist outputs\activesubdomain.txt --in temp\agent1\url_corpus_raw.txt --out outputs\url_corpus_all_in_scope.txt
 
+# Example D: update the canonical combined corpus (deterministic)
+# This keeps a single file other tasks can consume: outputs\url_corpus_all_in_scope.txt
+#
+# It merges whatever exists now (e.g., from Task 8 cariddi) with the latest filtered corpora.
+New-Item -ItemType Directory -Force temp\agent1 | Out-Null
+
+$inputs = @()
+if (Test-Path outputs\gau_urls_in_scope.txt) { $inputs += 'outputs\gau_urls_in_scope.txt' }
+if (Test-Path outputs\katana_urls_in_scope.txt) { $inputs += 'outputs\katana_urls_in_scope.txt' }
+if (Test-Path outputs\url_corpus_all_in_scope.txt) { $inputs += 'outputs\url_corpus_all_in_scope.txt' }
+
+if ($inputs.Count -eq 0) { throw 'No inputs found to build outputs\url_corpus_all_in_scope.txt' }
+
+$tmp = 'temp\agent1\_url_corpus_all_in_scope_tmp.txt'
+Get-Content @inputs |
+	Where-Object { $_ } |
+	ForEach-Object { $_.Trim() } |
+	Where-Object { $_ } |
+	Sort-Object -Unique |
+	Set-Content -Encoding utf8 $tmp
+
+Move-Item -Force $tmp outputs\url_corpus_all_in_scope.txt
+
 # ----------------------------
 # 4) Output sanity check
 # ----------------------------

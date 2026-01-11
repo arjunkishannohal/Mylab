@@ -9,6 +9,9 @@ Input (contract)
 Outputs (contract)
 - outputs/live_base_urls.txt   (scheme://host[:port])
 - outputs/live_seeds.txt       (optional extra metadata / raw output)
+ - outputs/cariddi/cariddi_findings.txt        (cariddi raw findings)
+ - outputs/cariddi/cariddi_urls_in_scope.txt   (scope-filtered URLs extracted from cariddi output)
+ - outputs/url_corpus_all_in_scope.txt         (combined URL corpus; created/updated)
 
 Run (PowerShell; from repo root)
 New-Item -ItemType Directory -Force temp/agent1 | Out-Null

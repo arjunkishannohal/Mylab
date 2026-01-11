@@ -25,6 +25,7 @@ These are the “producer → consumer” contracts across the pipeline:
 - `outputs/katana_urls.txt` — crawler URL corpus (Tool 13/14 katana).
 - `outputs/gau_urls.txt` — historical URL corpus (Tool 14/15 gau).
 - `outputs/gau_urls_in_scope.txt`, `outputs/katana_urls_in_scope.txt` — allowlist-filtered URL corpora (Tool 15/16).
+- `outputs/url_corpus_all_in_scope.txt` — combined in-scope URL corpus (maintained by Task 8 + Task 15/16 merge step).
 - `outputs/api_endpoints_live.txt` — validated API endpoints (Tool 18/19 httpx-probe-api-endpoints).
 - `outputs/js_urls.txt` — discovered JS asset URLs (Tool 19/20).
 - `outputs/js_endpoints_from_js.txt` — endpoints/paths extracted offline from JS (Tool 21/22).
@@ -47,6 +48,7 @@ You can run all steps, but this ordering is the typical “full pipeline”:
 
 2) Live discovery
 - Task 8: `httpx` (host probe) → **`outputs/live_base_urls.txt`**
+  - Also runs `cariddi` enrichment → `outputs/cariddi/*` and updates `outputs/url_corpus_all_in_scope.txt`
 - Task 12: `naabu` (ports) → **`outputs/ports_open_hostport.txt`**
 - Task 12/13: `httpx` (host:port probe) → **`outputs/live_hostport_urls.txt`**
 - Task 9: `httpx` (knownfiles + api-docs probe) → `outputs/web_knownfiles_robots_sitemaps_security_urls.txt`, `outputs/api_docs_urls.txt`
@@ -157,6 +159,9 @@ Below is the per-run-card “tool I/O contract”. If a task folder contains mul
 - Outputs:
   - `outputs/live_base_urls.txt`
   - Optional: `outputs/live_seeds.txt`
+  - `outputs/cariddi/cariddi_findings.txt` (cariddi findings)
+  - `outputs/cariddi/cariddi_urls_in_scope.txt` (scope-filtered URLs)
+  - `outputs/url_corpus_all_in_scope.txt` (combined URL corpus; created/updated)
 
 ### Task 9 — httpx knownfiles + api-docs quick probe
 - Run-card: `task/task9/httpx-knownfiles-apidocs.txt`
