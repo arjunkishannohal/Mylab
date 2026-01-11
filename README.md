@@ -75,8 +75,11 @@ You can run all steps, but this ordering is the typical “full pipeline”:
 - Task 27/28: `subjack` → `outputs/coverage_takeover_candidates_subjack.txt`
 - Task 30: `tlsx` → `outputs/coverage_tls_sans_in_scope.txt`
 
-7) Manual enrichment
+7) Manual enrichment (HAR analysis)
 - Task 29: HAR analysis → `outputs/har/*`
+  - Account-specific: `outputs/har/accounts/<harname>_auth.txt` (tokens, IDs, cookies)
+  - Common data: `outputs/har/common_data.txt` (endpoints, headers, CORS)
+  - Deep analysis guide included — not just script, do manual investigation
 
 ## Run-card reference (inputs → outputs)
 
@@ -337,18 +340,22 @@ Below is the per-run-card “tool I/O contract”. If a task folder contains mul
   - `outputs/nmap/` + `outputs/nmap_index.txt`
   - `outputs/coverage_takeover_candidates_subjack.txt`
 
-### Task 29 — HAR analysis (Agent 2)
-- Run-card:
-  - `task/task29/har-analysis.txt`
-- Tool:
-  - `task/task29/har_analyzer.py`
+### Task 29 — HAR Analysis (Manual Enrichment)
+- Run-card: `task/task29/har-analysis.txt` (includes deep analysis guide)
+- Base script: `task/task29/har_analyzer.py` (starting point — do manual analysis too)
 - Inputs:
-  - `manual/har/*.har`
-  - `outputs/activesubdomain.txt`
+  - `manual/har/*.har` (e.g., `user1.har`, `user2.har` for 2-account IDOR testing)
+  - `outputs/activesubdomain.txt` (scope allowlist)
 - Outputs:
-  - `outputs/har/important_data.txt`
-  - `outputs/har/har-report.md`
-  - `outputs/har/har_summary.json`
+  - `outputs/har/accounts/<harname>_auth.txt` — per-account: tokens, cookies, IDs (FULL VALUES)
+  - `outputs/har/accounts/<harname>_auth.json` — per-account: machine-readable
+  - `outputs/har/common_data.txt` — shared: endpoints, headers, CORS
+  - `outputs/har/har-report.md` — summary report
+  - `outputs/har/har_summary.json` — machine-readable summary
+- Notes:
+  - Script is a starting point; manual investigation is MORE IMPORTANT
+  - Run-card includes: HAR structure, deep analysis checklist, custom script examples
+  - Designed for test accounts (no redaction — full token/ID values preserved)
 
 ### Task 30 — tlsx
 - Run-card: `task/task30/tlsx.txt`
@@ -360,9 +367,9 @@ Below is the per-run-card “tool I/O contract”. If a task folder contains mul
 
 ## Helpers
 
-- `tools/extract_workflow_contracts.py` → writes `outputs/workflow_extracted.json` (machine-readable run-card I/O inventory).
-- `tools/scan_temp_agent1_refs.py` → writes `outputs/temp_agent1_refs_report.{md,json}` (find lingering `temp/agent1` references in docs/run-cards/scripts).
-- `tools/triage_temp_agent1_refs.py` → prints a heuristic shortlist from the JSON report.
+- `tools/agent1/assets/allowlist_filter_urls.py` — filter URLs by scope allowlist
+- `tools/agent1/assets/openapi_extractor.py` — extract endpoints from OpenAPI specs
+- `task/task29/har_analyzer.py` — HAR analysis base script (account-specific + common data)
 
 ## Notes on duplicates
 
