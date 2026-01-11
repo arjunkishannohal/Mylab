@@ -35,7 +35,10 @@ mindmap
         input: temp/agent1/list_{1,2,3,4,5}*
         output: temp/agent1/list_5_permutations.txt
       Task_7_Puredns_Resolve
-        input: temp/agent1/candidates_all.txt
+        input: temp/agent1/list_1_passive.txt + temp/agent1/list_2_archives.txt + temp/agent1/list_3_bruteforce.txt
+        input: (optional) temp/agent1/list_4_reverse.txt + (optional) temp/agent1/list_5_permutations.txt
+        input: temp/agent1/resolvers_good.txt
+        intermediate: temp/agent1/candidates_all.txt
         output: outputs/activesubdomain.txt
     Live_Discovery
       Task_8_Httpx
