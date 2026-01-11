@@ -1,0 +1,110 @@
+# puredns (resolve + wildcard filtering) — Tool 7
+
+Install
+# puredns
+go install -v github.com/d3mondev/puredns/v2/cmd/puredns@latest
+
+Prerequisite (required by puredns): massdns
+# Recommended to run under WSL (Ubuntu).
+# From puredns README (Debian/Ubuntu):
+#   git clone https://github.com/blechschmidt/massdns.git
+#   cd massdns
+#   make
+#   sudo make install
+
+Goal / Contract outputs
+- Inputs: temp/agent1/candidates_all.txt + temp/agent1/resolvers_good.txt
+- Outputs:
+  - temp/agent1/resolved.txt (validated, wildcard-filtered domains)
+  - outputs/activesubdomain.txt (final allowlist; deduped + normalized)
+  - outputs/subdomains_candidates_all.txt (copy of candidates_all.txt for audit/reuse)
+  - outputs/subdomains_resolved.txt (copy of resolved.txt for audit/reuse)
+  - Optional debug artifacts:
+    - temp/agent1/wildcards.txt
+    - temp/agent1/massdns.txt
+
+  Resolver input (required)
+  - Yes, Tool 7 needs resolvers.
+  - puredns uses the resolver list to do mass DNS lookups and to validate + filter wildcard/poisoned answers.
+
+  Resolver setup (pick ONE)
+  1) Best (recommended): generate a pruned list
+    - Follow: task/task5/resolver-prune-test.txt
+    - Output should be: temp/agent1/resolvers_good.txt
+
+  2) Fast fallback: use the curated list
+    PowerShell (from repo root):
+    New-Item -ItemType Directory -Force temp/agent1 | Out-Null
+    Copy-Item task/task5/resolvers_curated.txt temp/agent1/resolvers_good.txt -Force
+
+  3) If you already have a big list
+    - Put it at: temp/agent1/resolvers_2000.txt
+    - Then change -r below to point to that file
+
+Build candidates_all.txt (Linux/WSL; from repo root)
+mkdir -p temp/agent1 outputs
+cat \
+  temp/agent1/list_1_passive.txt \
+  temp/agent1/list_2_archives.txt \
+  temp/agent1/list_3_bruteforce.txt \
+  temp/agent1/list_4_reverse.txt 2>/dev/null \
+  temp/agent1/list_5_permutations.txt 2>/dev/null \
+  | tr '[:upper:]' '[:lower:]' \
+  | sed 's/\.$//' \
+  | sed '/^$/d' \
+  | sort -u \
+  > temp/agent1/candidates_all.txt
+
+# Also persist an outputs/ copy (important artifact)
+cp -f temp/agent1/candidates_all.txt outputs/subdomains_candidates_all.txt
+
+Run resolve + wildcard filtering (Linux/WSL)
+# -r specifies public resolvers. (puredns defaults to ./resolvers.txt if present)
+# Tune these if needed:
+# - --wildcard-tests 50  (better wildcard accuracy on load-balanced DNS)
+# - --wildcard-batch 1000000 (reduce RAM use on huge inputs)
+
+puredns resolve temp/agent1/candidates_all.txt \
+  -r temp/agent1/resolvers_good.txt \
+  --wildcard-tests 50 \
+  --wildcard-batch 1000000 \
+  --write temp/agent1/resolved.txt \
+  --write-wildcards temp/agent1/wildcards.txt \
+  --write-massdns temp/agent1/massdns.txt
+
+Finalize allowlist (dedupe + normalize)
+cat temp/agent1/resolved.txt \
+  | tr '[:upper:]' '[:lower:]' \
+  | sed 's/\.$//' \
+  | sed '/^$/d' \
+  | sort -u \
+  > outputs/activesubdomain.txt
+
+# Also persist an outputs/ copy (important artifact)
+cp -f temp/agent1/resolved.txt outputs/subdomains_resolved.txt
+
+9-minute rule (batch/resume strategy)
+- Prefer batching at the input stage.
+- If candidates_all.txt is very large, split it and run resolve per chunk:
+
+split -l 200000 temp/agent1/candidates_all.txt temp/agent1/cand_
+: > temp/agent1/resolved.txt
+for f in temp/agent1/cand_*; do
+  puredns resolve "$f" -r temp/agent1/resolvers_good.txt --wildcard-tests 50 --wildcard-batch 500000 \
+    --write temp/agent1/_resolved_tmp.txt --write-wildcards temp/agent1/_wild_tmp.txt --write-massdns temp/agent1/_massdns_tmp.txt
+  cat temp/agent1/_resolved_tmp.txt >> temp/agent1/resolved.txt
+  rm -f temp/agent1/_resolved_tmp.txt temp/agent1/_wild_tmp.txt temp/agent1/_massdns_tmp.txt
+  # Stop here if your environment enforces a 9-min limit; resume with the next file.
+done
+sort -u temp/agent1/resolved.txt -o temp/agent1/resolved.txt
+cat temp/agent1/resolved.txt | sort -u > outputs/activesubdomain.txt
+
+# Also persist outputs copies (important artifacts)
+cp -f temp/agent1/candidates_all.txt outputs/subdomains_candidates_all.txt
+cp -f temp/agent1/resolved.txt outputs/subdomains_resolved.txt
+
+Notes
+- puredns does not dedupe automatically; always sort -u your inputs/outputs.
+- If you don’t have resolvers_good.txt yet, generate it using: task/task5/resolver-prune-test.txt
+- Fallback options: temp/agent1/resolvers_2000.txt or task/task5/resolvers_curated.txt
+- Do not store secrets/tokens in any run-card.

@@ -1,0 +1,22 @@
+# github-subdomains
+
+Install
+go install github.com/gwen001/github-subdomains@latest
+
+Run (Linux; from repo root)
+# Token via env var (recommended)
+export GITHUB_TOKEN='<github_token>'
+
+# PowerShell:
+# $env:GITHUB_TOKEN = '<github_token>'
+
+mkdir -p temp/agent1
+github-subdomains -d <domain> -e -o temp/agent1/github-subdomains.txt
+
+Merge into passive list (dedupe)
+cat temp/agent1/list_1_passive.txt temp/agent1/github-subdomains.txt \
+  | tr '[:upper:]' '[:lower:]' \
+  | sed 's/\.$//' \
+  | sed '/^$/d' \
+  | sort -u \
+  > temp/agent1/list_1_passive.txt

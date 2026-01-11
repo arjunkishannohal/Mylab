@@ -1,0 +1,130 @@
+# Tool 23 — nuclei (web vulnerability templates scan) — STRICT RUN-CARD
+# Goal: scan discovered live HTTP targets with nuclei templates.
+# Inputs (contract): at least ONE of these should exist (URLs, one per line)
+#   - outputs/live_base_urls.txt
+#   - outputs/live_hostport_urls.txt
+#   - outputs/api_endpoints_live.txt
+#   - outputs/js_urls_live.txt
+#   - outputs/js_composed_live.txt
+# Outputs (contract):
+#   - outputs/nuclei_targets_urls.txt           (normalized, deduped targets)
+#   - temp/agent1/nuclei_findings_raw.txt
+#   - outputs/nuclei_findings.txt               (deduped final)
+# Logs:
+#   - temp/agent1/logs/nuclei_YYYYMMDD_HHMMSS.log
+# Time rule: keep each command under ~9 minutes (batch if needed).
+
+# ----------------------------
+# 1) Install / verify
+# ----------------------------
+# Option A (recommended): via go
+#   go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+#   nuclei -version
+#
+# First-time templates setup / update:
+#   nuclei -update-templates
+
+# ----------------------------
+# 2) STRICT preflight + setup
+# ----------------------------
+#   New-Item -ItemType Directory -Force temp\agent1 | Out-Null
+#   New-Item -ItemType Directory -Force temp\agent1\logs | Out-Null
+#
+# Log file
+#   $ts = Get-Date -Format 'yyyyMMdd_HHmmss'
+#   $log = "temp\\agent1\\logs\\nuclei_$ts.log"
+#   "[nuclei] start $ts" | Set-Content $log
+#
+# Reset outputs
+#   Remove-Item -ErrorAction SilentlyContinue outputs\nuclei_targets_urls.txt
+#   Remove-Item -ErrorAction SilentlyContinue temp\agent1\nuclei_findings_raw.txt
+#   Remove-Item -ErrorAction SilentlyContinue outputs\nuclei_findings.txt
+
+# ----------------------------
+# 3) Build targets list (combine any existing input files)
+# ----------------------------
+# Collect whichever inputs exist
+#   $candidates = @(
+#     'outputs\live_base_urls.txt',
+#     'outputs\live_hostport_urls.txt',
+#     'outputs\api_endpoints_live.txt',
+#     'outputs\js_urls_live.txt',
+#     'outputs\js_composed_live.txt'
+#   )
+#
+#   $existing = $candidates | Where-Object { Test-Path $_ }
+#   if ($existing.Count -lt 1) { throw "No nuclei inputs found. Provide at least one live URL list file (outputs\\... or temp\\agent1\\...)." }
+#
+# Normalize + dedupe
+#   $all = @()
+#   foreach ($p in $existing) {
+#     $all += Get-Content $p
+#   }
+#   $all |
+#     Where-Object { $_ -and $_.Trim() -ne '' } |
+#     ForEach-Object { $_.Trim() } |
+#     Sort-Object -Unique |
+#     Set-Content outputs\nuclei_targets_urls.txt
+#
+# Sanity count
+#   $n = (Get-Content outputs\nuclei_targets_urls.txt).Count
+#   if ($n -lt 1) { throw "No targets in outputs\\nuclei_targets_urls.txt" }
+#   Write-Host "[nuclei] targets: $n"
+
+# ----------------------------
+# 4) Run nuclei (baseline)
+# ----------------------------
+# Notes:
+# - Keep concurrency moderate to avoid WAF/rate-limits.
+# - -timeout is per request; keep low to fit 9-minute rule.
+# - If your target program forbids certain template classes, add excludes via -etags/-exclude.
+#
+# Baseline scan:
+#   nuclei -l outputs\nuclei_targets_urls.txt -timeout 9 -retries 1 -c 25 -rl 50 -silent -o temp\agent1\nuclei_findings_raw.txt 2>&1 | Tee-Object -FilePath $log -Append
+
+# Optional: JSONL output (good for parsing)
+#   nuclei -l outputs\nuclei_targets_urls.txt -timeout 9 -retries 1 -c 25 -rl 50 -silent -jsonl -o temp\agent1\nuclei_findings_raw.txt 2>&1 | Tee-Object -FilePath $log -Append
+
+# ----------------------------
+# 5) Finalize (dedupe)
+# ----------------------------
+#   if (Test-Path temp\agent1\nuclei_findings_raw.txt) {
+#     Get-Content temp\agent1\nuclei_findings_raw.txt |
+#       Where-Object { $_ -and $_.Trim() -ne '' } |
+#       ForEach-Object { $_.Trim() } |
+#       Sort-Object -Unique |
+#       Set-Content outputs\nuclei_findings.txt
+#   }
+
+# ----------------------------
+# 6) 9-minute batching
+# ----------------------------
+# Use if nuclei cannot finish within the time rule.
+#
+# Create chunks:
+#   $in = 'outputs\\nuclei_targets_urls.txt'
+#   $chunkSize = 1500
+#   $outDir = 'temp\\agent1\\chunks_nuclei'
+#   New-Item -ItemType Directory -Force $outDir | Out-Null
+#   $lines = Get-Content $in
+#   $i = 0
+#   for ($p = 0; $p -lt $lines.Count; $p += $chunkSize) {
+#     $chunk = $lines[$p..([Math]::Min($p+$chunkSize-1, $lines.Count-1))]
+#     $chunkPath = Join-Path $outDir ("chunk_{0:d4}.txt" -f $i)
+#     $chunk | Set-Content $chunkPath
+#     $i++
+#   }
+#
+# Run per chunk (append raw):
+#   Remove-Item -ErrorAction SilentlyContinue temp\\agent1\\nuclei_findings_raw.txt
+#   Get-ChildItem $outDir -Filter 'chunk_*.txt' | Sort-Object Name | ForEach-Object {
+#     $chunk = $_.FullName
+#     Write-Host "[nuclei] scanning $chunk"
+#     nuclei -l $chunk -timeout 9 -retries 1 -c 25 -rl 50 -silent -o temp\\agent1\\_nuclei_part.txt 2>&1 | Tee-Object -FilePath $log -Append
+#     if (Test-Path temp\\agent1\\_nuclei_part.txt) {
+#       Get-Content temp\\agent1\\_nuclei_part.txt | Add-Content temp\\agent1\\nuclei_findings_raw.txt
+#       Remove-Item temp\\agent1\\_nuclei_part.txt
+#     }
+#   }
+#
+# After batching, run section 5 to dedupe -> final.

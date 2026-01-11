@@ -1,0 +1,21 @@
+# waymore
+# use approch that can give maximuim output 
+
+Install
+pip install waymore
+
+Run (Linux; from repo root)
+# Archives for hosts/URLs
+mkdir -p temp/agent1
+waymore -i <domain> > temp/agent1/waymore_urls.log
+
+# Extract hosts for Task1 contract output
+cat temp/agent1/waymore_urls.log \
+  | grep -E '^https?://' \
+  | awk -F/ '{print $3}' \
+  | sed 's/:.*$//' \
+  | tr '[:upper:]' '[:lower:]' \
+  | sed 's/\.$//' \
+  | sed '/^$/d' \
+  | sort -u \
+  > temp/agent1/list_2_archives.txt

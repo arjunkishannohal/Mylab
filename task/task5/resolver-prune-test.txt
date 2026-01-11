@@ -1,0 +1,43 @@
+# Resolver prune test (remove dead/poisoned resolvers)
+# Goal: generate a clean resolver list for puredns.
+
+Why this matters
+- A huge resolver list (e.g., 2000) is NOT automatically better.
+- Dead/poisoned/slow resolvers cause false negatives and noisy outputs.
+- In practice, 50–200 GOOD resolvers often beats 2000 random ones.
+
+Best starting point
+- Trickest “resolvers” is already curated. If you still want to prune locally, run this test.
+
+Step 1 — download a raw resolver list
+PowerShell:
+New-Item -ItemType Directory -Force temp\agent1 | Out-Null
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/trickest/resolvers/main/resolvers.txt" -OutFile temp\agent1\resolvers_raw.txt
+
+(Optional) take first 2000
+PowerShell:
+Get-Content temp\agent1\resolvers_raw.txt | Where-Object { $_ -match '^(\d{1,3}\.){3}\d{1,3}$' } | Select-Object -First 2000 | Set-Content -Encoding ascii temp\agent1\resolvers_2000.txt
+
+Step 2 — run dnsvalidator to prune dead/poisoned resolvers (WSL recommended)
+# dnsvalidator repo: https://github.com/vortexau/dnsvalidator
+# It validates answers against baseline resolvers and removes bad servers.
+
+Linux/WSL:
+mkdir -p temp/agent1
+git clone --depth 1 https://github.com/vortexau/dnsvalidator.git temp/_dnsvalidator
+cd temp/_dnsvalidator
+python3 setup.py install --user
+cd ../..
+
+# Prune:
+# -threads: tune to avoid ISP blocks; start 20–50
+# -o: output “good” resolvers
+# -tL supports local file paths too
+~/.local/bin/dnsvalidator -tL temp/agent1/resolvers_raw.txt -threads 25 -o temp/agent1/resolvers_good.txt --silent
+
+Step 3 — choose which file puredns should use
+- Preferred: temp/agent1/resolvers_good.txt
+- If it’s too small (<50), rerun dnsvalidator with lower threads/longer timeout or use task/task5/resolvers_curated.txt
+
+Smoke test (optional)
+- Use your candidate list and run puredns resolve with the pruned resolvers.

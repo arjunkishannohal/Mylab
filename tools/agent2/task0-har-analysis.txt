@@ -1,0 +1,24 @@
+HAR Analysis (Agent 2) — Notes / Contract
+
+Goal
+- Parse HAR captures you collected (browser/mobile traffic).
+- Extract endpoints, parameters, headers, cookies, and other high-signal items.
+- Enforce scope with outputs/activesubdomain.txt.
+- Redact sensitive values (tokens/cookies/secrets) in outputs.
+
+Inputs
+- manual/har/*.har
+- outputs/activesubdomain.txt
+
+Outputs
+- outputs/agent2/important_data.txt
+- outputs/agent2/agent2-har-report.md
+- outputs/agent2/har_summary.json
+
+Run (PowerShell)
+- python tools\agent2\har_analyzer.py --har manual\har\sample.har --workspace .
+
+Notes
+- The analyzer makes no network calls.
+- Only in-scope hosts (exact hostname match) are included.
+- If you want suffix-based scope (e.g., *.example.com), expand outputs/activesubdomain.txt first.

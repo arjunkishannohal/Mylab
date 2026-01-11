@@ -1,0 +1,95 @@
+# Tool 21 — httpx (fetch JS responses) — STRICT RUN-CARD
+# Goal: download JavaScript files to disk for offline analysis.
+# Input (contract):
+#   - outputs/js_urls.txt      (URLs to .js/.mjs/.cjs)
+# Outputs (contract):
+#   - temp/agent1/js_fetch_dir/    (saved responses)
+#   - temp/agent1/js_fetch_index.txt
+#   - temp/agent1/logs/httpx_fetch_js_YYYYMMDD_HHMMSS.log
+# Time rule: keep each command under ~9 minutes (batch if needed).
+
+# ----------------------------
+# 1) Install / verify
+# ----------------------------
+# Option A (recommended): via go
+#   go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+#   httpx -version
+#
+# Verify flags for your version:
+#   httpx -h
+# You want a build that supports saving responses (commonly: -sr and -srd).
+
+# ----------------------------
+# 2) STRICT preflight + setup
+# ----------------------------
+#   New-Item -ItemType Directory -Force temp\agent1 | Out-Null
+#   New-Item -ItemType Directory -Force temp\agent1\logs | Out-Null
+#   New-Item -ItemType Directory -Force outputs | Out-Null
+#   if (!(Test-Path outputs\js_urls.txt)) { throw "Missing outputs\\js_urls.txt" }
+#
+# Normalize input (trim, unique)
+#   Get-Content outputs\js_urls.txt |
+#     Where-Object { $_ -and $_.Trim() -ne "" } |
+#     ForEach-Object { $_.Trim() } |
+#     Sort-Object -Unique |
+#     Set-Content temp\agent1\httpx_js_targets.txt
+#
+# Sanity count
+#   $n = (Get-Content temp\agent1\httpx_js_targets.txt).Count
+#   if ($n -lt 1) { throw "No targets found in temp\\agent1\\httpx_js_targets.txt" }
+#   Write-Host "[httpx fetch js] targets: $n"
+#
+# Log file
+#   $ts = Get-Date -Format 'yyyyMMdd_HHmmss'
+#   $log = "temp\\agent1\\logs\\httpx_fetch_js_$ts.log"
+#   "[httpx fetch js] start $ts" | Set-Content $log
+#
+# Output dir
+#   $outDir = 'temp\\agent1\\js_fetch_dir'
+#   New-Item -ItemType Directory -Force $outDir | Out-Null
+#
+# Reset index
+#   Remove-Item -ErrorAction SilentlyContinue temp\agent1\js_fetch_index.txt
+
+# ----------------------------
+# 3) Fetch (baseline)
+# ----------------------------
+# NOTE: httpx response-save flags can differ by version.
+# Common pattern:
+#   -sr        (store response)
+#   -srd <dir> (store response directory)
+#
+# Baseline fetch:
+#   httpx -l temp\agent1\httpx_js_targets.txt -silent -timeout 9 -retries 1 -threads 50 -sr -srd $outDir 2>&1 | Tee-Object -FilePath $log -Append
+#
+# Build a simple index of saved files:
+#   Get-ChildItem -Recurse $outDir -File | ForEach-Object { $_.FullName } | Set-Content temp\agent1\js_fetch_index.txt
+
+# ----------------------------
+# 4) 9-minute batching (PowerShell)
+# ----------------------------
+# Use this if js_urls.txt is large or response saving takes too long.
+#
+# Create chunks:
+#   $in = 'temp\\agent1\\httpx_js_targets.txt'
+#   $chunkSize = 2000
+#   $chunkDir = 'temp\\agent1\\chunks_httpx_fetch_js'
+#   New-Item -ItemType Directory -Force $chunkDir | Out-Null
+#   $lines = Get-Content $in
+#   $i = 0
+#   for ($p = 0; $p -lt $lines.Count; $p += $chunkSize) {
+#     $chunk = $lines[$p..([Math]::Min($p+$chunkSize-1, $lines.Count-1))]
+#     $chunkPath = Join-Path $chunkDir ("chunk_{0:d4}.txt" -f $i)
+#     $chunk | Set-Content $chunkPath
+#     $i++
+#   }
+#
+# Run per chunk:
+#   Get-ChildItem $chunkDir -Filter 'chunk_*.txt' | Sort-Object Name | ForEach-Object {
+#     $chunk = $_.FullName
+#     Write-Host "[httpx fetch js] fetching $chunk"
+#     httpx -l $chunk -silent -timeout 9 -retries 1 -threads 50 -sr -srd $outDir 2>&1 | Tee-Object -FilePath $log -Append
+#   }
+#
+# Rebuild index:
+#   Get-ChildItem -Recurse $outDir -File | ForEach-Object { $_.FullName } | Set-Content temp\agent1\js_fetch_index.txt

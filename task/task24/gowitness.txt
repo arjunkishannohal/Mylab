@@ -1,0 +1,114 @@
+# Tool 24 — gowitness (screenshots) — STRICT RUN-CARD
+# Goal: screenshot discovered live web targets for fast manual triage.
+# Inputs (contract): at least ONE of these should exist (URLs, one per line)
+#   - outputs/live_base_urls.txt
+#   - outputs/live_hostport_urls.txt
+#   - outputs/api_endpoints_live.txt
+#   - outputs/js_urls_live.txt
+#   - outputs/js_composed_live.txt
+# Output (contract):
+#   - outputs/gowitness/                         (screenshots + db)
+#   - outputs/coverage_screenshots_index_gowitness.txt
+# Logs:
+#   - temp/agent1/logs/gowitness_YYYYMMDD_HHMMSS.log
+# Time rule: keep each command under ~9 minutes (batch if needed).
+
+# ----------------------------
+# 1) Install / verify
+# ----------------------------
+# Option A (recommended): via go
+#   go install -v github.com/sensepost/gowitness@latest
+#   gowitness --version
+
+# ----------------------------
+# 2) STRICT preflight + setup
+# ----------------------------
+#   New-Item -ItemType Directory -Force temp\agent1 | Out-Null
+#   New-Item -ItemType Directory -Force temp\agent1\logs | Out-Null
+#
+# Output dir
+#   $outDir = 'outputs\gowitness'
+#   New-Item -ItemType Directory -Force $outDir | Out-Null
+#
+# Log file
+#   $ts = Get-Date -Format 'yyyyMMdd_HHmmss'
+#   $log = "temp\\agent1\\logs\\gowitness_$ts.log"
+#   "[gowitness] start $ts" | Set-Content $log
+#
+# Reset outputs
+#   Remove-Item -ErrorAction SilentlyContinue outputs\gowitness_targets_urls.txt
+#   Remove-Item -ErrorAction SilentlyContinue outputs\coverage_screenshots_index_gowitness.txt
+
+# ----------------------------
+# 3) Build targets list
+# ----------------------------
+# Collect whichever inputs exist
+#   $candidates = @(
+#     'outputs\live_base_urls.txt',
+#     'outputs\live_hostport_urls.txt',
+#     'outputs\api_endpoints_live.txt',
+#     'outputs\js_urls_live.txt',
+#     'outputs\js_composed_live.txt'
+#   )
+#   $existing = $candidates | Where-Object { Test-Path $_ }
+#   if ($existing.Count -lt 1) { throw "No gowitness inputs found. Provide at least one live URL list file (outputs\\... or temp\\agent1\\...)." }
+#
+# Normalize + dedupe
+#   $all = @()
+#   foreach ($p in $existing) { $all += Get-Content $p }
+#   $all |
+#     Where-Object { $_ -and $_.Trim() -ne '' } |
+#     ForEach-Object { $_.Trim() } |
+#     Sort-Object -Unique |
+#     Set-Content outputs\gowitness_targets_urls.txt
+#
+# Sanity count
+#   $n = (Get-Content outputs\gowitness_targets_urls.txt).Count
+#   if ($n -lt 1) { throw "No targets in outputs\\gowitness_targets_urls.txt" }
+#   Write-Host "[gowitness] targets: $n"
+
+# ----------------------------
+# 4) Run gowitness (baseline)
+# ----------------------------
+# Notes:
+# - Concurrency affects runtime; keep it modest.
+# - -P is the project path where gowitness stores its sqlite/db and screenshots.
+#
+# Run:
+#   gowitness file -f outputs\gowitness_targets_urls.txt -P $outDir --threads 8 2>&1 | Tee-Object -FilePath $log -Append
+
+# Export a browsable HTML report:
+#   gowitness report -P $outDir -o "$outDir\report.html" 2>&1 | Tee-Object -FilePath $log -Append
+#
+# Write the index path file (for consistent pipeline outputs)
+#   "$outDir\\report.html" | Set-Content outputs\coverage_screenshots_index_gowitness.txt
+
+# ----------------------------
+# 5) 9-minute batching
+# ----------------------------
+# Use if screenshotting can’t finish within the time rule.
+#
+# Create chunks:
+#   $in = 'outputs\\gowitness_targets_urls.txt'
+#   $chunkSize = 300
+#   $outChunks = 'temp\\agent1\\chunks_gowitness'
+#   New-Item -ItemType Directory -Force $outChunks | Out-Null
+#   $lines = Get-Content $in
+#   $i = 0
+#   for ($p = 0; $p -lt $lines.Count; $p += $chunkSize) {
+#     $chunk = $lines[$p..([Math]::Min($p+$chunkSize-1, $lines.Count-1))]
+#     $chunkPath = Join-Path $outChunks ("chunk_{0:d4}.txt" -f $i)
+#     $chunk | Set-Content $chunkPath
+#     $i++
+#   }
+#
+# Run per chunk (same project path; gowitness will append to its DB):
+#   Get-ChildItem $outChunks -Filter 'chunk_*.txt' | Sort-Object Name | ForEach-Object {
+#     $chunk = $_.FullName
+#     Write-Host "[gowitness] screenshotting $chunk"
+#     gowitness file -f $chunk -P $outDir --threads 8 2>&1 | Tee-Object -FilePath $log -Append
+#   }
+#
+# Rebuild report + index after batching:
+#   gowitness report -P $outDir -o "$outDir\report.html" 2>&1 | Tee-Object -FilePath $log -Append
+#   "$outDir\\report.html" | Set-Content outputs\coverage_screenshots_index_gowitness.txt

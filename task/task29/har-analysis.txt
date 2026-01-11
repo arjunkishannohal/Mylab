@@ -1,0 +1,60 @@
+# Tool 29 — HAR analysis (Agent 2) — STRICT RUN-CARD
+# Goal: analyze your captured browser/mobile traffic (HAR) and extract high-value testing data.
+# This is INFO GATHERING / ENRICHMENT (safe): it only parses files you captured.
+# Inputs (contract):
+#   - manual/har/*.har                          (your in-scope captures)
+#   - outputs/activesubdomain.txt               (scope allowlist)
+# Outputs (contract):
+#   - outputs/agent2/important_data.txt         (single consolidated extraction)
+#   - outputs/agent2/agent2-har-report.md       (summary + what to test first)
+#   - outputs/agent2/har_summary.json           (machine-readable summary)
+# Time rule: keep each command under ~9 minutes.
+
+# ----------------------------
+# 1) Preconditions
+# ----------------------------
+# Place your HAR file(s) in:
+#   manual\har\
+# Example:
+#   manual\har\sample.har
+#
+# If the folders don’t exist:
+#   New-Item -ItemType Directory -Force manual\har | Out-Null
+#
+# Allowlist must exist:
+#   if (!(Test-Path outputs\activesubdomain.txt)) { throw "Missing outputs\\activesubdomain.txt" }
+
+# ----------------------------
+# 2) Tool
+# ----------------------------
+# Analyzer script:
+#   tools\agent2\har_analyzer.py
+# Reference/spec:
+#   tools\agent2\task0-har-analysis.txt
+#
+# It enforces scope via outputs\activesubdomain.txt and redacts sensitive values in reports.
+
+# ----------------------------
+# 3) Run (PowerShell)
+# ----------------------------
+# Single HAR:
+#   python tools\agent2\har_analyzer.py --har manual\har\sample.har --workspace .
+#
+# Multiple HARs (one by one, deterministic):
+#   Get-ChildItem manual\har -Filter '*.har' | Sort-Object Name | ForEach-Object {
+#     Write-Host "[har] analyzing $($_.FullName)"
+#     python tools\agent2\har_analyzer.py --har $_.FullName --workspace .
+#   }
+
+# ----------------------------
+# 4) Output sanity check
+# ----------------------------
+#   if (!(Test-Path outputs\agent2\important_data.txt)) { throw "Missing outputs\\agent2\\important_data.txt" }
+#   if (!(Test-Path outputs\agent2\agent2-har-report.md)) { throw "Missing outputs\\agent2\\agent2-har-report.md" }
+#   if (!(Test-Path outputs\agent2\har_summary.json)) { throw "Missing outputs\\agent2\\har_summary.json" }
+
+# ----------------------------
+# 5) Notes
+# ----------------------------
+# - This step helps you decide what to test next (auth flows, admin endpoints, upload endpoints, API patterns, etc.).
+# - Do NOT paste raw tokens into issues/reports; keep redacted previews only.

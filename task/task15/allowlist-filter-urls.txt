@@ -1,0 +1,43 @@
+# Tool 15 — allowlist filter (URLs) — STRICT RUN-CARD
+# Goal: keep only URLs whose hostname is in your in-scope host allowlist.
+# Allowlist (contract):
+#   - outputs/activesubdomain.txt   (one hostname per line)
+# Input (contract):
+#   - any URL list file (one URL per line)
+# Output (contract):
+#   - an in-scope filtered URL list file
+#
+# Notes
+# - This is where the term “allowlist” comes from: it’s your approved in-scope hosts list.
+# - Public URL sources (gau/katana/etc) often contain third-party hosts; this filter removes them.
+
+# ----------------------------
+# 1) Preconditions
+# ----------------------------
+#   if (!(Test-Path outputs\activesubdomain.txt)) { throw "Missing outputs\\activesubdomain.txt" }
+
+# ----------------------------
+# 2) Tool
+# ----------------------------
+# This repo already includes a stdlib-only filter script:
+#   task\task21\allowlist_filter_urls.py
+#
+# It keeps a URL only if url.hostname is in the allowlist.
+
+# ----------------------------
+# 3) Run (PowerShell)
+# ----------------------------
+# Example A: filter gau results
+#   python task\task21\allowlist_filter_urls.py --allowlist outputs\activesubdomain.txt --in outputs\gau_urls.txt --out outputs\gau_urls_in_scope.txt
+#
+# Example B: filter katana results
+#   python task\task21\allowlist_filter_urls.py --allowlist outputs\activesubdomain.txt --in outputs\katana_urls.txt --out outputs\katana_urls_in_scope.txt
+#
+# Example C: filter a combined URL corpus
+#   python task\task21\allowlist_filter_urls.py --allowlist outputs\activesubdomain.txt --in temp\agent1\url_corpus_raw.txt --out outputs\url_corpus_all_in_scope.txt
+
+# ----------------------------
+# 4) Output sanity check
+# ----------------------------
+#   Get-Content outputs\gau_urls_in_scope.txt | Measure-Object
+#   Get-Content outputs\katana_urls_in_scope.txt | Measure-Object

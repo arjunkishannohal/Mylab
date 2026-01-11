@@ -1,0 +1,62 @@
+# httpx (probe live web) — Task 2 Tool 1
+
+Install
+go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+
+Input (contract)
+- outputs/activesubdomain.txt
+
+Outputs (contract)
+- outputs/live_base_urls.txt   (scheme://host[:port])
+- outputs/live_seeds.txt       (optional extra metadata / raw output)
+
+Run (PowerShell; from repo root)
+New-Item -ItemType Directory -Force temp/agent1 | Out-Null
+New-Item -ItemType Directory -Force outputs | Out-Null
+
+# Basic probe (fast, safe defaults)
+httpx -l outputs/activesubdomain.txt -silent -timeout 9 -retries 1 -threads 50 -o outputs/live_base_urls.txt
+
+Run for EVERY URL in a file (URL list mode)
+# Use this when your input file contains full URLs (with scheme, and optionally paths/query), one per line.
+# Example input file: temp/agent1/url_list.txt
+# Notes:
+# - If the line is a full URL, httpx will request that exact URL.
+# - If the line is only a host, httpx will probe default ports/schemes.
+
+# PowerShell:
+# httpx -l temp/agent1/url_list.txt -silent -timeout 9 -retries 1 -threads 50 -o temp/agent1/httpx_urls_out.txt
+
+# Optional: keep a richer “seeds” file (status/title/server)
+# httpx -l outputs/activesubdomain.txt -silent -timeout 9 -retries 1 -threads 50 -status-code -title -server -tech-detect -o outputs/live_seeds.txt
+
+9-minute rule (batch mode)
+# If activesubdomain.txt is large, split into chunks and append.
+# PowerShell:
+$chunkDir = 'temp/agent1/httpx_chunks'
+New-Item -ItemType Directory -Force $chunkDir | Out-Null
+Get-Content outputs/activesubdomain.txt | Where-Object { $_ } | ForEach-Object { $_.Trim() } |
+  Split-Path -Leaf | Out-Null
+
+# Simple chunking without extra tools (2000 lines per chunk)
+$i = 0
+Get-Content outputs/activesubdomain.txt | Where-Object { $_ } | ForEach-Object {
+  $line = $_.Trim()
+  if ($line) {
+    $file = Join-Path $chunkDir ("chunk_{0:D4}.txt" -f [math]::Floor($i / 2000))
+    Add-Content -Encoding ascii $file $line
+    $i++
+  }
+}
+
+Remove-Item -ErrorAction SilentlyContinue outputs/live_base_urls.txt
+Get-ChildItem $chunkDir -Filter 'chunk_*.txt' | Sort-Object Name | ForEach-Object {
+  httpx -l $_.FullName -silent -timeout 9 -retries 1 -threads 50 -o temp/agent1/_httpx_tmp.txt
+  Get-Content temp/agent1/_httpx_tmp.txt | Add-Content outputs/live_base_urls.txt
+}
+Remove-Item -ErrorAction SilentlyContinue temp/agent1/_httpx_tmp.txt
+Get-Content outputs/live_base_urls.txt | Sort-Object -Unique | Set-Content -Encoding utf8 outputs/live_base_urls.txt
+
+Notes
+- This probes default web ports (80/443) from hostnames.
+- Keep results scope-safe by only feeding allowlisted hosts.

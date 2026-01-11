@@ -1,0 +1,19 @@
+# Global Rules
+
+1) Installation failures
+- If any tool installation errors, retry with a fix.
+- If it errors again, diagnose the cause and apply a different fix, then retry.
+- Do not skip the tool unless it is genuinely impossible in this environment.
+
+2) Execution failures
+- If any tool run errors, retry with a fix (flags, inputs, PATH, permissions, rate/timeout, etc.).
+- If it errors again, diagnose the cause and apply a different fix, then retry.
+- Do not skip the tool unless it is genuinely impossible in this environment.
+
+3) 9-minute command limit
+- Do not run any single foreground command that is likely to exceed ~9 minutes.
+- If a step will take longer, adapt the approach:
+	- Run in batches/chunks (split inputs; run sequentially and merge outputs).
+	- Use resume/checkpoint features if the tool supports it.
+	- Reduce rate/concurrency and combine with batching to avoid timeouts.
+- Goal: use the tool to its full capability within environment limits (avoid silent false negatives from timeouts).

@@ -1,0 +1,37 @@
+# Wordlist download (subdomain bruteforce)
+# Run ONLY on targets you are authorized to test.
+
+Recommended approach (best coverage vs time)
+1) Start with SecLists ~110k list (good coverage, manageable)
+2) If still thin, add Jhaddix (very large) OR Commonspeak (high-signal)
+3) Always dedupe and keep under your 9-minute rule by batching
+
+Option A (recommended starter) — SecLists top 110k
+Linux/WSL:
+mkdir -p temp/agent1
+git clone --depth 1 https://github.com/danielmiessler/SecLists.git temp/_seclists
+cp temp/_seclists/Discovery/DNS/subdomains-top1million-110000.txt temp/agent1/subdomain_wordlist.txt
+
+PowerShell (no git required):
+New-Item -ItemType Directory -Force temp\agent1 | Out-Null
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/DNS/subdomains-top1million-110000.txt" -OutFile temp\agent1\subdomain_wordlist.txt
+
+Option B (small + fast) — SecLists 5k
+https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/DNS/subdomains-top1million-5000.txt
+
+Option C (very large) — Jhaddix dns wordlist
+# Big. Use batching.
+https://raw.githubusercontent.com/assetnote/commonspeak2-wordlists/master/subdomains/subdomains.txt
+
+Build a combined wordlist (Linux/WSL)
+cat \
+  temp/agent1/subdomains-top1million-110000.txt \
+  temp/agent1/commonspeak_subdomains.txt 2>/dev/null \
+  | tr '[:upper:]' '[:lower:]' \
+  | sed 's/\.$//' \
+  | sed '/^$/d' \
+  | sort -u \
+  > temp/agent1/subdomain_wordlist.txt
+
+Note
+- “Best” depends on scope: bigger lists = more hits but more time/noise.

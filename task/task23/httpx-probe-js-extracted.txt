@@ -1,0 +1,172 @@
+# Tool 23 — httpx (probe JS-extracted URLs/paths) — STRICT RUN-CARD
+# Goal: validate URLs discovered from offline JS analysis.
+# Input (contract):
+#   - outputs/js_endpoints_from_js.txt               (from offline JS analyzer)
+#   - outputs/activesubdomain.txt                    (allowlist hosts)
+# Optional input (for composing base+path URLs):
+#   - outputs/live_base_urls.txt                 (base URLs like https://host)
+# Outputs (contract):
+#   - temp/agent1/queue_js_absolute_urls_in_scope.txt
+#   - temp/agent1/js_urls_live_raw.txt
+#   - outputs/js_urls_live.txt                   (deduped final)
+# Optional outputs (if composing base+path URLs):
+#   - temp/agent1/queue_js_composed_urls.txt
+#   - temp/agent1/js_composed_live_raw.txt
+#   - outputs/js_composed_live.txt
+# Logs:
+#   - temp/agent1/logs/httpx_js_probe_YYYYMMDD_HHMMSS.log
+# Time rule: keep each command under ~9 minutes (batch if needed).
+
+# ----------------------------
+# 1) Install / verify
+# ----------------------------
+# Option A (recommended): via go
+#   go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+#   httpx -version
+
+# ----------------------------
+# 2) STRICT preflight + setup
+# ----------------------------
+#   New-Item -ItemType Directory -Force temp\agent1 | Out-Null
+#   New-Item -ItemType Directory -Force temp\agent1\logs | Out-Null
+#   New-Item -ItemType Directory -Force outputs | Out-Null
+#   if (!(Test-Path outputs\js_endpoints_from_js.txt)) { throw "Missing outputs\\js_endpoints_from_js.txt" }
+#   if (!(Test-Path outputs\activesubdomain.txt)) { throw "Missing outputs\\activesubdomain.txt" }
+
+# Log file
+#   $ts = Get-Date -Format 'yyyyMMdd_HHmmss'
+#   $log = "temp\\agent1\\logs\\httpx_js_probe_$ts.log"
+#   "[httpx js probe] start $ts" | Set-Content $log
+
+# Reset outputs
+#   Remove-Item -ErrorAction SilentlyContinue temp\agent1\queue_js_absolute_urls.txt
+#   Remove-Item -ErrorAction SilentlyContinue temp\agent1\queue_js_absolute_urls_in_scope.txt
+#   Remove-Item -ErrorAction SilentlyContinue temp\agent1\js_urls_live_raw.txt
+#   Remove-Item -ErrorAction SilentlyContinue outputs\js_urls_live.txt
+#   Remove-Item -ErrorAction SilentlyContinue temp\agent1\js_urls_live_seeds.txt
+
+# ----------------------------
+# 3) Build URL target list (absolute URLs only)
+# ----------------------------
+# Normalize extracted list
+#   Get-Content outputs\js_endpoints_from_js.txt |
+#     Where-Object { $_ -and $_.Trim() -ne "" } |
+#     ForEach-Object { $_.Trim() } |
+#     Sort-Object -Unique |
+#     Set-Content temp\agent1\js_endpoints_from_js_norm.txt
+
+# Keep only absolute http/https URLs (httpx probes these cleanly)
+#   Get-Content temp\agent1\js_endpoints_from_js_norm.txt |
+#     Where-Object { $_ -match '^(?i)https?://' } |
+#     Sort-Object -Unique |
+#     Set-Content temp\agent1\queue_js_absolute_urls.txt
+
+# Filter absolute URLs by in-scope allowlist hosts
+#   python task\task21\allowlist_filter_urls.py --allowlist outputs\activesubdomain.txt --in temp\agent1\queue_js_absolute_urls.txt --out temp\agent1\queue_js_absolute_urls_in_scope.txt
+
+# Sanity count
+#   $n = (Get-Content temp\agent1\queue_js_absolute_urls_in_scope.txt).Count
+#   if ($n -lt 1) { throw "No in-scope absolute URLs found to probe." }
+#   Write-Host "[httpx js probe] absolute in-scope urls: $n"
+
+# ----------------------------
+# 4) Probe absolute URLs (URL list mode)
+# ----------------------------
+# URL-only output:
+#   httpx -l temp\agent1\queue_js_absolute_urls_in_scope.txt -silent -timeout 9 -retries 1 -threads 50 -o temp\agent1\_httpx_part.txt 2>&1 | Tee-Object -FilePath $log -Append
+#   if (Test-Path temp\agent1\_httpx_part.txt) { Get-Content temp\agent1\_httpx_part.txt | Add-Content temp\agent1\js_urls_live_raw.txt; Remove-Item temp\agent1\_httpx_part.txt }
+
+# Optional: richer metadata output (not URL-clean)
+#   httpx -l temp\agent1\queue_js_absolute_urls_in_scope.txt -silent -timeout 9 -retries 1 -threads 50 -status-code -title -server -tech-detect -o temp\agent1\js_urls_live_seeds.txt 2>&1 | Tee-Object -FilePath $log -Append
+
+# Finalize (dedupe)
+#   if (Test-Path temp\agent1\js_urls_live_raw.txt) {
+#     Get-Content temp\agent1\js_urls_live_raw.txt |
+#       Where-Object { $_ -and $_.Trim() -ne "" } |
+#       ForEach-Object { $_.Trim() } |
+#       Sort-Object -Unique |
+#       Set-Content outputs\js_urls_live.txt
+#   }
+
+# ----------------------------
+# 5) 9-minute batching (absolute URLs)
+# ----------------------------
+# Create chunks:
+#   $in = 'temp\\agent1\\queue_js_absolute_urls_in_scope.txt'
+#   $chunkSize = 2000
+#   $outDir = 'temp\\agent1\\chunks_httpx_js_abs'
+#   New-Item -ItemType Directory -Force $outDir | Out-Null
+#   $lines = Get-Content $in
+#   $i = 0
+#   for ($p = 0; $p -lt $lines.Count; $p += $chunkSize) {
+#     $chunk = $lines[$p..([Math]::Min($p+$chunkSize-1, $lines.Count-1))]
+#     $chunkPath = Join-Path $outDir ("chunk_{0:d4}.txt" -f $i)
+#     $chunk | Set-Content $chunkPath
+#     $i++
+#   }
+#
+# Run per chunk (append raw):
+#   Remove-Item -ErrorAction SilentlyContinue temp\\agent1\\js_urls_live_raw.txt
+#   Get-ChildItem $outDir -Filter 'chunk_*.txt' | Sort-Object Name | ForEach-Object {
+#     $chunk = $_.FullName
+#     Write-Host "[httpx js probe abs] probing $chunk"
+#     httpx -l $chunk -silent -timeout 9 -retries 1 -threads 50 -o temp\\agent1\\_httpx_part.txt 2>&1 | Tee-Object -FilePath $log -Append
+#     if (Test-Path temp\\agent1\\_httpx_part.txt) {
+#       Get-Content temp\\agent1\\_httpx_part.txt | Add-Content temp\\agent1\\js_urls_live_raw.txt
+#       Remove-Item temp\\agent1\\_httpx_part.txt
+#     }
+#   }
+#
+# After batching, run section 4 "Finalize" to dedupe -> final.
+
+# ----------------------------
+# 6) Optional: compose base+path URLs (API-ish paths only)
+# ----------------------------
+# This helps test relative endpoints extracted from JS.
+# Keep the caps low to avoid exploding the cartesian product.
+#
+# Preconditions:
+#   if (!(Test-Path outputs\live_base_urls.txt)) { throw "Missing outputs\\live_base_urls.txt (optional step)" }
+#
+# Build a small path set (only API-ish prefixes)
+#   $paths = Get-Content temp\agent1\js_endpoints_from_js_norm.txt |
+#     Where-Object { $_ -match '^/' } |
+#     Where-Object { $_ -match '^(?i)/(api|graphql|graphiql|v\d+|oauth|auth|login|token|session|user|users|admin|internal|private|public|config|settings|status|health|metrics)(/|$)' } |
+#     ForEach-Object { $_.Trim() } |
+#     Sort-Object -Unique
+#
+# Limit to keep under time rule
+#   $maxBases = 200
+#   $maxPaths = 200
+#
+# Normalize bases (must end without trailing slash)
+#   $bases = Get-Content outputs\live_base_urls.txt |
+#     Where-Object { $_ -and $_.Trim() -ne "" } |
+#     ForEach-Object { $_.Trim().TrimEnd('/') } |
+#     Sort-Object -Unique |
+#     Select-Object -First $maxBases
+#
+#   $paths = $paths | Select-Object -First $maxPaths
+#
+# Compose list
+#   $out = 'temp\\agent1\\queue_js_composed_urls.txt'
+#   Remove-Item -ErrorAction SilentlyContinue $out
+#   foreach ($b in $bases) {
+#     foreach ($p in $paths) {
+#       "$b$p" | Add-Content $out
+#     }
+#   }
+#
+# Probe composed URLs
+#   Remove-Item -ErrorAction SilentlyContinue temp\agent1\js_composed_live_raw.txt
+#   httpx -l temp\agent1\queue_js_composed_urls.txt -silent -timeout 9 -retries 1 -threads 50 -o temp\agent1\_httpx_part.txt 2>&1 | Tee-Object -FilePath $log -Append
+#   if (Test-Path temp\agent1\_httpx_part.txt) { Get-Content temp\agent1\_httpx_part.txt | Add-Content temp\agent1\js_composed_live_raw.txt; Remove-Item temp\agent1\_httpx_part.txt }
+#
+# Finalize composed (dedupe)
+#   if (Test-Path temp\agent1\js_composed_live_raw.txt) {
+#     Get-Content temp\agent1\js_composed_live_raw.txt |
+#       Where-Object { $_ -and $_.Trim() -ne "" } |
+#       ForEach-Object { $_.Trim() } |
+#       Sort-Object -Unique |
+#       Set-Content outputs\js_composed_live.txt
+#   }

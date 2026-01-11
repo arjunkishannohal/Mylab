@@ -1,0 +1,42 @@
+# hakrevdns (reverse DNS) — Task 10 optional
+
+When to use
+- ONLY if you have explicit in-scope IP ranges (CIDRs) for the program.
+- Reverse DNS is powerful, but can easily drift out-of-scope if you feed random IPs.
+
+Install
+go install -v github.com/hakluke/hakrevdns@latest
+
+Input (you must provide)
+- temp/agent1/in_scope_cidrs.txt   (one CIDR per line, e.g. 203.0.113.0/24)
+
+Output (contract)
+- temp/agent1/list_4_reverse.txt   (hostnames from PTR lookups)
+
+Prereqs / notes
+- hakrevdns reads IPs from stdin.
+- You can supply resolvers with:
+  -R temp/agent1/resolvers_good.txt
+  or use -U (built-in defaults).
+
+Run (Linux/WSL recommended; from repo root)
+mkdir -p temp/agent1
+
+# Expand CIDRs to IPs and reverse-resolve (requires `prips`)
+# Debian/Ubuntu: sudo apt-get update && sudo apt-get install -y prips
+cat temp/agent1/in_scope_cidrs.txt | while read -r cidr; do
+  prips "$cidr"
+done \
+  | hakrevdns -d -t 50 -R temp/agent1/resolvers_good.txt \
+  | tr '[:upper:]' '[:lower:]' \
+  | sed 's/\.$//' \
+  | sed '/^$/d' \
+  | sort -u \
+  > temp/agent1/list_4_reverse.txt
+
+9-minute rule (batch/resume strategy)
+- Split your CIDRs into smaller chunks (or split the expanded IP list) and run in pieces.
+- If your ISP/VPN blocks heavy DNS traffic, reduce threads (e.g., 10–25).
+
+If you don’t have prips
+- Alternative: use dnsx PTR mode (see task/task11/dnsx.txt) which accepts CIDR/ASN directly.

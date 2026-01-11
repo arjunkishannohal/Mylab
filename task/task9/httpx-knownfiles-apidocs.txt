@@ -1,0 +1,139 @@
+# Tool 9 — httpx (known-files + Swagger/OpenAPI quick probe) — STRICT RUN-CARD
+# Goal: quickly find robots/sitemaps/security.txt and common Swagger/OpenAPI doc endpoints.
+# This is a pure info-gathering step.
+
+# Inputs (required)
+# - outputs/live_base_urls.txt   (from Tool 8 httpx)
+#   Optional:
+# - outputs/live_hostport_urls.txt (from Tool 13 httpx-hostport)
+# - temp/agent1/knownfiles_and_apidocs.txt (small wordlist; if missing, this run-card will create a default)
+
+# Outputs
+# - temp/agent1/knownfiles_targets_urls.txt
+# - temp/agent1/knownfiles_hits_raw.txt
+# - temp/agent1/knownfiles_hits.txt
+# - outputs/web_knownfiles_robots_sitemaps_security_urls.txt
+# - outputs/api_docs_urls.txt
+
+# Install
+# - httpx
+#   go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+
+# 0) Preflight
+# PowerShell:
+#   if (!(Test-Path 'temp\agent1')) { New-Item -ItemType Directory -Force -Path 'temp\agent1' | Out-Null }
+#   if (!(Test-Path 'outputs')) { New-Item -ItemType Directory -Force -Path 'outputs' | Out-Null }
+#   if (!(Test-Path 'outputs\live_base_urls.txt')) { throw 'Missing outputs\\live_base_urls.txt (run Tool 8 httpx first)' }
+
+# 1) Ensure a small, high-signal known-files wordlist exists
+# NOTE: keep this list SMALL. It is intentionally not a brute-force directory scan.
+# PowerShell:
+#   if (!(Test-Path 'temp\agent1\knownfiles_and_apidocs.txt')) {
+#     @(
+#       'robots.txt',
+#       'sitemap.xml',
+#       'sitemap_index.xml',
+#       '.well-known/security.txt',
+#       'security.txt',
+#       'humans.txt',
+#       'swagger',
+#       'swagger-ui',
+#       'swagger-ui.html',
+#       'api-docs',
+#       'v2/api-docs',
+#       'v3/api-docs',
+#       'openapi.json',
+#       'swagger.json',
+#       'redoc'
+#     ) | Set-Content -Encoding utf8 'temp\agent1\knownfiles_and_apidocs.txt'
+#   }
+#   (Get-Content 'temp\agent1\knownfiles_and_apidocs.txt') | Where-Object { $_ -and $_.Trim() -ne '' } | ForEach-Object { $_.Trim().TrimStart('/') } | Sort-Object -Unique | Set-Content -Encoding utf8 'temp\agent1\knownfiles_and_apidocs.txt'
+
+# 2) Build target URLs (base + path)
+# PowerShell:
+#   Remove-Item -ErrorAction SilentlyContinue 'temp\agent1\knownfiles_targets_urls.txt'
+#
+#   $bases = @()
+#   $bases += Get-Content 'outputs\live_base_urls.txt'
+#   if (Test-Path 'outputs\live_hostport_urls.txt') { $bases += Get-Content 'outputs\live_hostport_urls.txt' }
+#   $bases = $bases | Where-Object { $_ -and $_.Trim() -ne '' } | ForEach-Object { $_.Trim().TrimEnd('/') } | Sort-Object -Unique
+#   if ($bases.Count -lt 1) { throw 'No base URLs found (outputs\\live_base_urls.txt is empty?)' }
+#
+#   $paths = Get-Content 'temp\agent1\knownfiles_and_apidocs.txt'
+#   foreach ($b in $bases) {
+#     foreach ($p in $paths) {
+#       "$b/$p" | Add-Content -Encoding utf8 'temp\agent1\knownfiles_targets_urls.txt'
+#     }
+#   }
+#   $n = (Get-Content 'temp\agent1\knownfiles_targets_urls.txt').Count
+#   Write-Host "[knownfiles] targets: $n"
+
+# 3) Probe with httpx (9-minute safe via chunking)
+# PowerShell:
+#   $ts = Get-Date -Format 'yyyyMMdd_HHmmss'
+#   $log = "temp\\agent1\\logs\\httpx_knownfiles_$ts.log"
+#   if (!(Test-Path 'temp\agent1\logs')) { New-Item -ItemType Directory -Force -Path 'temp\agent1\logs' | Out-Null }
+#   "[httpx knownfiles] start $ts" | Set-Content $log
+#
+#   Remove-Item -ErrorAction SilentlyContinue 'temp\agent1\knownfiles_hits_raw.txt'
+#
+#   $in = 'temp\agent1\knownfiles_targets_urls.txt'
+#   $chunkDir = 'temp\agent1\chunks_knownfiles'
+#   Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $chunkDir
+#   New-Item -ItemType Directory -Force -Path $chunkDir | Out-Null
+#
+#   $i = 0
+#   Get-Content $in | ForEach-Object -Begin { $buf = @() } -Process {
+#     $buf += $_
+#     if ($buf.Count -ge 2000) {
+#       $i++
+#       $chunk = Join-Path $chunkDir ("chunk_{0:D4}.txt" -f $i)
+#       $buf | Set-Content -Encoding utf8 $chunk
+#       $buf = @()
+#     }
+#   } -End {
+#     if ($buf.Count -gt 0) {
+#       $i++
+#       $chunk = Join-Path $chunkDir ("chunk_{0:D4}.txt" -f $i)
+#       $buf | Set-Content -Encoding utf8 $chunk
+#     }
+#   }
+#
+#   Get-ChildItem $chunkDir -Filter 'chunk_*.txt' | Sort-Object Name | ForEach-Object {
+#     Write-Host "[httpx knownfiles] probing $($_.Name)"
+#     httpx -l $_.FullName -silent -timeout 9 -retries 1 -threads 50 -status-code -location -mc 200,204,301,302,307,308,401,403 2>&1 |
+#       Tee-Object -FilePath $log -Append |
+#       Add-Content -Encoding utf8 'temp\agent1\knownfiles_hits_raw.txt'
+#   }
+
+# 4) Clean + split outputs
+# PowerShell:
+#   if (!(Test-Path 'temp\agent1\knownfiles_hits_raw.txt')) { Write-Host '[knownfiles] no output (no hits or httpx failed)'; return }
+#
+#   Get-Content 'temp\agent1\knownfiles_hits_raw.txt' |
+#     Where-Object { $_ -and $_.Trim() -ne '' } |
+#     ForEach-Object { $_.Trim() } |
+#     Sort-Object -Unique |
+#     Set-Content -Encoding utf8 'temp\agent1\knownfiles_hits.txt'
+#
+#   # Keep the high-signal “known files” list (MERGE + DEDUPE with existing output)
+#   $knownOut = 'outputs\\web_knownfiles_robots_sitemaps_security_urls.txt'
+#   $knownTmp = 'temp\\agent1\\_knownfiles_task9.txt'
+#   Get-Content 'temp\agent1\knownfiles_hits.txt' |
+#     Select-String -Pattern 'robots\\.txt|sitemap(_index)?\\.xml|\\.well-known/security\\.txt|security\\.txt' |
+#     ForEach-Object { $_.Line } |
+#     Sort-Object -Unique |
+#     Set-Content -Encoding utf8 $knownTmp
+#   if (Test-Path $knownOut) { Get-Content $knownOut | Add-Content -Encoding utf8 $knownTmp }
+#   Get-Content $knownTmp | Where-Object { $_ -and $_.Trim() -ne '' } | ForEach-Object { $_.Trim() } | Sort-Object -Unique | Set-Content -Encoding utf8 $knownOut
+#
+#   # Capture swagger/openapi doc URLs if found (MERGE + DEDUPE with existing output)
+#   $apiOut = 'outputs\\api_docs_urls.txt'
+#   $apiTmp = 'temp\\agent1\\_api_docs_urls_task9.txt'
+#   Get-Content 'temp\agent1\knownfiles_hits.txt' |
+#     Select-String -Pattern 'swagger\\.json|openapi\\.json|api-docs|swagger|redoc' |
+#     ForEach-Object { $_.Line } |
+#     Sort-Object -Unique |
+#     Set-Content -Encoding utf8 $apiTmp
+#   if (Test-Path $apiOut) { Get-Content $apiOut | Add-Content -Encoding utf8 $apiTmp }
+#   Get-Content $apiTmp | Where-Object { $_ -and $_.Trim() -ne '' } | ForEach-Object { $_.Trim() } | Sort-Object -Unique | Set-Content -Encoding utf8 $apiOut

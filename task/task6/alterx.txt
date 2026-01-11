@@ -1,0 +1,45 @@
+# alterx (permutations)
+
+Install
+go install -v github.com/projectdiscovery/alterx/cmd/alterx@latest
+
+Goal
+- Generate permutation candidates from your discovered subdomains.
+- Write output to: temp/agent1/list_5_permutations.txt
+
+Inputs (expected)
+- temp/agent1/list_1_passive.txt
+- temp/agent1/list_2_archives.txt
+- temp/agent1/list_3_bruteforce.txt
+- (optional) temp/agent1/list_4_reverse.txt
+
+Build a seed list (Linux/WSL; from repo root)
+mkdir -p temp/agent1
+cat \
+  temp/agent1/list_1_passive.txt \
+  temp/agent1/list_2_archives.txt \
+  temp/agent1/list_3_bruteforce.txt \
+  temp/agent1/list_4_reverse.txt 2>/dev/null \
+  | tr '[:upper:]' '[:lower:]' \
+  | sed 's/\.$//' \
+  | sed '/^$/d' \
+  | sort -u \
+  > temp/agent1/_alterx_seed.txt
+
+Run (Linux/WSL)
+alterx -l temp/agent1/_alterx_seed.txt -silent -o temp/agent1/list_5_permutations.txt
+
+Batch mode (if seed is huge / to stay under 9 minutes)
+split -l 50000 temp/agent1/_alterx_seed.txt temp/agent1/ax_
+: > temp/agent1/list_5_permutations.txt
+for f in temp/agent1/ax_*; do
+  alterx -l "$f" -silent -o temp/agent1/_alterx_tmp.txt
+  cat temp/agent1/_alterx_tmp.txt >> temp/agent1/list_5_permutations.txt
+  rm -f temp/agent1/_alterx_tmp.txt
+  # Stop here if your environment enforces a 10-min limit; resume with the next file.
+done
+sort -u temp/agent1/list_5_permutations.txt -o temp/agent1/list_5_permutations.txt
+
+Notes
+- Permutations are NOT trusted until Tool 7 validation (`puredns resolve` + wildcard filtering).
+- If you don’t have reverse DNS in scope, just skip list_4_reverse.txt.

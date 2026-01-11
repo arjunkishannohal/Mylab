@@ -1,0 +1,19 @@
+# Amass (passive)
+# Run ONLY on targets you are authorized to test.
+# try to get meximuim output, push to your hard limit
+
+Install
+go install -v github.com/owasp-amass/amass/v4/...@latest
+
+Run (Linux; from repo root)
+mkdir -p temp/agent1
+amass enum -passive -d <domain> -o temp/agent1/amass.txt
+ amass enum -passive -d bestfiends.com -timeout 9   (environment limit)
+
+Merge into passive list (dedupe)
+cat temp/agent1/list_1_passive.txt temp/agent1/amass.txt \
+  | tr '[:upper:]' '[:lower:]' \
+  | sed 's/\.$//' \
+  | sed '/^$/d' \
+  | sort -u \
+  > temp/agent1/list_1_passive.txt

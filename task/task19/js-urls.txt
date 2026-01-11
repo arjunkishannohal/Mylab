@@ -1,0 +1,56 @@
+# Tool 19 — JS URL discovery (from URL corpus) — STRICT RUN-CARD
+# Goal: extract JavaScript asset URLs from your in-scope URL corpus.
+# Inputs (contract):
+#   - outputs/gau_urls_in_scope.txt      (optional)
+#   - outputs/katana_urls_in_scope.txt   (optional)
+# Output (contract):
+#   - temp/agent1/js_urls_raw.txt
+#   - outputs/js_urls.txt               (deduped final)
+# Time rule: keep each command under ~9 minutes.
+
+# ----------------------------
+# 1) STRICT preflight + build corpus
+# ----------------------------
+#   New-Item -ItemType Directory -Force temp\agent1 | Out-Null
+#   if (!(Test-Path outputs\gau_urls_in_scope.txt) -and !(Test-Path outputs\katana_urls_in_scope.txt)) {
+#     throw "Missing inputs: expected outputs\\gau_urls_in_scope.txt and/or outputs\\katana_urls_in_scope.txt"
+#   }
+#
+# Build a combined corpus file:
+#   Remove-Item -ErrorAction SilentlyContinue temp\agent1\_url_corpus_in_scope.txt
+#   if (Test-Path outputs\gau_urls_in_scope.txt) { Get-Content outputs\gau_urls_in_scope.txt | Add-Content temp\agent1\_url_corpus_in_scope.txt }
+#   if (Test-Path outputs\katana_urls_in_scope.txt) { Get-Content outputs\katana_urls_in_scope.txt | Add-Content temp\agent1\_url_corpus_in_scope.txt }
+#   Get-Content temp\agent1\_url_corpus_in_scope.txt | Sort-Object -Unique | Set-Content temp\agent1\_url_corpus_in_scope.txt
+
+# ----------------------------
+# 2) Extract JS URLs (PowerShell)
+# ----------------------------
+# Rules:
+# - Keep URLs ending in .js, .mjs, .cjs (ignores querystring)
+# - Drop obvious non-JS noise (e.g., .json, .css)
+#
+#   Remove-Item -ErrorAction SilentlyContinue temp\agent1\js_urls_raw.txt
+#   Get-Content temp\agent1\_url_corpus_in_scope.txt |
+#     Where-Object { $_ -and $_.Trim() -ne "" } |
+#     ForEach-Object { $_.Trim() } |
+#     Where-Object {
+#       $u = $_
+#       $p = $u.Split('?')[0].Split('#')[0]
+#       ($p -match '\\.(js|mjs|cjs)$')
+#     } |
+#     Set-Content temp\agent1\js_urls_raw.txt
+
+# ----------------------------
+# 3) Finalize (dedupe)
+# ----------------------------
+#   if (!(Test-Path temp\agent1\js_urls_raw.txt)) { Write-Host "[js urls] No raw output yet (none found)." }
+#   if (Test-Path temp\agent1\js_urls_raw.txt) {
+#     Get-Content temp\agent1\js_urls_raw.txt |
+#       Where-Object { $_ -and $_.Trim() -ne "" } |
+#       ForEach-Object { $_.Trim() } |
+#       Sort-Object -Unique |
+#       Set-Content outputs\js_urls.txt
+#   }
+#
+# Output sanity check:
+#   if (Test-Path outputs\js_urls.txt) { (Get-Content outputs\js_urls.txt).Count }

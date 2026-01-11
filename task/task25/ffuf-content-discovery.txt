@@ -1,0 +1,94 @@
+# Tool 25 — ffuf (content discovery) — STRICT RUN-CARD
+# Goal: brute-force common files/dirs on live web targets for quick wins (admin panels, configs, backups, etc.).
+# Inputs (contract):
+#   - outputs/live_base_urls.txt          (base URLs like https://host or http://host)
+#   - temp/agent1/content_wordlist.txt        (wordlist for FUZZ; one entry per line)
+# Output (contract):
+#   - outputs/ffuf/                       (per-target results)
+#   - temp/agent1/ffuf_findings_raw.txt
+#   - outputs/ffuf_findings.txt           (deduped final)
+# Logs:
+#   - temp/agent1/logs/ffuf_YYYYMMDD_HHMMSS.log
+# Time rule: keep each command under ~9 minutes.
+
+# ----------------------------
+# 1) Install / verify
+# ----------------------------
+# Option A (recommended): via go
+#   go install -v github.com/ffuf/ffuf@latest
+#   ffuf -V
+
+# ----------------------------
+# 2) STRICT preflight + setup
+# ----------------------------
+#   New-Item -ItemType Directory -Force temp\agent1 | Out-Null
+#   New-Item -ItemType Directory -Force temp\agent1\logs | Out-Null
+#   $outDir = 'outputs\ffuf'
+#   New-Item -ItemType Directory -Force $outDir | Out-Null
+#
+#   if (!(Test-Path outputs\live_base_urls.txt)) { throw "Missing outputs\\live_base_urls.txt" }
+#   if (!(Test-Path temp\agent1\content_wordlist.txt)) { throw "Missing temp\\agent1\\content_wordlist.txt" }
+#
+# Log file
+#   $ts = Get-Date -Format 'yyyyMMdd_HHmmss'
+#   $log = "temp\\agent1\\logs\\ffuf_$ts.log"
+#   "[ffuf] start $ts" | Set-Content $log
+#
+# Reset outputs
+#   Remove-Item -ErrorAction SilentlyContinue temp\agent1\ffuf_findings_raw.txt
+#   Remove-Item -ErrorAction SilentlyContinue outputs\ffuf_findings.txt
+
+# ----------------------------
+# 3) Normalize targets
+# ----------------------------
+#   Get-Content outputs\live_base_urls.txt |
+#     Where-Object { $_ -and $_.Trim() -ne '' } |
+#     ForEach-Object { $_.Trim().TrimEnd('/') } |
+#     Sort-Object -Unique |
+#     Set-Content temp\agent1\ffuf_targets_base.txt
+#
+#   $n = (Get-Content temp\agent1\ffuf_targets_base.txt).Count
+#   if ($n -lt 1) { throw "No targets in temp\\agent1\\ffuf_targets_base.txt" }
+#   Write-Host "[ffuf] targets: $n"
+
+# ----------------------------
+# 4) Run ffuf per target (keeps each run < 9 minutes)
+# ----------------------------
+# Notes:
+# - -maxtime 540 enforces ~9 minutes.
+# - -rate and -t must be tuned to avoid bans/WAF (start low).
+# - Match on common success codes; filter noisy codes/lengths as needed.
+# - Output as JSON per target (easy to parse later).
+#
+#   $wl = 'temp\agent1\content_wordlist.txt'
+#   $targets = Get-Content temp\agent1\ffuf_targets_base.txt
+#   foreach ($base in $targets) {
+#     $safe = ($base -replace 'https?://','') -replace '[^A-Za-z0-9\._-]','_'
+#     $json = Join-Path $outDir ("ffuf_{0}.json" -f $safe)
+#     Write-Host "[ffuf] $base"
+#     ffuf -u "$base/FUZZ" -w $wl -t 40 -rate 50 -timeout 9 -maxtime 540 -mc 200,204,301,302,307,308,401,403 -of json -o $json 2>&1 | Tee-Object -FilePath $log -Append
+#   }
+
+# ----------------------------
+# 5) Extract a simple findings list (quick grepable)
+# ----------------------------
+# If you want a basic raw list without jq, you can just search the JSON files for "url":
+#   Get-ChildItem $outDir -Filter 'ffuf_*.json' | ForEach-Object { Get-Content $_.FullName } |
+#     Select-String '"url"\s*:\s*"' |
+#     ForEach-Object { $_.Line } |
+#     Set-Content temp\agent1\ffuf_findings_raw.txt
+#
+# Dedupe:
+#   if (Test-Path temp\agent1\ffuf_findings_raw.txt) {
+#     Get-Content temp\agent1\ffuf_findings_raw.txt |
+#       Where-Object { $_ -and $_.Trim() -ne '' } |
+#       ForEach-Object { $_.Trim() } |
+#       Sort-Object -Unique |
+#       Set-Content outputs\ffuf_findings.txt
+#   }
+
+# ----------------------------
+# 6) Tighten for “sensitive files” only (optional)
+# ----------------------------
+# If you have a dedicated wordlist for sensitive files, point -w to it.
+# Or create a smaller wordlist to speed runs and reduce noise.

@@ -1,0 +1,101 @@
+# dnsx (DNS validation / wildcard filtering / PTR) — Task 11 optional alternative
+
+What it is
+- dnsx is a fast DNS toolkit.
+- Use it as an alternative/backup to puredns for:
+  1) Validating resolving hosts
+  2) Basic wildcard filtering (dnsx wildcard threshold/domain mode)
+  3) PTR discovery from CIDR/ASN (sometimes easier than hakrevdns)
+
+Install
+go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
+
+Common resolver input
+- Preferred: temp/agent1/resolvers_good.txt (pruned)
+- Fallback: task/task5/resolvers_curated.txt
+
+A) Validate resolving hosts (fast)
+Input:
+- temp/agent1/candidates_all.txt
+Output:
+- temp/agent1/resolved_dnsx.txt
+
+Does it run for every URL?
+- dnsx processes EVERY input line, but it is a DNS tool: it expects hostnames/domains (e.g., api.example.com), not full URLs.
+- If you have a URL list, extract hosts first (recommended) and then feed hosts to dnsx.
+
+PowerShell: extract hosts from a URL list
+# Input: temp/agent1/url_list.txt (full URLs)
+# Output: temp/agent1/hosts_from_urls.txt
+# (Uses .NET Uri parser; skips invalid lines)
+Get-Content temp\agent1\url_list.txt | ForEach-Object {
+  $s = $_.Trim()
+  if (-not $s) { return }
+  try { ([uri]$s).Host } catch { }
+} | Where-Object { $_ } | Sort-Object -Unique | Set-Content -Encoding utf8 temp\agent1\hosts_from_urls.txt
+
+Linux/WSL:
+mkdir -p temp/agent1
+cat temp/agent1/candidates_all.txt | dnsx -silent -r temp/agent1/resolvers_good.txt -o temp/agent1/resolved_dnsx.txt
+
+PowerShell:
+New-Item -ItemType Directory -Force temp\agent1 | Out-Null
+Get-Content temp\agent1\candidates_all.txt | dnsx -silent -r temp\agent1\resolvers_good.txt -o temp\agent1\resolved_dnsx.txt
+
+9-minute rule (batch mode)
+# Time depends on how many hosts you have, your `-t` threads / `-rl` rate-limit, resolver quality, and network.
+# If the list is big, run in chunks and merge output.
+
+PowerShell batching (20000 lines per chunk)
+$chunkDir = 'temp/agent1/dnsx_chunks'
+New-Item -ItemType Directory -Force $chunkDir | Out-Null
+$i = 0
+Get-Content temp\agent1\candidates_all.txt | Where-Object { $_ } | ForEach-Object {
+  $line = $_.Trim()
+  if ($line) {
+    $file = Join-Path $chunkDir ("chunk_{0:D4}.txt" -f [math]::Floor($i / 20000))
+    Add-Content -Encoding ascii $file $line
+    $i++
+  }
+}
+
+Remove-Item -ErrorAction SilentlyContinue temp\agent1\resolved_dnsx.txt
+Get-ChildItem $chunkDir -Filter 'chunk_*.txt' | Sort-Object Name | ForEach-Object {
+  dnsx -silent -l $_.FullName -r temp\agent1\resolvers_good.txt -o temp\agent1\_dnsx_tmp.txt
+  Get-Content temp\agent1\_dnsx_tmp.txt | Add-Content temp\agent1\resolved_dnsx.txt
+}
+Remove-Item -ErrorAction SilentlyContinue temp\agent1\_dnsx_tmp.txt
+Get-Content temp\agent1\resolved_dnsx.txt | Sort-Object -Unique | Set-Content -Encoding utf8 temp\agent1\resolved_dnsx.txt
+
+B) Wildcard filtering mode (dnsx built-in)
+# NOTE: dnsx wildcard filtering needs the wildcard domain (-wd). Other flags are limited in this mode.
+# This writes JSON output by design in dnsx.
+# Use when puredns isn’t available, but prefer puredns for strongest filtering.
+
+Linux/WSL:
+dnsx -l temp/agent1/candidates_all.txt -wd <root-domain> -r temp/agent1/resolvers_good.txt -o temp/agent1/dnsx_wildcard.json
+
+C) PTR discovery (CIDR/ASN)
+Input:
+- temp/agent1/in_scope_cidrs.txt (CIDRs) OR temp/agent1/in_scope_asns.txt (ASNs)
+Output:
+- temp/agent1/list_4_reverse.txt
+
+CIDR example:
+cat temp/agent1/in_scope_cidrs.txt | dnsx -silent -resp-only -ptr -r temp/agent1/resolvers_good.txt \
+  | tr '[:upper:]' '[:lower:]' | sed 's/\.$//' | sed '/^$/d' | sort -u \
+  > temp/agent1/list_4_reverse.txt
+
+ASN example:
+cat temp/agent1/in_scope_asns.txt | dnsx -silent -resp-only -ptr -r temp/agent1/resolvers_good.txt \
+  | tr '[:upper:]' '[:lower:]' | sed 's/\.$//' | sed '/^$/d' | sort -u \
+  > temp/agent1/list_4_reverse.txt
+
+9-minute rule
+- Use dnsx `-resume` if you stop mid-run.
+- Reduce `-t` (threads) and/or use `-rl` (rate-limit) if you see packet loss or ISP blocks.
+
+Contract note
+- If you use dnsx for validation instead of puredns, you still must produce:
+  - outputs/activesubdomain.txt (deduped allowlist)
+  You can base it on temp/agent1/resolved_dnsx.txt, but wildcard filtering may be weaker than puredns.

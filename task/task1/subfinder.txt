@@ -1,0 +1,30 @@
+# Subfinder
+# Run ONLY on targets you are authorized to test.
+
+Install
+go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+
+Provider config (Chaos) — for maximum output
+# Create provider-config.yaml and add your Chaos API key.
+# IMPORTANT: Do NOT store the key in this repo. Provide it at runtime only.
+# Linux:
+mkdir -p ~/.config/subfinder
+cat > ~/.config/subfinder/provider-config.yaml << 'YAML'
+chaos:
+  - <CHAOS_API_KEY>
+YAML
+
+# PowerShell alternative (writes config in your user profile)
+# New-Item -ItemType Directory -Force "$env:USERPROFILE\.config\subfinder" | Out-Null
+# @"`r`nchaos:`r`n  - <CHAOS_API_KEY>`r`n"@ | Set-Content -Encoding utf8 "$env:USERPROFILE\.config\subfinder\provider-config.yaml"
+
+Run (PowerShell; from repo root)
+New-Item -ItemType Directory -Force temp/agent1 | Out-Null
+subfinder -d <domain> -silent -all -recursive -rl 10 -max-time 9 -timeout 30 -o temp/agent1/subfinder.txt 2>&1 | Tee-Object temp/agent1/subfinder.log
+
+Merge into passive list (dedupe)
+Get-Content temp/agent1/subfinder.txt |
+  ForEach-Object { $_.Trim().ToLower().TrimEnd('.') } |
+  Where-Object { $_ } |
+  Sort-Object -Unique |
+  Set-Content -Encoding utf8 temp/agent1/list_1_passive.txt

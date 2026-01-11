@@ -1,0 +1,68 @@
+# Tool 30 — tlsx (TLS/cert intel: SANs, CN, issuer) — STRICT RUN-CARD
+# Goal: collect TLS metadata for in-scope hosts to discover additional hostnames and understand cert setup.
+
+# Inputs (required)
+# - outputs/activesubdomain.txt
+# - Root domain string (manual input): <domain>
+#   Used only to filter SANs by suffix (e.g., ends with .<domain>).
+
+# Outputs
+# - temp/agent1/tlsx_raw.txt
+# - temp/agent1/tlsx_sans_all.txt
+# - temp/agent1/tlsx_sans_in_scope.txt
+# - outputs/coverage_tls_sans_in_scope.txt
+
+# Install
+# - tlsx
+#   go install -v github.com/projectdiscovery/tlsx/cmd/tlsx@latest
+
+# IMPORTANT
+# - Flags can vary by version. Before running, check:
+#     tlsx -h
+
+# 0) Preflight
+# PowerShell:
+#   if (!(Test-Path 'temp\agent1')) { New-Item -ItemType Directory -Force -Path 'temp\agent1' | Out-Null }
+#   if (!(Test-Path 'outputs')) { New-Item -ItemType Directory -Force -Path 'outputs' | Out-Null }
+#   if (!(Test-Path 'outputs\activesubdomain.txt')) { throw 'Missing outputs\\activesubdomain.txt (run Task 7 puredns-resolve first)' }
+
+# 1) Run tlsx (baseline)
+# PowerShell:
+#   $ts = Get-Date -Format 'yyyyMMdd_HHmmss'
+#   $log = "temp\\agent1\\logs\\tlsx_$ts.log"
+#   if (!(Test-Path 'temp\agent1\logs')) { New-Item -ItemType Directory -Force -Path 'temp\agent1\logs' | Out-Null }
+#   "[tlsx] start $ts" | Set-Content $log
+#
+#   Remove-Item -ErrorAction SilentlyContinue 'temp\agent1\tlsx_raw.txt'
+#
+#   # Typical PD usage supports: -l <file> -silent -json -o <file>
+#   # If your build differs, adjust after checking `tlsx -h`.
+#   tlsx -l outputs\activesubdomain.txt -silent -json -o temp\agent1\tlsx_raw.txt 2>&1 | Tee-Object -FilePath $log -Append
+
+# 2) Extract DNS names from raw output
+# NOTE: This extraction is intentionally simple and robust across formats.
+# PowerShell:
+#   if (!(Test-Path 'temp\agent1\tlsx_raw.txt')) { throw 'Missing temp\\agent1\\tlsx_raw.txt (tlsx failed?)' }
+#
+#   # Extract any hostname-looking tokens (DNS SANs/CN often appear in JSON and text output)
+#   $hostRegex = '(?i)(?:^|[^a-z0-9.-])([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+)(?:$|[^a-z0-9.-])'
+#
+#   Get-Content 'temp\agent1\tlsx_raw.txt' |
+#     Select-String -AllMatches -Pattern $hostRegex |
+#     ForEach-Object { $_.Matches } |
+#     ForEach-Object { $_.Groups[1].Value.ToLowerInvariant() } |
+#     Sort-Object -Unique |
+#     Set-Content -Encoding utf8 'temp\agent1\tlsx_sans_all.txt'
+
+# 3) Filter to root domain suffix (in-scope by suffix)
+# Replace <domain> with your root domain (example: bestfiends.com)
+# PowerShell:
+#   $root = '<domain>'.ToLowerInvariant().Trim('.')
+#   if ($root -eq '<domain>') { throw 'Set <domain> before running (root domain string)' }
+#
+#   Get-Content 'temp\agent1\tlsx_sans_all.txt' |
+#     Where-Object { $_ -eq $root -or $_.EndsWith(".$root") } |
+#     Sort-Object -Unique |
+#     Set-Content -Encoding utf8 'temp\agent1\tlsx_sans_in_scope.txt'
+#
+#   Copy-Item -Force 'temp\agent1\tlsx_sans_in_scope.txt' 'outputs\coverage_tls_sans_in_scope.txt'

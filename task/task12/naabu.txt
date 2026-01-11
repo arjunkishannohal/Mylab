@@ -1,0 +1,177 @@
+# Tool 12 — naabu (port discovery) — STRICT RUN-CARD
+# Goal: find open TCP ports on in-scope hosts so we can probe host:port services later.
+# Input: outputs/activesubdomain.txt (one hostname per line)
+# Canonical outputs (deterministic):
+#   - temp/agent1/ports_open_hostport_raw.txt  (raw host:port, appended across phases)
+#   - outputs/ports_open_hostport.txt      (deduped final host:port)
+#   - outputs/ports_open_hosts.txt         (unique hosts with any open port)
+#   - outputs/ports_open_ports.txt         (unique ports seen)
+# Optional outputs (only if you choose to produce them):
+#   - temp/agent1/ports_open_ips.txt           (ip:port lines)
+# Time rule: keep each command under ~9 minutes. Use batching (by hosts and/or by port ranges).
+
+# ----------------------------
+# 0) Preconditions
+# ----------------------------
+# - You MUST have outputs/activesubdomain.txt produced by Tool 7.
+# - Only scan targets that are explicitly in scope.
+# - IMPORTANT SCOPE NOTE (don’t miss + don’t overreach): scanning a hostname may hit CDN/third-party IPs.
+#   Follow the bug bounty policy. If the policy forbids scanning CDN/third-party infra, do NOT run deep scans.
+# - If you have strict rate limits from the program, reduce -rate.
+
+# ----------------------------
+# 1) Install / verify
+# ----------------------------
+# Option A (recommended): via go
+#   go version
+#   go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
+#   naabu -version
+#
+# Option B: use a prebuilt binary release (manual)
+#   Download naabu for Windows from ProjectDiscovery releases, add to PATH.
+
+# Verify supported flags (naabu changes over time):
+#   naabu -h
+# You should confirm at least these capabilities exist in your build:
+#   -list input (usually -l), -top-ports, -p (custom ports/port ranges), -rate, -retries, -timeout, -o
+
+# ----------------------------
+# 2) STRICT preflight + working files
+# ----------------------------
+# Make folders + strict preflight
+#   New-Item -ItemType Directory -Force temp\agent1 | Out-Null
+#   New-Item -ItemType Directory -Force temp\agent1\logs | Out-Null
+#   New-Item -ItemType Directory -Force outputs | Out-Null
+#   if (!(Test-Path outputs\activesubdomain.txt)) { throw "Missing outputs\\activesubdomain.txt" }
+#
+# Normalize targets (lowercase, trim, unique)
+#   Get-Content outputs\activesubdomain.txt |
+#     Where-Object { $_ -and $_.Trim() -ne "" } |
+#     ForEach-Object { $_.Trim().ToLower() } |
+#     Sort-Object -Unique |
+#     Set-Content temp\agent1\naabu_targets_hosts.txt
+#
+# Sanity counts (strict: don’t scan empty lists)
+#   $n = (Get-Content temp\agent1\naabu_targets_hosts.txt).Count
+#   if ($n -lt 1) { throw "No targets found in temp\\agent1\\naabu_targets_hosts.txt" }
+#   Write-Host "[naabu] targets: $n"
+#
+# Reset outputs for a clean run (so you can append deterministically across phases)
+#   Remove-Item -ErrorAction SilentlyContinue temp\agent1\ports_open_hostport_raw.txt
+#   Remove-Item -ErrorAction SilentlyContinue outputs\ports_open_hostport.txt
+#   Remove-Item -ErrorAction SilentlyContinue outputs\ports_open_hosts.txt
+#   Remove-Item -ErrorAction SilentlyContinue outputs\ports_open_ports.txt
+
+# Create a log file for this run (strict: always capture stderr/stdout)
+#   $ts = Get-Date -Format 'yyyyMMdd_HHmmss'
+#   $log = "temp\\agent1\\logs\\naabu_$ts.log"
+#   "[naabu] start $ts" | Set-Content $log
+
+# ----------------------------
+# 3) Phase A — Fast scan (top ports)
+# ----------------------------
+# This is the highest signal, lowest risk pass.
+# Tune -rate downward if you hit timeouts or program limits.
+# Output is appended to the raw file.
+#
+#   naabu -l temp\agent1\naabu_targets_hosts.txt -top-ports 1000 -rate 3000 -retries 1 -timeout 1000 -silent -o temp\agent1\_ports_open_hostport_part.txt
+#   naabu -l temp\agent1\naabu_targets_hosts.txt -top-ports 1000 -rate 3000 -retries 1 -timeout 1000 -silent -o temp\agent1\_ports_open_hostport_part.txt 2>&1 | Tee-Object -FilePath $log -Append
+#   if (Test-Path temp\agent1\_ports_open_hostport_part.txt) { Get-Content temp\agent1\_ports_open_hostport_part.txt | Add-Content temp\agent1\ports_open_hostport_raw.txt; Remove-Item temp\agent1\_ports_open_hostport_part.txt }
+#   if (Test-Path temp\agent1\ports_open_hostport_raw.txt) { Write-Host "[naabu] raw lines so far: $((Get-Content temp\agent1\ports_open_hostport_raw.txt).Count)" }
+
+# ----------------------------
+# 4) Phase B — Targeted "web-ish" ports (catch what top-ports can miss)
+# ----------------------------
+# Create a small explicit port set (strict + reproducible). Edit if your program forbids certain ports.
+#   '80,81,443,591,593,8000,8008,8080,8081,8088,8090,8181,8222,8333,8443,8500,8888,9000,9001,9080,9090,9200,9443' | Set-Content temp\agent1\naabu_ports_webish.txt
+#
+# Run it (append to raw):
+#   naabu -l temp\agent1\naabu_targets_hosts.txt -p (Get-Content temp\agent1\naabu_ports_webish.txt) -rate 2500 -retries 1 -timeout 1000 -silent -o temp\agent1\_ports_open_hostport_part.txt 2>&1 | Tee-Object -FilePath $log -Append
+#   if (Test-Path temp\agent1\_ports_open_hostport_part.txt) { Get-Content temp\agent1\_ports_open_hostport_part.txt | Add-Content temp\agent1\ports_open_hostport_raw.txt; Remove-Item temp\agent1\_ports_open_hostport_part.txt }
+#   if (Test-Path temp\agent1\ports_open_hostport_raw.txt) { Write-Host "[naabu] raw lines so far: $((Get-Content temp\agent1\ports_open_hostport_raw.txt).Count)" }
+
+# Optional Phase C — Broader coverage
+# Choose ONE, only if allowed by scope/policy and you can keep each run under 9 minutes:
+#   - Top 10000:
+#       naabu -l temp\agent1\naabu_targets_hosts.txt -top-ports 10000 -rate 1500 -retries 1 -timeout 1000 -silent -o temp\agent1\_ports_open_hostport_part.txt 2>&1 | Tee-Object -FilePath $log -Append
+#   - Full TCP range (most complete, most expensive): use port-range batching in section 6.
+
+# ----------------------------
+# 5) Derive helper files
+# ----------------------------
+# First dedupe raw -> final (strict)
+#   if (!(Test-Path temp\agent1\ports_open_hostport_raw.txt)) { Write-Host "[naabu] No raw output yet (no open ports found or scan failed)." }
+#   if (Test-Path temp\agent1\ports_open_hostport_raw.txt) {
+#     Get-Content temp\agent1\ports_open_hostport_raw.txt |
+#       Where-Object { $_ -and $_.Trim() -ne "" } |
+#       ForEach-Object { $_.Trim() } |
+#       Sort-Object -Unique |
+#       Set-Content outputs\ports_open_hostport.txt
+#   }
+#
+# hosts with open ports
+#   if (Test-Path outputs\ports_open_hostport.txt) {
+#     Get-Content outputs\ports_open_hostport.txt | ForEach-Object { ($_ -split ':')[0] } | Sort-Object -Unique | Set-Content outputs\ports_open_hosts.txt
+#   }
+#
+# unique ports
+#   if (Test-Path outputs\ports_open_hostport.txt) {
+#     Get-Content outputs\ports_open_hostport.txt | ForEach-Object { ($_ -split ':')[1] } | Sort-Object -Unique | Set-Content outputs\ports_open_ports.txt
+#   }
+
+# ----------------------------
+# 6) 9-minute batching (PowerShell) — STRICT
+# ----------------------------
+# You have two safe batching strategies. Use both if needed.
+#
+# A) Batch by HOSTS (best for top-ports scans)
+# If your host list is large, split it into chunks and scan each chunk.
+#
+# Chunk size guidance:
+# - Start with 2000 hosts per chunk for top-ports 1000.
+# - Lower chunk size if you still hit the 9-minute timeout.
+#
+# Create chunks:
+#   $in = 'temp\\agent1\\naabu_targets_hosts.txt'
+#   $chunkSize = 2000
+#   $outDir = 'temp\\agent1\\chunks_naabu'
+#   New-Item -ItemType Directory -Force $outDir | Out-Null
+#   $lines = Get-Content $in
+#   $i = 0
+#   for ($p = 0; $p -lt $lines.Count; $p += $chunkSize) {
+#     $chunk = $lines[$p..([Math]::Min($p+$chunkSize-1, $lines.Count-1))]
+#     $chunkPath = Join-Path $outDir ("chunk_{0:d4}.txt" -f $i)
+#     $chunk | Set-Content $chunkPath
+#     $i++
+#   }
+#
+# Run scan per chunk (append results):
+#   # Note: We do NOT clear the raw file here, relying on Section 2 to have cleared it (or not, if appending phases).
+#   Get-ChildItem $outDir -Filter 'chunk_*.txt' | Sort-Object Name | ForEach-Object {
+#     $chunk = $_.FullName
+#     Write-Host "[naabu] scanning $chunk"
+#     naabu -l $chunk -top-ports 1000 -rate 3000 -retries 1 -timeout 1000 -silent -o temp\\agent1\\_ports_open_hostport_part.txt 2>&1 | Tee-Object -FilePath $log -Append
+#     if (Test-Path temp\\agent1\\_ports_open_hostport_part.txt) {
+#       Get-Content temp\\agent1\\_ports_open_hostport_part.txt | Add-Content temp\\agent1\\ports_open_hostport_raw.txt
+#       Remove-Item temp\\agent1\\_ports_open_hostport_part.txt
+#     }
+#   }
+#
+# B) Batch by PORT RANGES (best for deep scans)
+# If you want full coverage but must stay under 9 minutes, split the port range into slices.
+# Example ranges (edit to fit your time budget):
+#   $ranges = @('1-10000','10001-20000','20001-30000','30001-40000','40001-50000','50001-65535')
+#   foreach ($r in $ranges) {
+#     Write-Host "[naabu] scanning ports $r"
+#     naabu -l temp\\agent1\\naabu_targets_hosts.txt -p $r -rate 1200 -retries 1 -timeout 1000 -silent -o temp\\agent1\\_ports_open_hostport_part.txt 2>&1 | Tee-Object -FilePath $log -Append
+#     if (Test-Path temp\\agent1\\_ports_open_hostport_part.txt) {
+#       Get-Content temp\\agent1\\_ports_open_hostport_part.txt | Add-Content temp\\agent1\\ports_open_hostport_raw.txt
+#       Remove-Item temp\\agent1\\_ports_open_hostport_part.txt
+#     }
+#   }
+#
+# After batching, always run section 5 to dedupe -> final.
+
+
+
+

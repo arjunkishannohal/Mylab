@@ -1,0 +1,125 @@
+# Tool 18 — kiterunner (API endpoint discovery) — STRICT RUN-CARD
+# Goal: discover likely API endpoints on your in-scope live web targets.
+# Inputs (contract):
+#   - outputs/live_base_urls.txt            (scheme://host)  [required]
+#   - outputs/live_hostport_urls.txt        (scheme://host:port) [optional]
+#   - a kiterunner routes wordlist (.kite)      [required]
+# Outputs (contract):
+#   - temp/agent1/kiterunner_targets_urls.txt
+#   - temp/agent1/kiterunner_raw.json
+#   - outputs/queue_api_endpoints_kiterunner.txt
+#   - temp/agent1/logs/kiterunner_YYYYMMDD_HHMMSS.log
+# Time rule: keep each command under ~9 minutes (batch if needed).
+
+# ----------------------------
+# 0) Preconditions
+# ----------------------------
+# - Only test in-scope targets.
+# - Respect program rate limits.
+
+# ----------------------------
+# 1) Install / verify
+# ----------------------------
+# Option A (recommended): use a prebuilt binary release
+# - Download kiterunner for Windows from Assetnote releases.
+# - Ensure `kr.exe` is in PATH.
+#
+# Verify:
+#   kr --help
+
+# ----------------------------
+# 2) STRICT preflight + seed list
+# ----------------------------
+#   New-Item -ItemType Directory -Force temp\agent1 | Out-Null
+#   New-Item -ItemType Directory -Force temp\agent1\logs | Out-Null
+#   New-Item -ItemType Directory -Force outputs | Out-Null
+#   if (!(Test-Path outputs\live_base_urls.txt)) { throw "Missing outputs\\live_base_urls.txt" }
+#
+# Build a single targets file:
+#   Remove-Item -ErrorAction SilentlyContinue temp\agent1\kiterunner_targets_urls.txt
+#   Get-Content outputs\live_base_urls.txt | Where-Object { $_ -and $_.Trim() -ne "" } | ForEach-Object { $_.Trim() } | Add-Content temp\agent1\kiterunner_targets_urls.txt
+#   if (Test-Path outputs\live_hostport_urls.txt) {
+#     Get-Content outputs\live_hostport_urls.txt | Where-Object { $_ -and $_.Trim() -ne "" } | ForEach-Object { $_.Trim() } | Add-Content temp\agent1\kiterunner_targets_urls.txt
+#   }
+#   Get-Content temp\agent1\kiterunner_targets_urls.txt | Sort-Object -Unique | Set-Content temp\agent1\kiterunner_targets_urls.txt
+#   $n = (Get-Content temp\agent1\kiterunner_targets_urls.txt).Count
+#   if ($n -lt 1) { throw "No targets found in temp\\agent1\\kiterunner_targets_urls.txt" }
+#   Write-Host "[kiterunner] targets: $n"
+#
+# Routes wordlist
+# - If you already have one: prefer an existing .kite file you trust.
+# - If this repo already has a small one, you can use:
+#     temp\agent1\routes-small.kite
+#
+# Strict check:
+#   $routes = 'temp\\agent1\\routes-small.kite'
+#   if (!(Test-Path $routes)) { throw "Missing routes wordlist (.kite). Expected: $routes" }
+
+# Log file
+#   $ts = Get-Date -Format 'yyyyMMdd_HHmmss'
+#   $log = "temp\\agent1\\logs\\kiterunner_$ts.log"
+#   "[kiterunner] start $ts" | Set-Content $log
+#
+# Reset outputs
+#   Remove-Item -ErrorAction SilentlyContinue temp\agent1\kiterunner_raw.json
+#   Remove-Item -ErrorAction SilentlyContinue outputs\queue_api_endpoints_kiterunner.txt
+
+# ----------------------------
+# 3) Run (baseline)
+# ----------------------------
+# Notes:
+# - Keep concurrency sane; kiterunner can be noisy.
+# - Start conservative, then increase if you stay within rate limits.
+#
+# Example baseline (adjust flags based on `kr --help` output):
+#   kr scan temp\agent1\kiterunner_targets_urls.txt -w $routes -o temp\agent1\kiterunner_raw.json 2>&1 | Tee-Object -FilePath $log -Append
+
+# ----------------------------
+# 4) Extract endpoints list (simple)
+# ----------------------------
+# If your kiterunner output is JSON lines, you can do a basic string extraction.
+# This is intentionally simple/robust for Windows environments.
+#
+#   if (!(Test-Path temp\agent1\kiterunner_raw.json)) { throw "Missing temp\\agent1\\kiterunner_raw.json" }
+#   Get-Content temp\agent1\kiterunner_raw.json |
+#     Select-String -Pattern '"url"\s*:\s*"' |
+#     ForEach-Object {
+#       $m = [regex]::Match($_.Line, '"url"\s*:\s*"([^"]+)"')
+#       if ($m.Success) { $m.Groups[1].Value }
+#     } |
+#     Where-Object { $_ } |
+#     Sort-Object -Unique |
+#     Set-Content outputs\queue_api_endpoints_kiterunner.txt
+
+# ----------------------------
+# 5) 9-minute batching (PowerShell)
+# ----------------------------
+# Use this if your target list is large or the scan runs longer than your environment timeout.
+#
+# Create target chunks:
+#   $in = 'temp\\agent1\\kiterunner_targets_urls.txt'
+#   $chunkSize = 150
+#   $outDir = 'temp\\agent1\\chunks_kiterunner'
+#   New-Item -ItemType Directory -Force $outDir | Out-Null
+#   $lines = Get-Content $in
+#   $i = 0
+#   for ($p = 0; $p -lt $lines.Count; $p += $chunkSize) {
+#     $chunk = $lines[$p..([Math]::Min($p+$chunkSize-1, $lines.Count-1))]
+#     $chunkPath = Join-Path $outDir ("chunk_{0:d4}.txt" -f $i)
+#     $chunk | Set-Content $chunkPath
+#     $i++
+#   }
+#
+# Run per chunk (append JSON lines):
+#   Remove-Item -ErrorAction SilentlyContinue temp\\agent1\\kiterunner_raw.json
+#   Get-ChildItem $outDir -Filter 'chunk_*.txt' | Sort-Object Name | ForEach-Object {
+#     $chunk = $_.FullName
+#     Write-Host "[kiterunner] scanning $chunk"
+#     kr scan $chunk -w $routes -o temp\\agent1\\_kr_part.json 2>&1 | Tee-Object -FilePath $log -Append
+#     if (Test-Path temp\\agent1\\_kr_part.json) {
+#       Get-Content temp\\agent1\\_kr_part.json | Add-Content temp\\agent1\\kiterunner_raw.json
+#       Remove-Item temp\\agent1\\_kr_part.json
+#     }
+#   }
+#
+# After batching, run section 4 to build queue_api_endpoints_kiterunner.txt
