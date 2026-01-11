@@ -1,6 +1,13 @@
 # Task 29 — HAR Analysis — RUN-CARD + CONTRACT
-# Goal: Parse HAR captures (browser/mobile traffic) and extract high-value testing data.
+# Goal: Deep-analyze HAR captures (browser/mobile traffic) to extract ALL useful testing data.
 # This is INFO GATHERING (safe): only parses files you captured. No network calls.
+#
+# YOU ARE NOT LIMITED TO THE PROVIDED SCRIPT.
+# The har_analyzer.py is a starting point. You SHOULD:
+#   - Read and understand the HAR JSON structure yourself
+#   - Write custom scripts if needed for deeper extraction
+#   - Look for patterns the base script might miss
+#   - Extract anything useful for security testing
 #
 # KEY FEATURE: Saves account-specific data (tokens, IDs, auth) SEPARATELY per account.
 #              Common data (endpoints, headers) is shared.
@@ -44,47 +51,153 @@
 #   if (!(Test-Path outputs\activesubdomain.txt)) { throw "Missing outputs\\activesubdomain.txt" }
 
 # ----------------------------
-# 2) Tool
+# 2) HAR Structure (understand this!)
+# ----------------------------
+# HAR is JSON with this structure:
+#   {
+#     "log": {
+#       "entries": [
+#         {
+#           "request": {
+#             "method": "POST",
+#             "url": "https://api.example.com/v1/users/123",
+#             "headers": [{"name": "Authorization", "value": "Bearer eyJ..."}],
+#             "cookies": [{"name": "session", "value": "abc123"}],
+#             "queryString": [{"name": "id", "value": "456"}],
+#             "postData": {
+#               "mimeType": "application/json",
+#               "text": "{\"userId\": 789, \"action\": \"delete\"}",
+#               "params": [{"name": "key", "value": "val"}]
+#             }
+#           },
+#           "response": {
+#             "status": 200,
+#             "headers": [{"name": "Set-Cookie", "value": "token=xyz"}],
+#             "content": {
+#               "mimeType": "application/json",
+#               "text": "{\"success\": true, \"data\": {...}}"
+#             }
+#           }
+#         }
+#       ]
+#     }
+#   }
+#
+# Read the HAR yourself: Get-Content manual\har\user1.har | ConvertFrom-Json
+
+# ----------------------------
+# 3) Base Script (starting point)
 # ----------------------------
 # Script: task\task29\har_analyzer.py
-# Only in-scope hosts (exact hostname match against outputs/activesubdomain.txt) are included.
-# If you want suffix-based scope (*.example.com), expand the allowlist first.
-
-# ----------------------------
-# 3) Run (PowerShell)
-# ----------------------------
-# Single HAR:
-#   python task\task29\har_analyzer.py --har manual\har\user1.har --workspace .
+# Run:    python task\task29\har_analyzer.py --har manual\har\user1.har --workspace .
 #
-# Multiple HARs (run each one to get per-account auth files):
-#   Get-ChildItem manual\har -Filter '*.har' | Sort-Object Name | ForEach-Object {
-#     Write-Host "[har] analyzing $($_.FullName)"
-#     python task\task29\har_analyzer.py --har $_.FullName --workspace .
-#   }
+# This extracts common patterns. BUT you should go deeper.
 
 # ----------------------------
-# 4) Output sanity check
+# 4) DEEP ANALYSIS — Do This Yourself
+# ----------------------------
+# Don't just run the script. Manually investigate:
+#
+# A) AUTHENTICATION PATTERNS
+#    - Find ALL Authorization header values (Bearer, Basic, API keys)
+#    - Find ALL cookies that look like sessions
+#    - Find tokens in URL params (?token=, ?key=, ?auth=)
+#    - Find tokens in POST body (JSON fields: token, apiKey, secret)
+#    - Find tokens in custom headers (X-Auth-Token, X-API-Key, etc.)
+#
+# B) USER/ACCOUNT IDENTIFIERS
+#    - Find ALL IDs in URLs: /users/123, /accounts/456, /org/789
+#    - Find ALL IDs in query params: ?userId=, ?accountId=, ?profileId=
+#    - Find ALL IDs in POST body: {"userId": 123, "targetId": 456}
+#    - Find ALL IDs in response body (for IDOR: what IDs does the app return?)
+#
+# C) INTERESTING ENDPOINTS
+#    - Admin/management: /admin, /manage, /internal, /debug
+#    - File operations: /upload, /download, /export, /import
+#    - User operations: /delete, /update, /create, /invite
+#    - Payment/sensitive: /payment, /billing, /transfer, /withdraw
+#    - API versioning: /v1/, /v2/, /api/, /graphql
+#
+# D) RESPONSE ANALYSIS
+#    - What data comes back? (PII, other users' data, internal IDs)
+#    - Error messages (stack traces, SQL errors, path disclosure)
+#    - Different responses for same endpoint (authorization differences)
+#
+# E) HEADERS TO NOTE
+#    - CORS: Access-Control-Allow-Origin, Access-Control-Allow-Credentials
+#    - Security: X-Frame-Options, CSP, X-XSS-Protection
+#    - Caching: Cache-Control, Pragma (sensitive data cached?)
+#    - Custom: Any X-* headers that reveal internal info
+#
+# F) COMPARE user1.har vs user2.har
+#    - Different tokens/sessions (obviously)
+#    - Different IDs for same user actions
+#    - Any endpoints one user has that other doesn't
+#    - Response differences (more/less data?)
+
+# ----------------------------
+# 5) Write Custom Scripts If Needed
+# ----------------------------
+# Example: Extract all unique IDs from URLs
+#   $har = Get-Content manual\har\user1.har | ConvertFrom-Json
+#   $har.log.entries | ForEach-Object {
+#     if ($_.request.url -match '/(\d{5,})') { $matches[1] }
+#   } | Sort-Object -Unique
+#
+# Example: Find all POST endpoints with JSON body
+#   $har.log.entries | Where-Object {
+#     $_.request.method -eq 'POST' -and
+#     $_.request.postData.mimeType -like '*json*'
+#   } | ForEach-Object { $_.request.url }
+#
+# Example: Extract all cookies across all requests
+#   $har.log.entries | ForEach-Object {
+#     $_.request.cookies | ForEach-Object { "$($_.name)=$($_.value)" }
+#   } | Sort-Object -Unique
+#
+# Example: Find responses containing email addresses
+#   $har.log.entries | Where-Object {
+#     $_.response.content.text -match '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+#   } | ForEach-Object { $_.request.url }
+#
+# Create your own scripts in task\task29\ if you find patterns worth extracting.
+
+# ----------------------------
+# 6) Run Base Script + Your Analysis
+# ----------------------------
+# Step 1: Run the base script for standard extraction
+#   python task\task29\har_analyzer.py --har manual\har\user1.har --workspace .
+#   python task\task29\har_analyzer.py --har manual\har\user2.har --workspace .
+#
+# Step 2: Read the HAR yourself and look for what the script missed
+#   $har1 = Get-Content manual\har\user1.har | ConvertFrom-Json
+#   $har2 = Get-Content manual\har\user2.har | ConvertFrom-Json
+#
+# Step 3: Document additional findings in outputs/har/manual_findings.txt
+
+# ----------------------------
+# 7) Output Sanity Check
 # ----------------------------
 #   if (!(Test-Path outputs\har\common_data.txt)) { throw "Missing outputs\\har\\common_data.txt" }
 #   if (!(Test-Path outputs\har\har-report.md)) { throw "Missing outputs\\har\\har-report.md" }
-#   if (!(Test-Path outputs\har\har_summary.json)) { throw "Missing outputs\\har\\har_summary.json" }
 #   if (!(Test-Path outputs\har\accounts)) { throw "Missing outputs\\har\\accounts" }
 
 # ----------------------------
-# 5) Compare 2 accounts (IDOR testing)
+# 8) IDOR Testing Prep
 # ----------------------------
-# After running both user1.har and user2.har:
-#   outputs/har/accounts/user1_auth.txt   -> tokens/IDs for user1
-#   outputs/har/accounts/user2_auth.txt   -> tokens/IDs for user2
+# After analysis, you should have:
+#   outputs/har/accounts/user1_auth.txt   -> user1's tokens + IDs
+#   outputs/har/accounts/user2_auth.txt   -> user2's tokens + IDs
 #
-# Use these to:
-#   - Swap tokens between accounts
-#   - Test IDOR by replacing user1's ID with user2's ID
-#   - Check horizontal privilege escalation
+# For IDOR testing:
+#   - Take user1's token, replace user1's ID with user2's ID
+#   - Take user2's token, try to access user1's resources
+#   - Look for numeric/predictable IDs you can enumerate
 
 # ----------------------------
-# 6) Notes
+# 9) Notes
 # ----------------------------
 # - TEST ACCOUNTS ONLY — real values are saved for replay/testing.
 # - Do not commit outputs/har/accounts/* if it contains real user data.
-# - Each HAR creates its own account file in outputs/har/accounts/.
+# - The base script is a STARTING POINT. Your manual analysis is MORE IMPORTANT.
+# - If you find new patterns worth automating, add them to har_analyzer.py or create new scripts.
