@@ -46,8 +46,8 @@ mindmap
         output: outputs/live_base_urls.txt
       Task_8_Cariddi_inline
         input: outputs/live_base_urls.txt
-        output: outputs/cariddi/cariddi_urls_in_scope.txt
-        output: outputs/url_corpus_all_in_scope.txt
+        output: outputs/cariddi/cariddi_urls_in_scope.txt (merged into url_corpus_all_in_scope.txt)
+        output: outputs/url_corpus_all_in_scope.txt (canonical corpus; consumed by Task_16_17_Arjun)
       Task_12_Naabu
         input: outputs/activesubdomain.txt
         output: outputs/ports_open_hostport.txt
@@ -130,6 +130,7 @@ flowchart TD
   A --> C8
   C8 --> C1[outputs/cariddi/cariddi_findings.txt]
   C8 --> C2[outputs/cariddi/cariddi_urls_in_scope.txt]
+  C2 --> UC
   C8 --> UC[outputs/url_corpus_all_in_scope.txt]
 
   A --> N12[Task 12: naabu]
