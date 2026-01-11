@@ -41,6 +41,7 @@ You can run all steps, but this ordering is the typical “full pipeline”:
 - Task 4: `waymore` → `temp/agent1/list_2_archives.txt`
 - Task 5: wordlist + `puredns bruteforce` → `temp/agent1/list_3_bruteforce.txt`
 - Task 10 (optional): `hakrevdns` → `temp/agent1/list_4_reverse.txt`
+  - If you’re running tasks strictly in numeric order (1,2,3,4,…) and you want reverse DNS to contribute to permutations/candidates, run Task 10 **before** Task 6 and Task 7. (If you run Task 10 later, it won’t be consumed.)
 - Task 6: `alterx` permutations → `temp/agent1/list_5_permutations.txt`
 - Task 7: `puredns resolve + wildcard filtering` → **`outputs/activesubdomain.txt`** (+ audit copies)
 
