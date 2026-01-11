@@ -1,0 +1,111 @@
+Recon Pipeline Outputs Index
+
+This file lists the expected artifacts produced by the run-cards.
+
+1) IMPORTANT OUTPUTS (final / downstream artifacts)
+
+Core allowlist / scope
+- outputs/activesubdomain.txt
+
+Live discovery
+- outputs/live_base_urls.txt
+- outputs/live_seeds.txt (optional)
+- outputs/ports_open_hostport.txt
+- outputs/ports_open_hosts.txt
+- outputs/ports_open_ports.txt
+- outputs/live_hostport_urls.txt
+
+Known files / API docs discovery
+- outputs/web_knownfiles_robots_sitemaps_security_urls.txt
+- outputs/api_docs_urls.txt
+
+URL corpora
+- outputs/katana_urls.txt
+- outputs/gau_urls.txt
+- outputs/katana_urls_in_scope.txt
+- outputs/gau_urls_in_scope.txt
+- outputs/url_corpus_all_in_scope.txt (combined corpus; maintained/merged)
+
+API / parameters
+- outputs/queue_api_endpoints_kiterunner.txt
+- outputs/api_endpoints_live.txt
+- outputs/arjun_found_params.txt
+
+JS pipeline
+- outputs/js_urls.txt
+- outputs/js_endpoints_from_js.txt
+- outputs/js_urls_live.txt
+- outputs/js_composed_live.txt
+
+Coverage / scanning
+- outputs/nuclei_findings.txt
+- outputs/ffuf_findings.txt
+- outputs/nmap/ (folder)
+- outputs/nmap_index.txt
+- outputs/gowitness/ (folder)
+- outputs/coverage_screenshots_index_gowitness.txt
+- outputs/coverage_takeover_candidates_subjack.txt
+- outputs/coverage_tls_sans_in_scope.txt
+
+Manual enrichment (HAR)
+- outputs/har/common_data.txt
+- outputs/har/har-report.md
+- outputs/har/har_summary.json
+- outputs/har/accounts/<harname>_auth.txt
+- outputs/har/accounts/<harname>_auth.json
+
+Enrichment (Cariddi; runs inside Task 8)
+- outputs/cariddi/cariddi_findings.txt
+- outputs/cariddi/cariddi_urls_raw.txt
+- outputs/cariddi/cariddi_urls_in_scope.txt
+
+Audit/diagnostic reports (repo helper outputs)
+- outputs/workflow_extracted.json
+- outputs/temp_agent1_refs_report.json
+- outputs/temp_agent1_refs_report.md
+
+
+2) TEMP OUTPUTS (intermediate / raw / logs)
+
+NOTE: These are expected under temp/agent1/ when running the pipeline. They are not stable contracts.
+
+Subdomain enumeration / candidates
+- temp/agent1/subfinder.txt
+- temp/agent1/subfinder.log
+- temp/agent1/amass.txt
+- temp/agent1/list_1_passive.txt
+- temp/agent1/list_2_archives.txt
+- temp/agent1/list_3_bruteforce.txt
+- temp/agent1/list_4_reverse.txt (optional)
+- temp/agent1/list_5_permutations.txt
+
+Resolvers / DNS resolution
+- temp/agent1/resolvers_good.txt
+- temp/agent1/resolvers.txt (raw resolver list)
+- temp/agent1/candidates_all.txt
+- temp/agent1/resolved.txt
+- temp/agent1/wildcards.txt (optional debug)
+- temp/agent1/massdns.txt (optional debug)
+
+HTTP probing intermediates
+- temp/agent1/httpx_chunks/ (chunk files)
+- temp/agent1/_httpx_tmp.txt
+- temp/agent1/known_files_probes.txt
+- temp/agent1/known_files_hits.txt
+
+Crawling / discovery intermediates
+- temp/agent1/katana.txt
+- temp/agent1/gau.txt
+- temp/agent1/hakrawler.txt
+- temp/agent1/url_corpus_raw.txt
+
+JS fetch intermediates
+- temp/agent1/js_fetch_dir/
+- temp/agent1/js_fetch_index.txt
+
+Port scanning intermediates
+- temp/agent1/naabu_raw.txt (or tool logs)
+
+General
+- temp/agent1/*.log
+- temp/agent1/*_raw.*
