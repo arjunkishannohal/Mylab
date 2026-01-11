@@ -81,6 +81,11 @@ You can run all steps, but this ordering is the typical “full pipeline”:
   - Common data: `outputs/har/common_data.txt` (endpoints, headers, CORS)
   - Deep analysis guide included — not just script, do manual investigation
 
+8) Optional enrichment
+- Task 31: Cariddi crawl + hunt (optional) → `outputs/cariddi/*`
+  - Input: `outputs/live_base_urls.txt` (from Task 8)
+  - Output: `outputs/cariddi/cariddi_urls_in_scope.txt` (clean URL list you can merge into your corpus)
+
 ## Run-card reference (inputs → outputs)
 
 Below is the per-run-card “tool I/O contract”. If a task folder contains multiple run-cards, they are listed under the same task.
@@ -364,6 +369,18 @@ Below is the per-run-card “tool I/O contract”. If a task folder contains mul
   - `<domain>` (root domain string for suffix filter)
 - Outputs:
   - `outputs/coverage_tls_sans_in_scope.txt` (plus temp intermediates)
+
+### Task 31 — Cariddi (optional enrichment)
+- Run-card: `task/task31/cariddi.txt`
+- Inputs:
+  - `outputs/live_base_urls.txt` (from Task 8)
+  - `outputs/activesubdomain.txt`
+- Outputs:
+  - `outputs/cariddi/cariddi_findings.txt` (raw findings)
+  - `outputs/cariddi/cariddi_urls_in_scope.txt` (scope-filtered URL list)
+- Notes:
+  - Optional: keep outputs separate; only merge the cleaned URL list into your corpus if it adds value
+  - cariddi is GPL-3.0; install externally (don’t vendor)
 
 ## Helpers
 

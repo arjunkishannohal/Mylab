@@ -60,3 +60,7 @@ Get-Content outputs/live_base_urls.txt | Sort-Object -Unique | Set-Content -Enco
 Notes
 - This probes default web ports (80/443) from hostnames.
 - Keep results scope-safe by only feeding allowlisted hosts.
+
+Optional enrichment
+- You can optionally run Cariddi after this step to crawl from `outputs/live_base_urls.txt` and hunt for secrets/errors/endpoints.
+- Run-card: task\task31\cariddi.txt
