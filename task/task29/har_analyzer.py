@@ -2,19 +2,21 @@
 """HAR analyzer (stdlib-only).
 
 Purpose
-- Parse a HAR capture (browser/mobile traffic) and extract high-value testing data.
+- Parse HAR captures (browser/mobile traffic) and extract high-value testing data.
 - Enforce scope using outputs/activesubdomain.txt (hostname allowlist).
-- Redact sensitive values (tokens/cookies/secrets) in written reports.
+- Save account-specific data (tokens, IDs, auth) in SEPARATE per-account files.
+- Save common data (endpoints, headers) in shared files.
 
 Inputs
 - --har <path>            : HAR file to analyze
 - --workspace <path>      : repo/workspace root (default: '.')
 
 Outputs (created/overwritten)
-- outputs/har/important_data.txt
-- outputs/har/har-report.md
-- outputs/har/har_summary.json
-- outputs/har/per_har/<harname>_*
+- outputs/har/common_data.txt              (shared: endpoints, headers, CORS)
+- outputs/har/har-report.md                (summary report)
+- outputs/har/har_summary.json             (machine-readable summary)
+- outputs/har/accounts/<harname>_auth.txt  (per-account: tokens, cookies, IDs)
+- outputs/har/accounts/<harname>_auth.json (per-account: machine-readable)
 
 Safety
 - No network calls.
@@ -27,13 +29,57 @@ import argparse
 import json
 import re
 from collections import Counter
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import parse_qsl, urlsplit
 
 
-SENSITIVE_HEADER_NAMES = {
+# Patterns to identify ID-like parameters (account IDs, user IDs, etc.)
+ID_PARAM_HINTS = (
+    "id",
+    "uid",
+    "userid",
+    "user_id",
+    "accountid",
+    "account_id",
+    "orgid",
+    "org_id",
+    "teamid",
+    "team_id",
+    "projectid",
+    "project_id",
+    "customerid",
+    "customer_id",
+    "profileid",
+    "profile_id",
+    "memberid",
+    "member_id",
+)
+
+# Patterns to identify auth-related parameters
+AUTH_PARAM_HINTS = (
+    "token",
+    "auth",
+    "session",
+    "jwt",
+    "key",
+    "apikey",
+    "api_key",
+    "secret",
+    "password",
+    "pass",
+    "sig",
+    "signature",
+    "code",
+    "access_token",
+    "refresh_token",
+    "bearer",
+    "csrf",
+    "xsrf",
+)
+
+# Auth-related headers (we want to capture their VALUES for testing)
+AUTH_HEADER_NAMES = {
     "authorization",
     "proxy-authorization",
     "cookie",
@@ -42,23 +88,11 @@ SENSITIVE_HEADER_NAMES = {
     "x-auth-token",
     "x-csrf-token",
     "x-xsrf-token",
+    "x-access-token",
+    "x-refresh-token",
+    "x-session-id",
+    "x-request-id",
 }
-
-SENSITIVE_PARAM_HINTS = (
-    "token",
-    "auth",
-    "session",
-    "jwt",
-    "key",
-    "secret",
-    "password",
-    "pass",
-    "sig",
-    "signature",
-    "code",
-)
-
-BEARER_RE = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
 
 
 def _safe_slug(s: str) -> str:
@@ -102,30 +136,6 @@ def _as_kv_list(obj: Any, name_key: str = "name", value_key: str = "value") -> L
     return out
 
 
-def _redact_value(header_or_key: str, value: str) -> str:
-    key = (header_or_key or "").strip().lower()
-    if key in SENSITIVE_HEADER_NAMES:
-        if key == "authorization":
-            return BEARER_RE.sub("Bearer <REDACTED>", value) if value else "<REDACTED>"
-        return "<REDACTED>"
-
-    if value and len(value) >= 24 and re.search(r"[A-Za-z0-9_\-]{24,}", value):
-        return "<REDACTED>"
-
-    return value
-
-
-def _redact_query_params(params: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
-    redacted: List[Tuple[str, str]] = []
-    for k, v in params:
-        kl = (k or "").lower()
-        if any(h in kl for h in SENSITIVE_PARAM_HINTS):
-            redacted.append((k, "<REDACTED>" if v else ""))
-        else:
-            redacted.append((k, v))
-    return redacted
-
-
 def _host_in_scope(host: Optional[str], allowlist: set[str]) -> bool:
     if not host:
         return False
@@ -133,32 +143,31 @@ def _host_in_scope(host: Optional[str], allowlist: set[str]) -> bool:
     return h in allowlist
 
 
-@dataclass(frozen=True)
-class HarRow:
-    host: str
-    method: str
-    path: str
-    query_keys: Tuple[str, ...]
-    status: int
-    has_auth: bool
-    cookie_names: Tuple[str, ...]
-    req_header_names: Tuple[str, ...]
-    resp_header_names: Tuple[str, ...]
+def _is_id_param(key: str) -> bool:
+    kl = (key or "").lower().replace("-", "_")
+    return any(hint in kl for hint in ID_PARAM_HINTS)
 
 
-def _cookie_names(cookie_header_value: str) -> List[str]:
+def _is_auth_param(key: str) -> bool:
+    kl = (key or "").lower().replace("-", "_")
+    return any(hint in kl for hint in AUTH_PARAM_HINTS)
+
+
+def _parse_cookies(cookie_header_value: str) -> List[Tuple[str, str]]:
+    """Parse Cookie header into (name, value) pairs."""
     if not cookie_header_value:
         return []
-    names: List[str] = []
+    cookies: List[Tuple[str, str]] = []
     for part in cookie_header_value.split(";"):
         part = part.strip()
         if not part:
             continue
         if "=" in part:
-            names.append(part.split("=", 1)[0].strip())
+            name, value = part.split("=", 1)
+            cookies.append((name.strip(), value.strip()))
         else:
-            names.append(part)
-    return [n for n in names if n]
+            cookies.append((part, ""))
+    return cookies
 
 
 def _extract_entries(har: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
@@ -177,18 +186,20 @@ def analyze(har_path: Path, workspace: Path) -> None:
     allowlist = _read_allowlist(workspace / "outputs" / "activesubdomain.txt")
     har = _safe_json_load(har_path)
 
-    rows: List[HarRow] = []
-
+    # Common aggregates (shared across accounts)
     hosts_seen: Counter[str] = Counter()
     methods_seen: Counter[str] = Counter()
     status_seen: Counter[int] = Counter()
     endpoint_seen: Counter[str] = Counter()
-    query_key_seen: Counter[str] = Counter()
     req_header_seen: Counter[str] = Counter()
     resp_header_seen: Counter[str] = Counter()
-    cookie_name_seen: Counter[str] = Counter()
-    auth_usage: Counter[str] = Counter()
     cors_notes: List[str] = []
+
+    # Account-specific data (unique per HAR/account)
+    auth_headers_raw: Dict[str, Set[str]] = {}  # header_name -> set of values
+    cookies_raw: Dict[str, Set[str]] = {}       # cookie_name -> set of values
+    id_params_raw: Dict[str, Set[str]] = {}     # param_name -> set of values
+    auth_params_raw: Dict[str, Set[str]] = {}   # param_name -> set of values
 
     for entry in _extract_entries(har):
         req = entry.get("request") if isinstance(entry.get("request"), dict) else {}
@@ -204,64 +215,80 @@ def analyze(har_path: Path, workspace: Path) -> None:
 
         path = parts.path or "/"
         query_pairs = parse_qsl(parts.query or "", keep_blank_values=True)
-        query_pairs = _redact_query_params([(k, v) for k, v in query_pairs])
-        query_keys = tuple(sorted({k for k, _ in query_pairs if k}))
 
         req_headers = _as_kv_list(req.get("headers"))
         resp_headers = _as_kv_list(resp.get("headers"))
 
-        req_header_names = tuple(sorted({k.strip().lower() for k, _ in req_headers if k.strip()}))
-        resp_header_names = tuple(sorted({k.strip().lower() for k, _ in resp_headers if k.strip()}))
-
-        auth_header_val = ""
-        cookie_header_val = ""
-        for k, v in req_headers:
-            kl = k.strip().lower()
-            if kl == "authorization":
-                auth_header_val = v
-            if kl == "cookie":
-                cookie_header_val = v
-
-        has_auth = bool(auth_header_val.strip())
-        cookie_names = tuple(sorted(set(_cookie_names(cookie_header_val))))
-
-        status = int(resp.get("status") or 0)
-
-        rows.append(
-            HarRow(
-                host=host,
-                method=method,
-                path=path,
-                query_keys=query_keys,
-                status=status,
-                has_auth=has_auth,
-                cookie_names=cookie_names,
-                req_header_names=req_header_names,
-                resp_header_names=resp_header_names,
-            )
-        )
-
+        # Aggregate common data
         hosts_seen[host] += 1
         methods_seen[method] += 1
-        status_seen[status] += 1
+        status_seen[int(resp.get("status") or 0)] += 1
         endpoint_seen[f"{method} {path}"] += 1
-        for qk in query_keys:
-            query_key_seen[qk] += 1
-        for hn in req_header_names:
-            req_header_seen[hn] += 1
-        for hn in resp_header_names:
-            resp_header_seen[hn] += 1
-        for cn in cookie_names:
-            cookie_name_seen[cn] += 1
 
-        if has_auth:
-            auth_usage["authorization_header_present"] += 1
-            auth_usage["authorization_header_value_redacted"] += 1
-        elif cookie_names:
-            auth_usage["cookie_auth_likely"] += 1
-        else:
-            auth_usage["no_auth_observed"] += 1
+        for k, _ in req_headers:
+            req_header_seen[k.strip().lower()] += 1
+        for k, _ in resp_headers:
+            resp_header_seen[k.strip().lower()] += 1
 
+        # Extract account-specific: auth headers (with full values)
+        for k, v in req_headers:
+            kl = k.strip().lower()
+            if kl in AUTH_HEADER_NAMES and v:
+                if kl not in auth_headers_raw:
+                    auth_headers_raw[kl] = set()
+                auth_headers_raw[kl].add(v)
+            # Parse cookies separately for better granularity
+            if kl == "cookie" and v:
+                for cookie_name, cookie_value in _parse_cookies(v):
+                    if cookie_name not in cookies_raw:
+                        cookies_raw[cookie_name] = set()
+                    if cookie_value:
+                        cookies_raw[cookie_name].add(cookie_value)
+
+        # Extract account-specific: ID and auth params from query string
+        for k, v in query_pairs:
+            if _is_id_param(k) and v:
+                if k not in id_params_raw:
+                    id_params_raw[k] = set()
+                id_params_raw[k].add(v)
+            if _is_auth_param(k) and v:
+                if k not in auth_params_raw:
+                    auth_params_raw[k] = set()
+                auth_params_raw[k].add(v)
+
+        # Extract account-specific: ID and auth params from POST body
+        post_data = req.get("postData")
+        if isinstance(post_data, dict):
+            params = _as_kv_list(post_data.get("params"))
+            for k, v in params:
+                if _is_id_param(k) and v:
+                    if k not in id_params_raw:
+                        id_params_raw[k] = set()
+                    id_params_raw[k].add(v)
+                if _is_auth_param(k) and v:
+                    if k not in auth_params_raw:
+                        auth_params_raw[k] = set()
+                    auth_params_raw[k].add(v)
+            # Also check text body for JSON
+            text = post_data.get("text", "")
+            if text and text.strip().startswith("{"):
+                try:
+                    body_json = json.loads(text)
+                    if isinstance(body_json, dict):
+                        for k, v in body_json.items():
+                            if isinstance(v, str):
+                                if _is_id_param(k) and v:
+                                    if k not in id_params_raw:
+                                        id_params_raw[k] = set()
+                                    id_params_raw[k].add(v)
+                                if _is_auth_param(k) and v:
+                                    if k not in auth_params_raw:
+                                        auth_params_raw[k] = set()
+                                    auth_params_raw[k].add(v)
+                except json.JSONDecodeError:
+                    pass
+
+        # CORS notes (common)
         cors_acao = None
         cors_acac = None
         for k, v in resp_headers:
@@ -271,93 +298,139 @@ def analyze(har_path: Path, workspace: Path) -> None:
             if kl == "access-control-allow-credentials":
                 cors_acac = v.strip()
         if cors_acao:
-            note = f"{host}{path} :: ACAO={_redact_value('access-control-allow-origin', cors_acao)}"
+            note = f"{host}{path} :: ACAO={cors_acao}"
             if cors_acac:
                 note += f"; ACAC={cors_acac}"
             cors_notes.append(note)
 
-    rows.sort(key=lambda r: (r.host, r.path, r.method))
-
+    # Create output directories
     out_dir = workspace / "outputs" / "har"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    per_har_dir = out_dir / "per_har"
-    per_har_dir.mkdir(parents=True, exist_ok=True)
+    accounts_dir = out_dir / "accounts"
+    accounts_dir.mkdir(parents=True, exist_ok=True)
+
     har_id = _safe_slug(har_path.stem)
 
-    important_lines: List[str] = []
-    important_lines.append(f"HAR: {har_path}")
-    important_lines.append(f"In-scope hosts matched: {len(hosts_seen)}")
-    important_lines.append("")
+    # ==========================================
+    # ACCOUNT-SPECIFIC FILE (per HAR / per user)
+    # ==========================================
+    account_lines: List[str] = []
+    account_lines.append(f"# Account Data: {har_path.name}")
+    account_lines.append(f"# HAR ID: {har_id}")
+    account_lines.append("")
 
-    important_lines.append("[Hosts]")
+    # Auth headers (Authorization, cookies, etc.)
+    if auth_headers_raw:
+        account_lines.append("[Auth Headers - FULL VALUES]")
+        for header_name in sorted(auth_headers_raw.keys()):
+            for val in sorted(auth_headers_raw[header_name]):
+                account_lines.append(f"{header_name}: {val}")
+        account_lines.append("")
+
+    # Cookies with values
+    if cookies_raw:
+        account_lines.append("[Cookies - FULL VALUES]")
+        for cookie_name in sorted(cookies_raw.keys()):
+            for val in sorted(cookies_raw[cookie_name]):
+                account_lines.append(f"{cookie_name}={val}")
+        account_lines.append("")
+
+    # ID parameters (userId, accountId, etc.)
+    if id_params_raw:
+        account_lines.append("[ID Parameters - FULL VALUES]")
+        for param_name in sorted(id_params_raw.keys()):
+            for val in sorted(id_params_raw[param_name]):
+                account_lines.append(f"{param_name}={val}")
+        account_lines.append("")
+
+    # Auth parameters (tokens, keys, etc.)
+    if auth_params_raw:
+        account_lines.append("[Auth Parameters - FULL VALUES]")
+        for param_name in sorted(auth_params_raw.keys()):
+            for val in sorted(auth_params_raw[param_name]):
+                account_lines.append(f"{param_name}={val}")
+        account_lines.append("")
+
+    account_text = "\n".join(account_lines) + "\n"
+    (accounts_dir / f"{har_id}_auth.txt").write_text(account_text, encoding="utf-8")
+
+    # Account JSON (machine readable)
+    account_json = {
+        "har_path": str(har_path),
+        "har_id": har_id,
+        "auth_headers": {k: sorted(v) for k, v in auth_headers_raw.items()},
+        "cookies": {k: sorted(v) for k, v in cookies_raw.items()},
+        "id_params": {k: sorted(v) for k, v in id_params_raw.items()},
+        "auth_params": {k: sorted(v) for k, v in auth_params_raw.items()},
+    }
+    (accounts_dir / f"{har_id}_auth.json").write_text(
+        json.dumps(account_json, indent=2), encoding="utf-8"
+    )
+
+    # ==========================================
+    # COMMON DATA FILE (shared across accounts)
+    # ==========================================
+    common_lines: List[str] = []
+    common_lines.append(f"# Common Data (shared across accounts)")
+    common_lines.append(f"# Last updated from: {har_path.name}")
+    common_lines.append(f"# In-scope hosts: {len(hosts_seen)}")
+    common_lines.append("")
+
+    common_lines.append("[Hosts]")
     for h, c in hosts_seen.most_common():
-        important_lines.append(f"- {h} (entries={c})")
-    important_lines.append("")
+        common_lines.append(f"- {h} (entries={c})")
+    common_lines.append("")
 
-    important_lines.append("[Endpoints]")
+    common_lines.append("[Endpoints]")
     for ep, c in endpoint_seen.most_common(200):
-        important_lines.append(f"- {ep} (hits={c})")
-    important_lines.append("")
+        common_lines.append(f"- {ep} (hits={c})")
+    common_lines.append("")
 
-    if query_key_seen:
-        important_lines.append("[Query Keys]")
-        for k, c in query_key_seen.most_common(200):
-            important_lines.append(f"- {k} (hits={c})")
-        important_lines.append("")
-
-    if cookie_name_seen:
-        important_lines.append("[Cookie Names]")
-        for k, c in cookie_name_seen.most_common(200):
-            important_lines.append(f"- {k} (hits={c})")
-        important_lines.append("")
-
-    important_lines.append("[Request Headers Seen]")
+    common_lines.append("[Request Headers]")
     for k, c in req_header_seen.most_common(100):
-        important_lines.append(f"- {k} (hits={c})")
-    important_lines.append("")
+        common_lines.append(f"- {k} (hits={c})")
+    common_lines.append("")
 
-    important_lines.append("[Response Headers Seen]")
+    common_lines.append("[Response Headers]")
     for k, c in resp_header_seen.most_common(100):
-        important_lines.append(f"- {k} (hits={c})")
-    important_lines.append("")
+        common_lines.append(f"- {k} (hits={c})")
+    common_lines.append("")
 
     if cors_notes:
-        important_lines.append("[CORS Notes]")
+        common_lines.append("[CORS Notes]")
         for line in sorted(set(cors_notes))[:200]:
-            important_lines.append(f"- {line}")
-        important_lines.append("")
+            common_lines.append(f"- {line}")
+        common_lines.append("")
 
-    important_data_text = "\n".join(important_lines) + "\n"
-    (out_dir / "important_data.txt").write_text(important_data_text, encoding="utf-8")
-    (per_har_dir / f"{har_id}_important_data.txt").write_text(important_data_text, encoding="utf-8")
+    common_text = "\n".join(common_lines) + "\n"
+    (out_dir / "common_data.txt").write_text(common_text, encoding="utf-8")
 
+    # ==========================================
+    # SUMMARY JSON (machine readable)
+    # ==========================================
     summary = {
         "har_path": str(har_path),
+        "har_id": har_id,
         "scope_allowlist_path": str(workspace / "outputs" / "activesubdomain.txt"),
         "in_scope_hosts": sorted(hosts_seen.keys()),
         "counts": {
             "entries_in_scope": sum(hosts_seen.values()),
             "unique_hosts": len(hosts_seen),
             "unique_endpoints": len(endpoint_seen),
-            "unique_query_keys": len(query_key_seen),
-            "unique_cookie_names": len(cookie_name_seen),
         },
         "top": {
             "hosts": hosts_seen.most_common(50),
             "endpoints": endpoint_seen.most_common(100),
-            "query_keys": query_key_seen.most_common(100),
-            "cookie_names": cookie_name_seen.most_common(100),
             "methods": methods_seen.most_common(),
             "status": status_seen.most_common(),
         },
-        "auth_signals": auth_usage,
     }
+    (out_dir / "har_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
-    summary_text = json.dumps(summary, indent=2)
-    (out_dir / "har_summary.json").write_text(summary_text, encoding="utf-8")
-    (per_har_dir / f"{har_id}_har_summary.json").write_text(summary_text, encoding="utf-8")
-
+    # ==========================================
+    # REPORT MD
+    # ==========================================
     md: List[str] = []
     md.append("# HAR analysis report")
     md.append("")
@@ -366,10 +439,15 @@ def analyze(har_path: Path, workspace: Path) -> None:
     md.append("- Allowlist: `outputs/activesubdomain.txt`")
     md.append("")
 
-    md.append("## High-signal summary")
+    md.append("## Summary")
     md.append(f"- In-scope hosts: **{len(hosts_seen)}**")
     md.append(f"- In-scope entries: **{sum(hosts_seen.values())}**")
     md.append(f"- Unique endpoints: **{len(endpoint_seen)}**")
+    md.append("")
+
+    md.append("## Account-specific data (saved separately)")
+    md.append(f"- Auth file: `outputs/har/accounts/{har_id}_auth.txt`")
+    md.append(f"- Auth JSON: `outputs/har/accounts/{har_id}_auth.json`")
     md.append("")
 
     if hosts_seen:
@@ -379,44 +457,21 @@ def analyze(har_path: Path, workspace: Path) -> None:
         md.append("")
 
     if endpoint_seen:
-        md.append("## Endpoints to test first (top)")
+        md.append("## Endpoints to test (top)")
         for ep, c in endpoint_seen.most_common(30):
             md.append(f"- `{ep}` (hits={c})")
         md.append("")
 
-    if query_key_seen:
-        md.append("## Interesting query keys (top)")
-        for k, c in query_key_seen.most_common(30):
-            md.append(f"- `{k}` (hits={c})")
-        md.append("")
-
-    if cookie_name_seen:
-        md.append("## Cookies observed (names only, redacted values)")
-        for k, c in cookie_name_seen.most_common(30):
-            md.append(f"- `{k}` (hits={c})")
-        md.append("")
-
-    md.append("## Auth signals (redacted)")
-    for k, c in auth_usage.most_common():
-        md.append(f"- {k}: {c}")
-    md.append("")
-
-    if cors_notes:
-        md.append("## CORS notes (best-effort)")
-        for line in sorted(set(cors_notes))[:50]:
-            md.append(f"- {line}")
-        md.append("")
-
     md.append("## Outputs")
-    md.append("- `outputs/har/important_data.txt`")
-    md.append("- `outputs/har/har-report.md`")
+    md.append("- `outputs/har/common_data.txt` (shared: endpoints, headers)")
+    md.append(f"- `outputs/har/accounts/{har_id}_auth.txt` (account: tokens, IDs)")
+    md.append(f"- `outputs/har/accounts/{har_id}_auth.json` (account: machine-readable)")
     md.append("- `outputs/har/har_summary.json`")
-    md.append("- `outputs/har/per_har/*`")
+    md.append("- `outputs/har/har-report.md`")
     md.append("")
 
     report_text = "\n".join(md) + "\n"
     (out_dir / "har-report.md").write_text(report_text, encoding="utf-8")
-    (per_har_dir / f"{har_id}_har-report.md").write_text(report_text, encoding="utf-8")
 
 
 def main() -> int:
@@ -432,12 +487,13 @@ def main() -> int:
         raise SystemExit(f"HAR file not found: {har_path}")
 
     analyze(har_path=har_path, workspace=workspace)
-    print("wrote outputs/har/important_data.txt")
-    print("wrote outputs/har/har-report.md")
+
+    har_id = _safe_slug(har_path.stem)
+    print(f"wrote outputs/har/accounts/{har_id}_auth.txt (account-specific)")
+    print(f"wrote outputs/har/accounts/{har_id}_auth.json (account-specific)")
+    print("wrote outputs/har/common_data.txt (shared)")
     print("wrote outputs/har/har_summary.json")
-    print("wrote outputs/har/per_har/<harname>_important_data.txt")
-    print("wrote outputs/har/per_har/<harname>_har-report.md")
-    print("wrote outputs/har/per_har/<harname>_har_summary.json")
+    print("wrote outputs/har/har-report.md")
     return 0
 
 

@@ -1,14 +1,21 @@
 # Tool 29 — HAR analysis (Agent 2) — STRICT RUN-CARD
-# Goal: analyze your captured browser/mobile traffic (HAR) and extract high-value testing data.
-# This is INFO GATHERING / ENRICHMENT (safe): it only parses files you captured.
+# Goal: analyze captured browser/mobile traffic (HAR) and extract testing data.
+# This is INFO GATHERING (safe): only parses files you captured.
+#
+# KEY FEATURE: Saves account-specific data (tokens, IDs, auth) SEPARATELY per account.
+#              Common data (endpoints, headers) is shared.
+#
 # Inputs (contract):
-#   - manual/har/*.har                          (your in-scope captures)
+#   - manual/har/*.har                          (your in-scope captures, e.g., user1.har, user2.har)
 #   - outputs/activesubdomain.txt               (scope allowlist)
+#
 # Outputs (contract):
-#   - outputs/har/important_data.txt            (single consolidated extraction)
-#   - outputs/har/har-report.md                 (summary + what to test first)
+#   - outputs/har/common_data.txt               (shared: endpoints, headers, CORS)
+#   - outputs/har/har-report.md                 (summary report)
 #   - outputs/har/har_summary.json              (machine-readable summary)
-#   - outputs/har/per_har/*                     (per-HAR copies so multiple accounts/roles don’t overwrite each other)
+#   - outputs/har/accounts/<harname>_auth.txt   (per-account: tokens, cookies, IDs with FULL VALUES)
+#   - outputs/har/accounts/<harname>_auth.json  (per-account: machine-readable)
+#
 # Time rule: keep each command under ~9 minutes.
 
 # ----------------------------
@@ -16,11 +23,11 @@
 # ----------------------------
 # Place your HAR file(s) in:
 #   manual\har\
-# Example:
-#   manual\har\user.har
-#   manual\har\admin.har
+# Example (2 test accounts for IDOR/privilege testing):
+#   manual\har\user1.har
+#   manual\har\user2.har
 #
-# If the folders don’t exist:
+# If the folders don't exist:
 #   New-Item -ItemType Directory -Force manual\har | Out-Null
 #
 # Allowlist must exist:
@@ -34,15 +41,24 @@
 # Reference/spec:
 #   task\task29\task0-har-analysis.txt
 #
-# It enforces scope via outputs\activesubdomain.txt and redacts sensitive values in reports.
+# Extracts:
+#   - ACCOUNT-SPECIFIC (separate files per HAR):
+#       - Authorization headers (full token values)
+#       - Cookies (names + full values)
+#       - ID parameters (userId, accountId, etc.)
+#       - Auth parameters (tokens in URL/body)
+#   - COMMON (shared file):
+#       - Endpoints
+#       - Request/response headers
+#       - CORS notes
 
 # ----------------------------
 # 3) Run (PowerShell)
 # ----------------------------
 # Single HAR:
-#   python task\task29\har_analyzer.py --har manual\har\sample.har --workspace .
+#   python task\task29\har_analyzer.py --har manual\har\user1.har --workspace .
 #
-# Multiple HARs (one by one, deterministic):
+# Multiple HARs (run each one to get per-account auth files):
 #   Get-ChildItem manual\har -Filter '*.har' | Sort-Object Name | ForEach-Object {
 #     Write-Host "[har] analyzing $($_.FullName)"
 #     python task\task29\har_analyzer.py --har $_.FullName --workspace .
@@ -51,15 +67,25 @@
 # ----------------------------
 # 4) Output sanity check
 # ----------------------------
-#   if (!(Test-Path outputs\har\important_data.txt)) { throw "Missing outputs\\har\\important_data.txt" }
+#   if (!(Test-Path outputs\har\common_data.txt)) { throw "Missing outputs\\har\\common_data.txt" }
 #   if (!(Test-Path outputs\har\har-report.md)) { throw "Missing outputs\\har\\har-report.md" }
 #   if (!(Test-Path outputs\har\har_summary.json)) { throw "Missing outputs\\har\\har_summary.json" }
-#
-# Per-HAR outputs (written automatically, one set per input HAR):
-#   if (!(Test-Path outputs\har\per_har)) { throw "Missing outputs\\har\\per_har" }
+#   if (!(Test-Path outputs\har\accounts)) { throw "Missing outputs\\har\\accounts" }
 
 # ----------------------------
-# 5) Notes
+# 5) Compare 2 accounts (IDOR testing)
 # ----------------------------
-# - This step helps you decide what to test next (auth flows, admin endpoints, upload endpoints, API patterns, etc.).
-# - Do NOT paste raw tokens into issues/reports; keep redacted previews only.
+# After running both user1.har and user2.har:
+#   outputs/har/accounts/user1_auth.txt   -> tokens/IDs for user1
+#   outputs/har/accounts/user2_auth.txt   -> tokens/IDs for user2
+#
+# Use these to:
+#   - Swap tokens between accounts
+#   - Test IDOR by replacing user1's ID with user2's ID
+#   - Check horizontal privilege escalation
+
+# ----------------------------
+# 6) Notes
+# ----------------------------
+# - This is for TEST ACCOUNTS only (real values are saved for replay/testing).
+# - Do not commit outputs/har/accounts/* if it contains real user data.

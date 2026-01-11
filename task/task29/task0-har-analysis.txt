@@ -4,22 +4,39 @@ Goal
 - Parse HAR captures you collected (browser/mobile traffic).
 - Extract endpoints, parameters, headers, cookies, and other high-signal items.
 - Enforce scope with outputs/activesubdomain.txt.
-- Redact sensitive values (tokens/cookies/secrets) in outputs.
+- Save account-specific data (tokens, IDs, auth) in SEPARATE files per account.
+- Save common data (endpoints, headers) in shared files.
+- Include FULL VALUES (no redaction) — designed for test accounts.
 
 Inputs
-- manual/har/*.har
+- manual/har/*.har              (e.g., user1.har, user2.har)
 - outputs/activesubdomain.txt
 
 Outputs
-- outputs/har/important_data.txt
-- outputs/har/har-report.md
-- outputs/har/har_summary.json
-- outputs/har/per_har/*
+- outputs/har/common_data.txt               (shared: endpoints, headers, CORS)
+- outputs/har/har-report.md                 (summary report)
+- outputs/har/har_summary.json              (machine-readable summary)
+- outputs/har/accounts/<harname>_auth.txt   (per-account: tokens, cookies, IDs)
+- outputs/har/accounts/<harname>_auth.json  (per-account: machine-readable)
+
+Account-specific data extracted
+- Authorization headers (Bearer tokens, etc.)
+- Cookies (names + values)
+- ID parameters: userId, accountId, profileId, etc.
+- Auth parameters: tokens, api_key, session, etc.
+
+Common data extracted
+- Hosts
+- Endpoints (METHOD /path)
+- Request/response headers
+- CORS notes
 
 Run (PowerShell)
-- python task\task29\har_analyzer.py --har manual\har\sample.har --workspace .
+- Single: python task\task29\har_analyzer.py --har manual\har\user1.har --workspace .
+- Multi:  Get-ChildItem manual\har -Filter '*.har' | ForEach-Object { python task\task29\har_analyzer.py --har $_.FullName --workspace . }
 
 Notes
 - The analyzer makes no network calls.
 - Only in-scope hosts (exact hostname match) are included.
-- If you want suffix-based scope (e.g., *.example.com), expand outputs/activesubdomain.txt first.
+- Each HAR creates its own account file in outputs/har/accounts/.
+- Use for IDOR testing: compare user1_auth.txt vs user2_auth.txt.
