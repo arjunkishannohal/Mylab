@@ -11,9 +11,10 @@ Inputs
 - --workspace <path>      : repo/workspace root (default: '.')
 
 Outputs (created/overwritten)
-- outputs/agent2/important_data.txt
-- outputs/agent2/agent2-har-report.md
-- outputs/agent2/har_summary.json
+- outputs/har/important_data.txt
+- outputs/har/har-report.md
+- outputs/har/har_summary.json
+- outputs/har/per_har/<harname>_*
 
 Safety
 - No network calls.
@@ -25,7 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
-from collections import Counter, defaultdict
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -62,7 +63,6 @@ BEARER_RE = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
 
 def _safe_slug(s: str) -> str:
     s = (s or "").strip().lower()
-    # Keep it deterministic and filesystem-safe.
     s = re.sub(r"[^a-z0-9._-]+", "_", s)
     s = re.sub(r"_+", "_", s).strip("._-")
     return s or "har"
@@ -105,12 +105,10 @@ def _as_kv_list(obj: Any, name_key: str = "name", value_key: str = "value") -> L
 def _redact_value(header_or_key: str, value: str) -> str:
     key = (header_or_key or "").strip().lower()
     if key in SENSITIVE_HEADER_NAMES:
-        # Keep minimal structure for cookies/auth.
         if key == "authorization":
             return BEARER_RE.sub("Bearer <REDACTED>", value) if value else "<REDACTED>"
         return "<REDACTED>"
 
-    # Generic token-like strings
     if value and len(value) >= 24 and re.search(r"[A-Za-z0-9_\-]{24,}", value):
         return "<REDACTED>"
 
@@ -152,15 +150,14 @@ def _cookie_names(cookie_header_value: str) -> List[str]:
     if not cookie_header_value:
         return []
     names: List[str] = []
-    parts = cookie_header_value.split(";")
-    for p in parts:
-        p = p.strip()
-        if not p:
+    for part in cookie_header_value.split(";"):
+        part = part.strip()
+        if not part:
             continue
-        if "=" in p:
-            names.append(p.split("=", 1)[0].strip())
+        if "=" in part:
+            names.append(part.split("=", 1)[0].strip())
         else:
-            names.append(p)
+            names.append(part)
     return [n for n in names if n]
 
 
@@ -182,11 +179,10 @@ def analyze(har_path: Path, workspace: Path) -> None:
 
     rows: List[HarRow] = []
 
-    # Aggregates
     hosts_seen: Counter[str] = Counter()
     methods_seen: Counter[str] = Counter()
     status_seen: Counter[int] = Counter()
-    endpoint_seen: Counter[str] = Counter()  # METHOD path
+    endpoint_seen: Counter[str] = Counter()
     query_key_seen: Counter[str] = Counter()
     req_header_seen: Counter[str] = Counter()
     resp_header_seen: Counter[str] = Counter()
@@ -217,7 +213,6 @@ def analyze(har_path: Path, workspace: Path) -> None:
         req_header_names = tuple(sorted({k.strip().lower() for k, _ in req_headers if k.strip()}))
         resp_header_names = tuple(sorted({k.strip().lower() for k, _ in resp_headers if k.strip()}))
 
-        # Auth detection + cookie names
         auth_header_val = ""
         cookie_header_val = ""
         for k, v in req_headers:
@@ -260,7 +255,6 @@ def analyze(har_path: Path, workspace: Path) -> None:
             cookie_name_seen[cn] += 1
 
         if has_auth:
-            # Keep a redacted preview only
             auth_usage["authorization_header_present"] += 1
             auth_usage["authorization_header_value_redacted"] += 1
         elif cookie_names:
@@ -268,7 +262,6 @@ def analyze(har_path: Path, workspace: Path) -> None:
         else:
             auth_usage["no_auth_observed"] += 1
 
-        # Light CORS notes (best-effort)
         cors_acao = None
         cors_acac = None
         for k, v in resp_headers:
@@ -285,14 +278,13 @@ def analyze(har_path: Path, workspace: Path) -> None:
 
     rows.sort(key=lambda r: (r.host, r.path, r.method))
 
-    out_dir = workspace / "outputs" / "agent2"
+    out_dir = workspace / "outputs" / "har"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     per_har_dir = out_dir / "per_har"
     per_har_dir.mkdir(parents=True, exist_ok=True)
     har_id = _safe_slug(har_path.stem)
 
-    # important_data.txt (high-signal, grep-friendly)
     important_lines: List[str] = []
     important_lines.append(f"HAR: {har_path}")
     important_lines.append(f"In-scope hosts matched: {len(hosts_seen)}")
@@ -340,7 +332,6 @@ def analyze(har_path: Path, workspace: Path) -> None:
     (out_dir / "important_data.txt").write_text(important_data_text, encoding="utf-8")
     (per_har_dir / f"{har_id}_important_data.txt").write_text(important_data_text, encoding="utf-8")
 
-    # har_summary.json (machine readable)
     summary = {
         "har_path": str(har_path),
         "scope_allowlist_path": str(workspace / "outputs" / "activesubdomain.txt"),
@@ -367,13 +358,12 @@ def analyze(har_path: Path, workspace: Path) -> None:
     (out_dir / "har_summary.json").write_text(summary_text, encoding="utf-8")
     (per_har_dir / f"{har_id}_har_summary.json").write_text(summary_text, encoding="utf-8")
 
-    # agent2-har-report.md (human summary)
     md: List[str] = []
     md.append("# HAR analysis report")
     md.append("")
     md.append("## Scope")
     md.append(f"- HAR: `{har_path}`")
-    md.append(f"- Allowlist: `outputs/activesubdomain.txt`")
+    md.append("- Allowlist: `outputs/activesubdomain.txt`")
     md.append("")
 
     md.append("## High-signal summary")
@@ -418,14 +408,15 @@ def analyze(har_path: Path, workspace: Path) -> None:
         md.append("")
 
     md.append("## Outputs")
-    md.append("- `outputs/agent2/important_data.txt`")
-    md.append("- `outputs/agent2/agent2-har-report.md`")
-    md.append("- `outputs/agent2/har_summary.json`")
+    md.append("- `outputs/har/important_data.txt`")
+    md.append("- `outputs/har/har-report.md`")
+    md.append("- `outputs/har/har_summary.json`")
+    md.append("- `outputs/har/per_har/*`")
     md.append("")
 
     report_text = "\n".join(md) + "\n"
-    (out_dir / "agent2-har-report.md").write_text(report_text, encoding="utf-8")
-    (per_har_dir / f"{har_id}_agent2-har-report.md").write_text(report_text, encoding="utf-8")
+    (out_dir / "har-report.md").write_text(report_text, encoding="utf-8")
+    (per_har_dir / f"{har_id}_har-report.md").write_text(report_text, encoding="utf-8")
 
 
 def main() -> int:
@@ -441,12 +432,12 @@ def main() -> int:
         raise SystemExit(f"HAR file not found: {har_path}")
 
     analyze(har_path=har_path, workspace=workspace)
-    print("wrote outputs/agent2/important_data.txt")
-    print("wrote outputs/agent2/agent2-har-report.md")
-    print("wrote outputs/agent2/har_summary.json")
-    print("wrote outputs/agent2/per_har/<harname>_important_data.txt")
-    print("wrote outputs/agent2/per_har/<harname>_agent2-har-report.md")
-    print("wrote outputs/agent2/per_har/<harname>_har_summary.json")
+    print("wrote outputs/har/important_data.txt")
+    print("wrote outputs/har/har-report.md")
+    print("wrote outputs/har/har_summary.json")
+    print("wrote outputs/har/per_har/<harname>_important_data.txt")
+    print("wrote outputs/har/per_har/<harname>_har-report.md")
+    print("wrote outputs/har/per_har/<harname>_har_summary.json")
     return 0
 
 

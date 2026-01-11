@@ -76,7 +76,7 @@ You can run all steps, but this ordering is the typical “full pipeline”:
 - Task 30: `tlsx` → `outputs/coverage_tls_sans_in_scope.txt`
 
 7) Manual enrichment
-- Task 29: HAR analysis → `outputs/agent2/*`
+- Task 29: HAR analysis → `outputs/har/*`
 
 ## Run-card reference (inputs → outputs)
 
@@ -341,14 +341,14 @@ Below is the per-run-card “tool I/O contract”. If a task folder contains mul
 - Run-card:
   - `task/task29/har-analysis.txt`
 - Tool:
-  - `tools/agent2/har_analyzer.py`
+  - `task/task29/har_analyzer.py`
 - Inputs:
   - `manual/har/*.har`
   - `outputs/activesubdomain.txt`
 - Outputs:
-  - `outputs/agent2/important_data.txt`
-  - `outputs/agent2/agent2-har-report.md`
-  - `outputs/agent2/har_summary.json`
+  - `outputs/har/important_data.txt`
+  - `outputs/har/har-report.md`
+  - `outputs/har/har_summary.json`
 
 ### Task 30 — tlsx
 - Run-card: `task/task30/tlsx.txt`

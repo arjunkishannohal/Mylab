@@ -5,10 +5,10 @@
 #   - manual/har/*.har                          (your in-scope captures)
 #   - outputs/activesubdomain.txt               (scope allowlist)
 # Outputs (contract):
-#   - outputs/agent2/important_data.txt         (single consolidated extraction)
-#   - outputs/agent2/agent2-har-report.md       (summary + what to test first)
-#   - outputs/agent2/har_summary.json           (machine-readable summary)
-#   - outputs/agent2/per_har/*                  (per-HAR copies so multiple accounts/roles don’t overwrite each other)
+#   - outputs/har/important_data.txt            (single consolidated extraction)
+#   - outputs/har/har-report.md                 (summary + what to test first)
+#   - outputs/har/har_summary.json              (machine-readable summary)
+#   - outputs/har/per_har/*                     (per-HAR copies so multiple accounts/roles don’t overwrite each other)
 # Time rule: keep each command under ~9 minutes.
 
 # ----------------------------
@@ -30,9 +30,9 @@
 # 2) Tool
 # ----------------------------
 # Analyzer script:
-#   tools\agent2\har_analyzer.py
+#   task\task29\har_analyzer.py
 # Reference/spec:
-#   tools\agent2\task0-har-analysis.txt
+#   task\task29\task0-har-analysis.txt
 #
 # It enforces scope via outputs\activesubdomain.txt and redacts sensitive values in reports.
 
@@ -40,23 +40,23 @@
 # 3) Run (PowerShell)
 # ----------------------------
 # Single HAR:
-#   python tools\agent2\har_analyzer.py --har manual\har\sample.har --workspace .
+#   python task\task29\har_analyzer.py --har manual\har\sample.har --workspace .
 #
 # Multiple HARs (one by one, deterministic):
 #   Get-ChildItem manual\har -Filter '*.har' | Sort-Object Name | ForEach-Object {
 #     Write-Host "[har] analyzing $($_.FullName)"
-#     python tools\agent2\har_analyzer.py --har $_.FullName --workspace .
+#     python task\task29\har_analyzer.py --har $_.FullName --workspace .
 #   }
 
 # ----------------------------
 # 4) Output sanity check
 # ----------------------------
-#   if (!(Test-Path outputs\agent2\important_data.txt)) { throw "Missing outputs\\agent2\\important_data.txt" }
-#   if (!(Test-Path outputs\agent2\agent2-har-report.md)) { throw "Missing outputs\\agent2\\agent2-har-report.md" }
-#   if (!(Test-Path outputs\agent2\har_summary.json)) { throw "Missing outputs\\agent2\\har_summary.json" }
+#   if (!(Test-Path outputs\har\important_data.txt)) { throw "Missing outputs\\har\\important_data.txt" }
+#   if (!(Test-Path outputs\har\har-report.md)) { throw "Missing outputs\\har\\har-report.md" }
+#   if (!(Test-Path outputs\har\har_summary.json)) { throw "Missing outputs\\har\\har_summary.json" }
 #
 # Per-HAR outputs (written automatically, one set per input HAR):
-#   if (!(Test-Path outputs\agent2\per_har)) { throw "Missing outputs\\agent2\\per_har" }
+#   if (!(Test-Path outputs\har\per_har)) { throw "Missing outputs\\har\\per_har" }
 
 # ----------------------------
 # 5) Notes

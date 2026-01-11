@@ -1,4 +1,4 @@
-HAR Analysis (Agent 2) — Notes / Contract
+HAR Analysis (Task 29) — Notes / Contract
 
 Goal
 - Parse HAR captures you collected (browser/mobile traffic).
@@ -11,12 +11,13 @@ Inputs
 - outputs/activesubdomain.txt
 
 Outputs
-- outputs/agent2/important_data.txt
-- outputs/agent2/agent2-har-report.md
-- outputs/agent2/har_summary.json
+- outputs/har/important_data.txt
+- outputs/har/har-report.md
+- outputs/har/har_summary.json
+- outputs/har/per_har/*
 
 Run (PowerShell)
-- python tools\agent2\har_analyzer.py --har manual\har\sample.har --workspace .
+- python task\task29\har_analyzer.py --har manual\har\sample.har --workspace .
 
 Notes
 - The analyzer makes no network calls.
