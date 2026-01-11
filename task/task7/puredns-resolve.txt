@@ -41,6 +41,34 @@ Goal / Contract outputs
     - Put it at: temp/agent1/resolvers_2000.txt
     - Then change -r below to point to that file
 
+Maximize candidates_all.txt (common failure mode: too few candidates)
+- candidates_all.txt must contain DOMAIN NAMES (subdomains), not URLs.
+  - Good: api.example.com
+  - Bad: https://api.example.com/login
+  - Bad: api.example.com:8443
+- If candidates_all.txt ends up tiny, it usually means one or more upstream inputs are missing/empty.
+  Check these first (Linux/WSL; from repo root):
+  wc -l \
+    temp/agent1/list_1_passive.txt \
+    temp/agent1/list_2_archives.txt \
+    temp/agent1/list_3_bruteforce.txt \
+    temp/agent1/list_5_permutations.txt 2>/dev/null
+
+  Then fix the upstream task(s):
+  - list_1_passive.txt should be produced by Tasks 1–3
+  - list_2_archives.txt should be produced by Task 4
+  - list_3_bruteforce.txt should be produced by Task 5
+  - list_5_permutations.txt should be produced by Task 6 (optional but strongly recommended)
+  - list_4_reverse.txt is optional (Task 10); include it only if you ran it
+
+- Optional (recommended for long engagements): merge prior-run seeds so you don't “forget” candidates.
+  - outputs/subdomains_candidates_all.txt (audit copy from earlier runs)
+  - outputs/activesubdomain.txt (previous validated allowlist)
+
+- Optional: add your own extra subdomain candidates
+  - Put them in: manual/subdomains_extra.txt (one domain per line)
+  - These are treated as candidates (NOT validated) until puredns resolve.
+
 Build candidates_all.txt (Linux/WSL; from repo root)
 mkdir -p temp/agent1 outputs
 cat \
@@ -49,8 +77,12 @@ cat \
   temp/agent1/list_3_bruteforce.txt \
   temp/agent1/list_4_reverse.txt 2>/dev/null \
   temp/agent1/list_5_permutations.txt 2>/dev/null \
+  outputs/subdomains_candidates_all.txt 2>/dev/null \
+  outputs/activesubdomain.txt 2>/dev/null \
+  manual/subdomains_extra.txt 2>/dev/null \
   | tr '[:upper:]' '[:lower:]' \
   | sed 's/\.$//' \
+  | sed 's/:.*$//' \
   | sed '/^$/d' \
   | sort -u \
   > temp/agent1/candidates_all.txt
