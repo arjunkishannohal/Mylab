@@ -60,6 +60,14 @@ SENSITIVE_PARAM_HINTS = (
 BEARER_RE = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
 
 
+def _safe_slug(s: str) -> str:
+    s = (s or "").strip().lower()
+    # Keep it deterministic and filesystem-safe.
+    s = re.sub(r"[^a-z0-9._-]+", "_", s)
+    s = re.sub(r"_+", "_", s).strip("._-")
+    return s or "har"
+
+
 def _read_allowlist(path: Path) -> set[str]:
     if not path.exists():
         raise SystemExit(f"Missing allowlist file: {path}")
@@ -280,6 +288,10 @@ def analyze(har_path: Path, workspace: Path) -> None:
     out_dir = workspace / "outputs" / "agent2"
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    per_har_dir = out_dir / "per_har"
+    per_har_dir.mkdir(parents=True, exist_ok=True)
+    har_id = _safe_slug(har_path.stem)
+
     # important_data.txt (high-signal, grep-friendly)
     important_lines: List[str] = []
     important_lines.append(f"HAR: {har_path}")
@@ -324,7 +336,9 @@ def analyze(har_path: Path, workspace: Path) -> None:
             important_lines.append(f"- {line}")
         important_lines.append("")
 
-    (out_dir / "important_data.txt").write_text("\n".join(important_lines) + "\n", encoding="utf-8")
+    important_data_text = "\n".join(important_lines) + "\n"
+    (out_dir / "important_data.txt").write_text(important_data_text, encoding="utf-8")
+    (per_har_dir / f"{har_id}_important_data.txt").write_text(important_data_text, encoding="utf-8")
 
     # har_summary.json (machine readable)
     summary = {
@@ -349,7 +363,9 @@ def analyze(har_path: Path, workspace: Path) -> None:
         "auth_signals": auth_usage,
     }
 
-    (out_dir / "har_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    summary_text = json.dumps(summary, indent=2)
+    (out_dir / "har_summary.json").write_text(summary_text, encoding="utf-8")
+    (per_har_dir / f"{har_id}_har_summary.json").write_text(summary_text, encoding="utf-8")
 
     # agent2-har-report.md (human summary)
     md: List[str] = []
@@ -407,7 +423,9 @@ def analyze(har_path: Path, workspace: Path) -> None:
     md.append("- `outputs/agent2/har_summary.json`")
     md.append("")
 
-    (out_dir / "agent2-har-report.md").write_text("\n".join(md) + "\n", encoding="utf-8")
+    report_text = "\n".join(md) + "\n"
+    (out_dir / "agent2-har-report.md").write_text(report_text, encoding="utf-8")
+    (per_har_dir / f"{har_id}_agent2-har-report.md").write_text(report_text, encoding="utf-8")
 
 
 def main() -> int:
@@ -426,6 +444,9 @@ def main() -> int:
     print("wrote outputs/agent2/important_data.txt")
     print("wrote outputs/agent2/agent2-har-report.md")
     print("wrote outputs/agent2/har_summary.json")
+    print("wrote outputs/agent2/per_har/<harname>_important_data.txt")
+    print("wrote outputs/agent2/per_har/<harname>_agent2-har-report.md")
+    print("wrote outputs/agent2/per_har/<harname>_har_summary.json")
     return 0
 
 

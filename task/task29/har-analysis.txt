@@ -8,6 +8,7 @@
 #   - outputs/agent2/important_data.txt         (single consolidated extraction)
 #   - outputs/agent2/agent2-har-report.md       (summary + what to test first)
 #   - outputs/agent2/har_summary.json           (machine-readable summary)
+#   - outputs/agent2/per_har/*                  (per-HAR copies so multiple accounts/roles don’t overwrite each other)
 # Time rule: keep each command under ~9 minutes.
 
 # ----------------------------
@@ -16,7 +17,8 @@
 # Place your HAR file(s) in:
 #   manual\har\
 # Example:
-#   manual\har\sample.har
+#   manual\har\user.har
+#   manual\har\admin.har
 #
 # If the folders don’t exist:
 #   New-Item -ItemType Directory -Force manual\har | Out-Null
@@ -52,6 +54,9 @@
 #   if (!(Test-Path outputs\agent2\important_data.txt)) { throw "Missing outputs\\agent2\\important_data.txt" }
 #   if (!(Test-Path outputs\agent2\agent2-har-report.md)) { throw "Missing outputs\\agent2\\agent2-har-report.md" }
 #   if (!(Test-Path outputs\agent2\har_summary.json)) { throw "Missing outputs\\agent2\\har_summary.json" }
+#
+# Per-HAR outputs (written automatically, one set per input HAR):
+#   if (!(Test-Path outputs\agent2\per_har)) { throw "Missing outputs\\agent2\\per_har" }
 
 # ----------------------------
 # 5) Notes
