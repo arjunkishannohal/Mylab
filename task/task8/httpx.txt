@@ -17,6 +17,65 @@ New-Item -ItemType Directory -Force outputs | Out-Null
 # Basic probe (fast, safe defaults)
 httpx -l outputs/activesubdomain.txt -silent -timeout 9 -retries 1 -threads 50 -o outputs/live_base_urls.txt
 
+# ------------------------------------------------------------
+# Cariddi enrichment (runs as part of Task 8)
+# ------------------------------------------------------------
+# Goal: crawl from live seeds and hunt for secrets/errors/info/endpoints.
+# NOTE: cariddi is GPL-3.0; install it externally (don’t vendor).
+#
+# Install
+#   go install -v github.com/edoardottt/cariddi/cmd/cariddi@latest
+# Verify
+#   cariddi -version
+#
+# Preconditions
+#   if (!(Test-Path outputs\live_base_urls.txt)) { throw "Missing outputs\\live_base_urls.txt" }
+#   if (!(Test-Path outputs\activesubdomain.txt)) { throw "Missing outputs\\activesubdomain.txt" }
+#
+# Outputs
+#   outputs\cariddi\cariddi_findings.txt
+#   outputs\cariddi\cariddi_urls_in_scope.txt
+#   outputs\url_corpus_all_in_scope.txt  (UPDATED/CREATED: merged canonical URL corpus)
+
+New-Item -ItemType Directory -Force outputs\cariddi | Out-Null
+
+# Recommended baseline (bounded to keep under the 9-minute rule)
+# -e    : endpoints hunting
+# -s    : secrets hunting (regex-based; expect FP/FN)
+# -err  : error hunting
+# -info : useful info hunting
+# -md 2 : max depth 2
+# -c 30 : concurrency
+# -t 10 : timeout seconds
+# -plain: keep output easy to parse
+
+Get-Content outputs\live_base_urls.txt |
+  cariddi -e -s -err -info -md 2 -c 30 -t 10 -plain |
+  Tee-Object -FilePath outputs\cariddi\cariddi_findings.txt
+
+# Extract URLs from findings (deterministic)
+Select-String -Path outputs\cariddi\cariddi_findings.txt -Pattern 'https?://[^\s"''<>]+' -AllMatches |
+  ForEach-Object { $_.Matches.Value } |
+  ForEach-Object { $_.Trim().TrimEnd('.', ',', ';') } |
+  Where-Object { $_ } |
+  Sort-Object -Unique |
+  Set-Content -Encoding utf8 outputs\cariddi\cariddi_urls_raw.txt
+
+# Allowlist-filter URLs (scope safe)
+python task\task21\allowlist_filter_urls.py --allowlist outputs\activesubdomain.txt --in outputs\cariddi\cariddi_urls_raw.txt --out outputs\cariddi\cariddi_urls_in_scope.txt
+
+# MANDATORY MERGE: promote cariddi URLs into the canonical URL corpus
+if (Test-Path outputs\url_corpus_all_in_scope.txt) {
+  Get-Content outputs\url_corpus_all_in_scope.txt, outputs\cariddi\cariddi_urls_in_scope.txt |
+    Where-Object { $_ } |
+    ForEach-Object { $_.Trim() } |
+    Where-Object { $_ } |
+    Sort-Object -Unique |
+    Set-Content -Encoding utf8 outputs\url_corpus_all_in_scope.txt
+} else {
+  Copy-Item outputs\cariddi\cariddi_urls_in_scope.txt outputs\url_corpus_all_in_scope.txt
+}
+
 Run for EVERY URL in a file (URL list mode)
 # Use this when your input file contains full URLs (with scheme, and optionally paths/query), one per line.
 # Example input file: temp/agent1/url_list.txt
@@ -60,7 +119,3 @@ Get-Content outputs/live_base_urls.txt | Sort-Object -Unique | Set-Content -Enco
 Notes
 - This probes default web ports (80/443) from hostnames.
 - Keep results scope-safe by only feeding allowlisted hosts.
-
-Optional enrichment
-- You can optionally run Cariddi after this step to crawl from `outputs/live_base_urls.txt` and hunt for secrets/errors/endpoints.
-- Run-card: task\task31\cariddi.txt
