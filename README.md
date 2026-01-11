@@ -322,4 +322,4 @@ Below is the per-run-card “tool I/O contract”. If a task folder contains mul
 
 ## Notes on duplicates
 
-Some tasks repeat the same step (e.g., Task 12 vs 13 httpx-hostport, Task 14 vs 13 katana). Treat them as **equivalent run-cards** unless you intentionally prefer one version; the canonical outputs remain the same in `outputs/`.
+Run-cards are intended to be single-source-of-truth (no duplicate copies across task folders).
