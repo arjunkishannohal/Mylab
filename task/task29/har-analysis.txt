@@ -1,20 +1,30 @@
-# Tool 29 — HAR analysis (Agent 2) — STRICT RUN-CARD
-# Goal: analyze captured browser/mobile traffic (HAR) and extract testing data.
-# This is INFO GATHERING (safe): only parses files you captured.
+# Task 29 — HAR Analysis — RUN-CARD + CONTRACT
+# Goal: Parse HAR captures (browser/mobile traffic) and extract high-value testing data.
+# This is INFO GATHERING (safe): only parses files you captured. No network calls.
 #
 # KEY FEATURE: Saves account-specific data (tokens, IDs, auth) SEPARATELY per account.
 #              Common data (endpoints, headers) is shared.
+#              Includes FULL VALUES (no redaction) — designed for test accounts.
 #
 # Inputs (contract):
-#   - manual/har/*.har                          (your in-scope captures, e.g., user1.har, user2.har)
-#   - outputs/activesubdomain.txt               (scope allowlist)
+#   - manual/har/*.har                          (your captures, e.g., user1.har, user2.har)
+#   - outputs/activesubdomain.txt               (scope allowlist — exact hostname match)
 #
 # Outputs (contract):
 #   - outputs/har/common_data.txt               (shared: endpoints, headers, CORS)
 #   - outputs/har/har-report.md                 (summary report)
 #   - outputs/har/har_summary.json              (machine-readable summary)
-#   - outputs/har/accounts/<harname>_auth.txt   (per-account: tokens, cookies, IDs with FULL VALUES)
+#   - outputs/har/accounts/<harname>_auth.txt   (per-account: tokens, cookies, IDs)
 #   - outputs/har/accounts/<harname>_auth.json  (per-account: machine-readable)
+#
+# Account-specific data extracted:
+#   - Authorization headers (Bearer tokens, etc.)
+#   - Cookies (names + values)
+#   - ID params: userId, accountId, profileId, etc.
+#   - Auth params: tokens, api_key, session, etc.
+#
+# Common data extracted:
+#   - Hosts, Endpoints (METHOD /path), Request/response headers, CORS notes
 #
 # Time rule: keep each command under ~9 minutes.
 
@@ -36,21 +46,9 @@
 # ----------------------------
 # 2) Tool
 # ----------------------------
-# Analyzer script:
-#   task\task29\har_analyzer.py
-# Reference/spec:
-#   task\task29\task0-har-analysis.txt
-#
-# Extracts:
-#   - ACCOUNT-SPECIFIC (separate files per HAR):
-#       - Authorization headers (full token values)
-#       - Cookies (names + full values)
-#       - ID parameters (userId, accountId, etc.)
-#       - Auth parameters (tokens in URL/body)
-#   - COMMON (shared file):
-#       - Endpoints
-#       - Request/response headers
-#       - CORS notes
+# Script: task\task29\har_analyzer.py
+# Only in-scope hosts (exact hostname match against outputs/activesubdomain.txt) are included.
+# If you want suffix-based scope (*.example.com), expand the allowlist first.
 
 # ----------------------------
 # 3) Run (PowerShell)
@@ -87,5 +85,6 @@
 # ----------------------------
 # 6) Notes
 # ----------------------------
-# - This is for TEST ACCOUNTS only (real values are saved for replay/testing).
+# - TEST ACCOUNTS ONLY — real values are saved for replay/testing.
 # - Do not commit outputs/har/accounts/* if it contains real user data.
+# - Each HAR creates its own account file in outputs/har/accounts/.
