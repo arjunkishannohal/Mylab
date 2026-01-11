@@ -26,7 +26,7 @@ mindmap
         input: domain
         output: temp/agent1/list_2_archives.txt
       Task_5_Bruteforce
-        input: wordlist + resolvers
+        input: domain + wordlist + resolvers
         output: temp/agent1/list_3_bruteforce.txt
       Task_10_Hakrevdns_optional
         input: CIDRs
