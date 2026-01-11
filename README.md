@@ -188,18 +188,13 @@ Below is the per-run-card “tool I/O contract”. If a task folder contains mul
   - `temp/agent1/resolved_dnsx.txt` (validation)
   - `temp/agent1/list_4_reverse.txt` (PTR mode)
 
-### Task 12 — naabu + httpx (host:port)
-- Run-cards:
-  - `task/task12/naabu.txt`
-  - `task/task12/httpx-hostport.txt`
-- Inputs:
-  - `outputs/activesubdomain.txt`
-  - `outputs/ports_open_hostport.txt` (for httpx-hostport)
+### Task 12 — naabu (host:port)
+- Run-card: `task/task12/naabu.txt`
+- Input: `outputs/activesubdomain.txt`
 - Outputs:
   - `outputs/ports_open_hostport.txt`
   - `outputs/ports_open_hosts.txt`
   - `outputs/ports_open_ports.txt`
-  - `outputs/live_hostport_urls.txt`
   - Intermediates/logs under `temp/agent1/`
 
 ### Task 13 — httpx-hostport + katana
@@ -213,52 +208,31 @@ Below is the per-run-card “tool I/O contract”. If a task folder contains mul
   - `outputs/live_hostport_urls.txt`
   - `outputs/katana_urls.txt`
 
-### Task 14 — gau + katana
-- Run-cards:
-  - `task/task14/gau.txt`
-  - `task/task14/katana.txt`
-- Inputs:
-  - `outputs/activesubdomain.txt` (gau)
-  - `outputs/live_base_urls.txt` (katana)
-- Outputs:
-  - `outputs/gau_urls.txt`
-  - `outputs/katana_urls.txt`
+### Task 14 — gau
+- Run-card: `task/task14/gau.txt`
+- Input: `outputs/activesubdomain.txt`
+- Output: `outputs/gau_urls.txt`
 
-### Task 15 — gau + allowlist filter
-- Run-cards:
-  - `task/task15/gau.txt`
-  - `task/task15/allowlist-filter-urls.txt` (uses `task/task21/allowlist_filter_urls.py`)
+### Task 15 — allowlist filter (URLs)
+- Run-card: `task/task15/allowlist-filter-urls.txt` (uses `task/task21/allowlist_filter_urls.py`)
 - Inputs:
   - `outputs/gau_urls.txt`, `outputs/katana_urls.txt`, `outputs/activesubdomain.txt`
 - Outputs:
   - `outputs/gau_urls_in_scope.txt`
   - `outputs/katana_urls_in_scope.txt`
 
-### Task 16 — allowlist filter + arjun
-- Run-cards:
-  - `task/task16/allowlist-filter-urls.txt` (uses `task/task21/allowlist_filter_urls.py`)
-  - `task/task16/arjun.txt`
-- Inputs:
-  - `outputs/*_urls_in_scope.txt`
-  - `outputs/activesubdomain.txt`
-- Output:
-  - `outputs/arjun_found_params.txt`
+### Task 16 — arjun
+- Run-card: `task/task16/arjun.txt`
+- Input: `outputs/url_corpus_all_in_scope.txt`
+- Output: `outputs/arjun_found_params.txt`
 
-### Task 17 — arjun + kiterunner
-- Run-cards:
-  - `task/task17/arjun.txt`
-  - `task/task17/kiterunner.txt`
-- Inputs:
-  - `outputs/gau_urls_in_scope.txt` and/or `outputs/katana_urls_in_scope.txt`
-  - `outputs/live_base_urls.txt`
-- Outputs:
-  - `outputs/arjun_found_params.txt`
-  - `outputs/queue_api_endpoints_kiterunner.txt`
+### Task 17 — kiterunner
+- Run-card: `task/task17/kiterunner.txt`
+- Input: `outputs/live_base_urls.txt`
+- Output: `outputs/queue_api_endpoints_kiterunner.txt`
 
-### Task 18 — kiterunner + httpx probe API queue
-- Run-cards:
-  - `task/task18/kiterunner.txt`
-  - `task/task18/httpx-probe-api-endpoints.txt`
+### Task 18 — httpx probe API queue
+- Run-card: `task/task18/httpx-probe-api-endpoints.txt`
 - Inputs:
   - `outputs/live_base_urls.txt`
   - API queue file
@@ -266,22 +240,11 @@ Below is the per-run-card “tool I/O contract”. If a task folder contains mul
   - `outputs/queue_api_endpoints_kiterunner.txt`
   - `outputs/api_endpoints_live.txt`
 
-### Task 19 — httpx probe API queue + JS URL discovery
-- Run-cards:
-  - `task/task19/httpx-probe-api-endpoints.txt`
-  - `task/task19/js-urls.txt`
+### Task 19 — JS URL discovery
+- Run-card: `task/task19/js-urls.txt`
 - Inputs:
-  - `outputs/queue_api_endpoints_kiterunner.txt`
   - `outputs/gau_urls_in_scope.txt` and/or `outputs/katana_urls_in_scope.txt`
 - Outputs:
-  - `outputs/api_endpoints_live.txt`
-  - `outputs/js_urls.txt`
-
-### Task 20 — JS URL discovery
-- Run-card: `task/task20/js-urls.txt`
-- Inputs:
-  - `outputs/gau_urls_in_scope.txt` and/or `outputs/katana_urls_in_scope.txt`
-- Output:
   - `outputs/js_urls.txt`
 
 ### Task 21 — fetch JS + offline analyze
@@ -294,56 +257,37 @@ Below is the per-run-card “tool I/O contract”. If a task folder contains mul
   - `temp/agent1/js_fetch_dir/` + `temp/agent1/js_fetch_index.txt`
   - `outputs/js_endpoints_from_js.txt`
 
-### Task 22 — offline analyze + probe JS-extracted
-- Run-cards:
-  - `task/task22/js-analyze-offline.txt` (uses `task/task21/js_analyzer.py`)
-  - `task/task22/httpx-probe-js-extracted.txt`
-- Inputs:
-  - `temp/agent1/js_fetch_*` (analysis)
-  - `outputs/js_endpoints_from_js.txt` + `outputs/activesubdomain.txt`
+### Task 22 — probe JS-extracted
+- Run-card: `task/task22/httpx-probe-js-extracted.txt`
+- Input: `outputs/js_endpoints_from_js.txt` + `outputs/activesubdomain.txt`
 - Outputs:
   - `outputs/js_urls_live.txt`
   - `outputs/js_composed_live.txt`
 
-### Task 23 — probe JS-extracted + nuclei
-- Run-cards:
-  - `task/task23/httpx-probe-js-extracted.txt`
-  - `task/task23/nuclei.txt`
-- Outputs:
-  - `outputs/js_urls_live.txt`, `outputs/js_composed_live.txt`
-  - `outputs/nuclei_findings.txt`
+### Task 23 — nuclei
+- Run-card: `task/task23/nuclei.txt`
+- Input: validated URLs
+- Output: `outputs/nuclei_findings.txt`
 
-### Task 24 — nuclei + gowitness
-- Run-cards:
-  - `task/task24/nuclei.txt`
-  - `task/task24/gowitness.txt`
-- Outputs:
-  - `outputs/nuclei_findings.txt`
-  - `outputs/gowitness/` + `outputs/coverage_screenshots_index_gowitness.txt`
+### Task 24 — gowitness
+- Run-card: `task/task24/gowitness.txt`
+- Input: validated URLs
+- Outputs: `outputs/gowitness/` + `outputs/coverage_screenshots_index_gowitness.txt`
 
-### Task 25 — gowitness + ffuf
-- Run-cards:
-  - `task/task25/gowitness.txt`
-  - `task/task25/ffuf-content-discovery.txt`
-- Outputs:
-  - `outputs/gowitness/` + `outputs/coverage_screenshots_index_gowitness.txt`
-  - `outputs/ffuf_findings.txt`
+### Task 25 — ffuf
+- Run-card: `task/task25/ffuf-content-discovery.txt`
+- Input: validated URLs
+- Output: `outputs/ffuf_findings.txt`
 
-### Task 26 — ffuf + nmap
-- Run-cards:
-  - `task/task26/ffuf-content-discovery.txt`
-  - `task/task26/nmap-service-enum.txt`
-- Outputs:
-  - `outputs/ffuf_findings.txt`
-  - `outputs/nmap/` + `outputs/nmap_index.txt`
+### Task 26 — nmap
+- Run-card: `task/task26/nmap-service-enum.txt`
+- Input: `outputs/ports_open_hostport.txt`
+- Outputs: `outputs/nmap/` + `outputs/nmap_index.txt`
 
-### Task 27 — nmap + subjack
-- Run-cards:
-  - `task/task27/nmap-service-enum.txt`
-  - `task/task27/subjack-takeover.txt`
-- Outputs:
-  - `outputs/nmap/` + `outputs/nmap_index.txt`
-  - `outputs/coverage_takeover_candidates_subjack.txt`
+### Task 27 — subjack
+- Run-card: `task/task27/subjack-takeover.txt`
+- Input: `outputs/activesubdomain.txt`
+- Output: `outputs/coverage_takeover_candidates_subjack.txt`
 
 ### Task 29 — HAR Analysis (Manual Enrichment)
 - Run-card: `task/task29/har-analysis.txt` (includes deep analysis guide)
