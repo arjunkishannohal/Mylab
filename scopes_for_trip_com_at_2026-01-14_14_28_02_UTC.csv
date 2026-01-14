@@ -1,0 +1,24 @@
+identifier,asset_type,instruction,eligible_for_bounty,eligible_for_submission,availability_requirement,confidentiality_requirement,integrity_requirement,max_severity,system_tags,created_at,updated_at
+*.vliegwinkel.nl,WILDCARD,,true,true,high,high,high,critical,,2025-05-29 08:32:18 UTC,2025-05-29 08:32:18 UTC
+*.travix.io,WILDCARD,Low priority Scope,true,true,high,high,high,critical,,2024-09-23 06:23:58 UTC,2024-09-23 06:24:07 UTC
+*.playground.travix.com,WILDCARD,"The staging.travix.com & stg.travix.com & dev.travix.com & development.travix.com & playground.travix.com is in scope, but no bounties will be awarded for bugs found in these platforms. If these platforms can be leveraged to compromise production and infra stack, these bugs will be considered in scope for bounty.",false,false,high,high,high,critical,,2025-04-17 05:18:58 UTC,2025-04-17 05:18:58 UTC
+*.dev.travix.com,WILDCARD,"The staging.travix.com & stg.travix.com & dev.travix.com & development.travix.com & playground.travix.com is in scope, but no bounties will be awarded for bugs found in these platforms. If these platforms can be leveraged to compromise production and infra stack, these bugs will be considered in scope for bounty.",false,false,high,high,high,critical,,2025-04-17 05:18:10 UTC,2025-04-17 05:18:10 UTC
+*.triplinkintl.com,WILDCARD,,true,true,high,high,high,critical,,2025-05-29 07:41:43 UTC,2025-05-29 07:41:43 UTC
+*.budgetair.com,WILDCARD,,true,true,high,high,high,critical,,2025-05-29 08:30:51 UTC,2025-05-29 08:30:51 UTC
+*.trip.biz,WILDCARD,"",true,true,high,high,high,critical,,2025-06-10 05:30:48 UTC,2025-06-10 05:30:48 UTC
+"*.trainpal.com,*.mytrainpal.com",WILDCARD,Low priority Scope,true,true,high,high,high,critical,,2024-12-10 05:15:01 UTC,2024-12-10 05:15:01 UTC
+*.cheaptickets.nl,WILDCARD,Low priority Scope,true,true,high,high,high,critical,,2024-12-10 06:29:18 UTC,2024-12-10 06:29:25 UTC
+com.trip.ios,APPLE_STORE_APP_ID,High priority Scope,true,true,,,,critical,,2023-10-16 08:19:08 UTC,2023-10-16 08:19:08 UTC
+*.staging.travix.com,OTHER,"The staging.travix.com & stg.travix.com & dev.travix.com & development.travix.com & playground.travix.com is in scope, but no bounties will be awarded for bugs found in these platforms. If these platforms can be leveraged to compromise production and infra stack, these bugs will be considered in scope for bounty.",false,true,high,high,high,critical,,2024-10-15 07:16:41 UTC,2024-10-15 07:16:41 UTC
+*.flugladen.de,WILDCARD,,true,true,high,high,high,critical,,2025-05-29 08:31:26 UTC,2025-05-29 08:31:26 UTC
+*.stg.travix.com,WILDCARD,"The staging.travix.com & stg.travix.com & dev.travix.com & development.travix.com & playground.travix.com is in scope, but no bounties will be awarded for bugs found in these platforms. If these platforms can be leveraged to compromise production and infra stack, these bugs will be considered in scope for bounty.",false,false,high,high,high,critical,,2025-04-17 05:14:59 UTC,2025-04-17 05:15:33 UTC
+*.development.travix.com,WILDCARD,"The staging.travix.com & stg.travix.com & dev.travix.com & development.travix.com & playground.travix.com is in scope, but no bounties will be awarded for bugs found in these platforms. If these platforms can be leveraged to compromise production and infra stack, these bugs will be considered in scope for bounty.",false,false,high,high,high,critical,,2025-04-17 05:18:38 UTC,2025-04-17 05:18:38 UTC
+*.travix.com,WILDCARD,Low priority Scope,true,true,high,high,high,critical,,2024-09-23 06:23:03 UTC,2024-09-23 06:23:25 UTC
+*.tyo-masters.co.jp,WILDCARD,,true,true,high,high,high,critical,,2025-05-29 08:18:59 UTC,2025-05-29 08:18:59 UTC
+<locale>.trip.com,OTHER,"Trip Main Sites
+High priority Scope",true,true,high,high,high,critical,,2023-09-28 05:25:46 UTC,2023-09-28 05:26:20 UTC
+com.trip.android,GOOGLE_PLAY_APP_ID,High priority Scope,true,true,,,,critical,,2023-10-16 08:19:53 UTC,2023-10-16 08:19:53 UTC
+*.vayama.com,WILDCARD,,true,true,high,high,high,critical,,2025-05-29 08:31:53 UTC,2025-05-29 08:31:53 UTC
+*.trip.com,WILDCARD,"Except for the domain name of <local>. trip.com
+Low priority Scope",true,true,high,high,high,critical,,2023-09-28 03:31:37 UTC,2023-09-28 05:24:33 UTC
+app.blueskytravelvietnam.com,URL,,true,true,high,high,high,critical,,2025-05-29 08:28:21 UTC,2025-05-29 08:28:21 UTC

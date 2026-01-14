@@ -2,9 +2,7 @@
 *.pyc
 
 # Recon artifacts / captures (do not commit)
-outputs/**
-temp/**
-manual/**
+
 
 # Keep directory skeleton
 !outputs/.gitkeep
