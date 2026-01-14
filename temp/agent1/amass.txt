@@ -1,0 +1,3 @@
+trip.com (FQDN) --> mx_record --> mx3.trip.com.ctripgslb.com (FQDN)
+trip.com (FQDN) --> mx_record --> mx2.trip.com.ctripgslb.com (FQDN)
+trip.com (FQDN) --> mx_record --> mx1.trip.com.ctripgslb.com (FQDN)

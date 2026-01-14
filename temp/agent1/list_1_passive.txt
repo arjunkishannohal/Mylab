@@ -37,6 +37,9 @@ mta.emails.trip.com
 mta2.emails.trip.com
 mx.trip.com
 mx1.service.trip.com
+mx1.trip.com
+mx2.trip.com
+mx3.trip.com
 my.trip.com
 nephele.trip.com
 newsletter.trip.com
