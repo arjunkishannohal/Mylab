@@ -12,8 +12,8 @@ Design goals:
 Usage:
   python task\task21\allowlist_filter_urls.py \
     --allowlist outputs\activesubdomain.txt \
-        --in temp\agent1\url_corpus_raw.txt \
-        --out outputs\url_corpus_all_in_scope.txt
+        --in temp\agent1\\url_corpus_raw.txt \
+        --out outputs\\url_corpus_all_in_scope.txt
 
 You can also use it for queue files:
   python task\task21\allowlist_filter_urls.py --allowlist outputs\activesubdomain.txt --in outputs\queue_dynamic_endpoints_urls.txt --out outputs\queue_dynamic_endpoints_urls.txt
