@@ -1,3 +1,0 @@
-mx1.trip.com
-mx2.trip.com
-mx3.trip.com
