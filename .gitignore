@@ -15,3 +15,6 @@
 # Documentation folder
 doc/
 doc/**
+temp/
+time/
+temp/agent1/waymore_urls.log
