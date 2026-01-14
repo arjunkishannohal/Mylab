@@ -56,7 +56,7 @@
 # ----------------------------
 # Notes:
 # - -maxtime 540 enforces ~9 minutes.
-# - -rate and -t must be tuned to avoid bans/WAF (start low).
+# - YOUR target = GO AGGRESSIVE. High rate, high threads.
 # - Match on common success codes; filter noisy codes/lengths as needed.
 # - Output as JSON per target (easy to parse later).
 #

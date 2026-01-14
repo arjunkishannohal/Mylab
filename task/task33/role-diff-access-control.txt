@@ -1,0 +1,550 @@
+================================================================================
+TASK 33: ROLE-DIFF ACCESS CONTROL TESTING
+================================================================================
+Maps to: testing_toolkit.txt → Step 6 (Role-diff replay)
+Purpose: Find BOLA/BFLA/IDOR by replaying same requests with different auth
+Impact:  HIGH — usually finds critical access control bugs
+
+================================================================================
+INPUTS (combine ALL — don't pick one)
+================================================================================
+PRIMARY (from pipeline):
+  outputs/queue_api_endpoints_kiterunner.txt   — API routes (from Task 17)
+  outputs/queue_dynamic_endpoints_urls.txt     — parameterized URLs (from allowlist filter)
+  outputs/url_corpus_all_in_scope.txt          — all discovered URLs
+  outputs/api_endpoints_live.txt               — probed API endpoints (from Task 18)
+
+FROM HAR ANALYSIS (Task 29):
+  outputs/har/common_data.txt                  — endpoints, headers, methods
+  outputs/har/har_summary.json                 — machine-readable summary
+  outputs/har/accounts/<harname>_auth.txt      — tokens/cookies per account
+  outputs/har/accounts/<harname>_auth.json     — auth data (machine-readable)
+
+FROM TASK 31 (Playwright):
+  temp/task31/playwright_captured_requests.json — auth-gated endpoints (if run)
+
+FALLBACK (if above not available):
+  temp/agent1/url_corpus_all_in_scope.txt      — intermediate corpus
+
+AUTH CONTEXTS (required):
+  - user1 token/cookie (from outputs/har/accounts/<harname1>_auth.json)
+  - user2 token/cookie (from outputs/har/accounts/<harname2>_auth.json)
+  - unauth (no token)
+  - admin (if available from HAR)
+  - any other roles from HAR accounts/
+
+================================================================================
+CORE PRINCIPLE: DYNAMIC PARAMETER DISCOVERY
+================================================================================
+DO NOT hardcode parameter names. The script MUST:
+
+1. EXTRACT all parameters dynamically from each request:
+   - URL path segments: /api/users/{id}/orders/{order_id}
+   - Query params: ?user_id=123&account=456
+   - Body params (JSON): {"userId": 123, "targetAccount": "abc"}
+   - Body params (form): user_id=123&account_id=456
+   - Headers: X-User-ID, X-Account-ID, custom headers
+
+2. IDENTIFY potential object references (auto-detect):
+   - Numeric IDs: integers, sequential patterns
+   - UUIDs: [a-f0-9-]{36}
+   - Base64: potential encoded IDs
+   - Slugs: user-john-doe, order-2024-001
+   - Any param with "id", "user", "account", "order", "ref" in name
+
+3. TEST each identified parameter with role swapping
+
+================================================================================
+INTELLIGENT STRATEGY (USE BRAIN)
+================================================================================
+DO NOT blindly replay all requests. The script MUST:
+
+1. BUILD ACCESS KNOWLEDGE:
+   - Learn which roles can access which endpoints
+   - Track: role → [allowed_endpoints], endpoint → [allowed_roles]
+   - Store: response signatures per role (for quick comparison)
+   - Save knowledge to temp/task33/access_knowledge.json
+
+2. PRIORITIZE HIGH-VALUE TARGETS:
+   - Priority 1: Endpoints with user-specific data in response (names, emails, IDs)
+   - Priority 2: Endpoints that accept object IDs in params
+   - Priority 3: State-changing endpoints (POST, PUT, DELETE, PATCH)
+   - Priority 4: Endpoints returning 403/401 to some roles (access-controlled)
+   - Skip: Static assets, public endpoints returning same data to all
+
+3. DETECT ACCESS PATTERNS:
+   - Role hierarchy: admin > manager > user > unauth
+   - Per-endpoint: which roles get 200, which get 403, which get 401
+   - Anomalies: user1 gets 200 but user2 gets 403 (same role = BUG)
+
+4. LEARN FROM EVERY RESPONSE:
+   - Extract user-specific data: {"user_id": "123", "email": "...", "name": "..."}
+   - Build owner map: which IDs belong to which user
+   - Detect data leakage: user2's data appearing in user1's response
+
+5. FINGERPRINT RESPONSES:
+   - Hash response structure (ignore dynamic values)
+   - Same hash across roles = potential auth bypass
+   - Different hash = investigate what differs
+
+6. CONFIDENCE SCORING:
+   - CONFIRMED: user2's data in user1's response (verified leakage)
+   - LIKELY: same 200 response for different users on sensitive endpoint
+   - POTENTIAL: unusual access pattern needs manual verification
+
+================================================================================
+WORKFLOW
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ PHASE A: LOAD & BUILD KNOWLEDGE BASE                                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  A.1 Load endpoint sources:                                                 │
+│      outputs/har/common_data.txt → endpoints from HAR (method + path)       │
+│      outputs/queue_api_endpoints_kiterunner.txt → API routes                │
+│      temp/task31/playwright_captured_requests.json → auth-gated requests    │
+│      outputs/url_corpus_all_in_scope.txt → fallback URLs                    │
+│                                                                             │
+│  A.2 Extract user-owned IDs from HAR (each account's requests):             │
+│      - user1's HAR shows user_id=123 → user1 owns ID 123                    │
+│      - user2's HAR shows user_id=456 → user2 owns ID 456                    │
+│      - Build OWNERSHIP MAP: {"123": "user1", "456": "user2"}                │
+│                                                                             │
+│  A.3 Merge & dedupe by: method + path (ignore query params for grouping)    │
+│                                                                             │
+│  A.4 Extract parameters from EACH request:                                  │
+│      - Parse URL path → identify path params                                │
+│      - Parse query string → all query params                                │
+│      - Parse body (detect JSON/form) → all body params                      │
+│      - Extract custom headers                                               │
+│                                                                             │
+│  OUTPUT: requests_with_params.json, access_knowledge.json                   │
+│  FORMAT:                                                                    │
+│  {                                                                          │
+│    "id": "req_001",                                                         │
+│    "method": "GET",                                                         │
+│    "url": "https://api.example.com/users/123/orders",                       │
+│    "path_params": {"user_id": "123"},                                       │
+│    "query_params": {"status": "active", "account": "456"},                  │
+│    "body_params": {},                                                       │
+│    "headers": {"X-Request-ID": "abc"},                                      │
+│    "detected_ids": ["123", "456"],                                          │
+│    "original_auth": "user1"                                                 │
+│  }                                                                          │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ PHASE B: SMART PROBING (LEARN ACCESS PATTERNS)                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  B.1 Quick probe each endpoint with ALL roles:                              │
+│      - Send minimal request (GET with no body)                              │
+│      - Record: status_code, response_size, response_hash                    │
+│      - Build ACCESS MAP: endpoint → {role → status_code}                    │
+│                                                                             │
+│  B.2 Classify endpoints by access pattern:                                  │
+│      - PUBLIC: all roles get 200 with same response                         │
+│      - AUTH_REQUIRED: unauth gets 401, authed get 200                       │
+│      - ROLE_RESTRICTED: some roles 200, others 403                          │
+│      - ANOMALY: same role different result (user1=200, user2=403)           │
+│                                                                             │
+│  B.3 Prioritize for deep testing:                                           │
+│      - ANOMALY endpoints → highest priority (BOLA signal)                   │
+│      - ROLE_RESTRICTED → test privilege escalation                          │
+│      - AUTH_REQUIRED → test for bypasses                                    │
+│      - Skip PUBLIC (unless has user-specific params)                        │
+│                                                                             │
+│  OUTPUT: temp/task33/access_map.json                                        │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ PHASE C: DEEP TESTING WITH ROLE SWAPPING                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  For HIGH-PRIORITY endpoints from Phase B:                                  │
+│                                                                             │
+│  C.1 Replay with user1 auth → save response as response_user1.json          │
+│  C.2 Replay with user2 auth → save response as response_user2.json          │
+│  C.3 Replay with NO auth    → save response as response_unauth.json         │
+│  C.4 (If admin available)   → save response as response_admin.json          │
+│                                                                             │
+│  C.5 LEARN from each response:                                              │
+│      - Extract user-specific data (names, emails, IDs)                      │
+│      - Check: does user2's response contain user1's data? → BOLA!           │
+│      - Update ownership map with newly discovered IDs                       │
+│                                                                             │
+│  IMPORTANT: Keep ALL other parameters IDENTICAL                             │
+│  Only swap the Authorization/Cookie header                                  │
+│                                                                             │
+│  Rate limiting:                                                             │
+│  - 100ms delay between requests (configurable)                              │
+│  - Batch by host (all requests to host A, then host B)                      │
+│  - 9-minute checkpoint: save progress, can resume                           │
+│                                                                             │
+│  OUTPUT: responses/{req_id}/                                                │
+│          ├── user1.json                                                     │
+│          ├── user2.json                                                     │
+│          ├── unauth.json                                                    │
+│          └── metadata.json (status codes, headers, timing)                  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ PHASE D: INTELLIGENT DIFF & ANALYZE                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  D.1 Compare response pairs:                                                │
+│                                                                             │
+│      HORIZONTAL PRIVILEGE (user1 vs user2 — same role, different user):    │
+│      - If user1 can see user2's data → BOLA                                │
+│      - If responses identical with user-specific data → CRITICAL           │
+│                                                                             │
+│      VERTICAL PRIVILEGE (user vs unauth):                                   │
+│      - If unauth gets same data as authed → auth bypass                    │
+│      - If unauth gets 200 instead of 401/403 → broken auth                 │
+│                                                                             │
+│      ADMIN vs USER:                                                         │
+│      - If user can access admin-only data → privilege escalation           │
+│                                                                             │
+│  3.2 Diff methods (choose based on content-type):                          │
+│                                                                             │
+│      JSON responses:                                                        │
+│      - jd (structural diff) — shows added/removed/changed keys             │
+│      - DeepDiff (Python) — detailed path-based diff                        │
+│      - Normalize first: sort keys, strip timestamps/nonces                 │
+│                                                                             │
+│      HTML responses:                                                        │
+│      - Strip dynamic elements (CSRF tokens, timestamps)                    │
+│      - Compare DOM structure                                               │
+│      - Look for user-specific data leakage                                 │
+│                                                                             │
+│      Binary/other:                                                          │
+│      - Compare size, hash                                                  │
+│      - Flag if identical when should differ                                │
+│                                                                             │
+│  3.3 Anomaly detection rules:                                              │
+│                                                                             │
+│      CRITICAL:                                                              │
+│      - user1 data appears in user2 response                                │
+│      - unauth gets authenticated user's data                               │
+│      - user accesses admin endpoint successfully                           │
+│                                                                             │
+│      HIGH:                                                                  │
+│      - 200 OK for all roles when should be restricted                      │
+│      - Same response body across different auth contexts                   │
+│      - User can modify another user's resources                            │
+│                                                                             │
+│      MEDIUM:                                                                │
+│      - Information disclosure (different error messages)                   │
+│      - Enumeration possible (404 vs 403)                                   │
+│                                                                             │
+│  OUTPUT: access_control_findings.json                                       │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+OUTPUT FILES
+================================================================================
+outputs/
+├── access_control_findings.json      — all findings with severity + confidence
+├── bola_candidates.txt               — endpoints with object reference issues
+├── auth_bypass_candidates.txt        — endpoints accessible without auth
+├── role_diff_summary.md              — human-readable report with intelligence insights
+└── vulnerabilities/                   — INDIVIDUAL VULNERABILITY REPORTS
+    ├── ACL-0001-BOLA-CRITICAL.md     — one file per finding
+    ├── ACL-0002-AUTH_BYPASS-HIGH.md
+    └── ...
+
+Each vulnerability file contains:
+  - Title + Severity + Type + CONFIDENCE + ATTACK TYPE
+  - Affected endpoint (method + URL)
+  - Description of the issue
+  - Technical details (request/response diffs)
+  - POC (curl command or raw request)
+  - Steps to reproduce
+  - Impact assessment
+  - Remediation guidance
+
+temp/task33/
+├── requests_with_params.json         — parsed requests with extracted params
+├── access_knowledge.json             — THE BRAIN (learned patterns, ownership)
+├── access_map.json                   — endpoint → {role → status} mapping
+├── responses/                        — all captured responses
+│   └── {req_id}/
+│       ├── user1.json
+│       ├── user2.json
+│       └── unauth.json
+├── diff_results/                     — raw diff outputs
+└── checkpoint.json                   — resume state (9-min rule)
+
+================================================================================
+FINDING FORMAT (access_control_findings.json)
+================================================================================
+[
+  {
+    "id": "ACL-0001",
+    "severity": "CRITICAL",
+    "confidence": "CONFIRMED",
+    "type": "BOLA",
+    "attack_type": "cross_user_data",
+    "endpoint": "GET /api/users/123/profile",
+    "description": "User2 can access User1's profile by changing user ID",
+    "evidence": {
+      "user1_request": "GET /api/users/123/profile (Auth: user1)",
+      "user2_request": "GET /api/users/123/profile (Auth: user2)",
+      "user1_response_snippet": "{\"name\": \"User1\", \"email\": \"user1@example.com\"}",
+      "user2_response_snippet": "{\"name\": \"User1\", \"email\": \"user1@example.com\"}",
+      "diff": "IDENTICAL — user2 sees user1's data",
+      "leaked_ids": ["123 (owned by user1)"]
+    },
+    "reproduction": [
+      "1. Login as user2",
+      "2. Send GET /api/users/123/profile",
+      "3. Observe user1's profile data returned"
+    ],
+    "poc": {
+      "curl_command": "curl -X GET 'https://api.example.com/api/users/123/profile' -H 'Authorization: Bearer <user2_token>'",
+      "raw_request": "GET /api/users/123/profile HTTP/1.1\\nHost: api.example.com\\nAuthorization: Bearer <user2_token>"
+    },
+    "impact": "Attacker can access any user's profile data including PII (name, email)",
+    "remediation": "Implement proper authorization check: verify requesting user owns the resource",
+    "vulnerability_file": "outputs/vulnerabilities/ACL-0001-BOLA-CRITICAL.md"
+  }
+]
+
+================================================================================
+VULNERABILITY FILE FORMAT (outputs/vulnerabilities/ACL-XXXX-TYPE-SEVERITY.md)
+================================================================================
+# ACL-0001: BOLA - User Profile Access
+
+## Summary
+| Field | Value |
+|-------|-------|
+| **ID** | ACL-0001 |
+| **Type** | BOLA (Broken Object Level Authorization) |
+| **Severity** | CRITICAL |
+| **Endpoint** | GET /api/users/123/profile |
+| **Discovered** | 2026-01-13 10:30:00 |
+
+## Description
+User2 can access User1's profile by simply changing the user ID in the URL.
+No authorization check verifies that the requesting user owns the resource.
+
+## Impact
+- **Confidentiality**: HIGH - Any user's profile data can be accessed
+- **Integrity**: MEDIUM - If PUT/PATCH exists, data can be modified
+- **Availability**: LOW - No direct impact
+
+Attacker can enumerate all user profiles and extract PII (names, emails, etc.)
+
+## Proof of Concept (POC)
+
+### curl Command
+```bash
+# As user2, access user1's profile (should be denied but returns 200 OK)
+curl -X GET 'https://api.example.com/api/users/123/profile' \
+  -H 'Authorization: Bearer <user2_token>' \
+  -H 'Content-Type: application/json'
+```
+
+### Raw HTTP Request
+```http
+GET /api/users/123/profile HTTP/1.1
+Host: api.example.com
+Authorization: Bearer eyJhbGciOiJIUzI1NiIs...<user2_token>
+Content-Type: application/json
+```
+
+### Response (user1's data returned to user2)
+```json
+{
+  "id": 123,
+  "name": "User1",
+  "email": "user1@example.com",
+  "phone": "+1-555-0123"
+}
+```
+
+## Steps to Reproduce
+1. Login as user2 (or obtain user2's auth token)
+2. Note user2's own user ID (e.g., 456)
+3. Send GET request to `/api/users/123/profile` (user1's ID)
+4. Observe that user1's profile data is returned
+5. Try other user IDs to confirm enumeration is possible
+
+## Evidence
+
+### Request Comparison
+| Auth Context | URL | Status | Response |
+|--------------|-----|--------|----------|
+| user1 | /api/users/123/profile | 200 | user1's data |
+| user2 | /api/users/123/profile | 200 | user1's data ← VULN |
+| unauth | /api/users/123/profile | 401 | Unauthorized |
+
+### Response Diff
+```
+user1 response vs user2 response: IDENTICAL
+Both return user1's sensitive data regardless of who requests it.
+```
+
+## Remediation
+1. **Immediate**: Add authorization check before returning user data:
+   ```python
+   if request.user.id != requested_user_id:
+       return 403, {"error": "Access denied"}
+   ```
+2. **Long-term**: Implement ABAC/RBAC authorization layer
+3. **Testing**: Add automated access control tests for all user endpoints
+
+## References
+- OWASP API Security Top 10: API1:2023 Broken Object Level Authorization
+- CWE-639: Authorization Bypass Through User-Controlled Key
+
+================================================================================
+PARAMETER DISCOVERY PATTERNS
+================================================================================
+The script should auto-detect these patterns as potential object references:
+
+PATH SEGMENTS:
+  /users/{id}           → numeric, uuid, slug
+  /accounts/{account}   → any value
+  /orders/{order_id}    → numeric, alphanumeric
+  /files/{filename}     → path traversal candidate too
+
+QUERY PARAMS (by name pattern):
+  *id, *_id, *Id        → user_id, userId, account_id
+  *ref, *reference      → order_ref, payment_reference
+  *key, *token          → api_key, access_token
+  *account, *user       → account_number, username
+  *email, *phone        → contact identifiers
+  *uuid, *guid          → unique identifiers
+
+BODY PARAMS (same patterns):
+  {"userId": 123}       → swap 123 with user2's ID
+  {"target": "user1"}   → swap with "user2"
+  {"ids": [1,2,3]}      → test with other users' IDs
+
+HEADERS:
+  X-User-ID             → common custom header
+  X-Account-ID          → account context
+  X-Tenant-ID           → multi-tenant apps
+
+================================================================================
+COMMANDS
+================================================================================
+
+# Install dependencies (one-time)
+pip install httpx deepdiff
+
+# Full run (using auth from HAR accounts directory)
+python role_diff_tester.py \
+  --endpoints outputs/queue_api_endpoints_kiterunner.txt \
+  --dynamic outputs/queue_dynamic_endpoints_urls.txt \
+  --corpus outputs/url_corpus_all_in_scope.txt \
+  --auth-dir outputs/har/accounts/ \
+  --output outputs/ \
+  --delay 100
+
+# Alternative: single auth config file
+python role_diff_tester.py \
+  --endpoints outputs/queue_api_endpoints_kiterunner.txt \
+  --corpus outputs/url_corpus_all_in_scope.txt \
+  --auth-config auth_contexts.json \
+  --output outputs/
+
+# Resume from checkpoint
+python role_diff_tester.py \
+  --resume temp/task33/checkpoint.json \
+  --auth-dir outputs/har/accounts/
+
+# Quick test (single endpoint)
+python role_diff_tester.py \
+  --single "GET https://api.example.com/users/123/profile" \
+  --auth-dir outputs/har/accounts/
+
+================================================================================
+9-MINUTE BATCHING
+================================================================================
+BATCH SIZE:
+  - ~50 endpoints per batch (adjustable based on response times)
+  - Each endpoint = 3-4 requests (user1, user2, unauth, admin)
+  - ~200 requests per batch × 100ms delay = ~20 seconds
+  - Plus response time + diff time = ~1-2 min per batch
+  - Safe margin: 4-5 batches per 9 minutes
+
+CHECKPOINT FORMAT (checkpoint.json):
+{
+  "last_completed_batch": 3,
+  "last_completed_request_id": "req_147",
+  "total_requests": 500,
+  "processed": 150,
+  "findings_so_far": 7,
+  "timestamp": "2026-01-13T10:30:00Z"
+}
+
+================================================================================
+EDGE CASES TO HANDLE
+================================================================================
+1. RESPONSE NORMALIZATION:
+   - Strip: timestamps, nonces, CSRF tokens, request IDs
+   - Keep: user data, object references, permissions
+   - Configurable: ignore_fields = ["timestamp", "requestId", "nonce"]
+
+2. STATUS CODE INTERPRETATION:
+   - 200 vs 200: check body diff (same body = potential vuln)
+   - 200 vs 403: expected behavior (no vuln)
+   - 200 vs 401: auth required, working correctly
+   - 403 vs 404: enumeration possible (MEDIUM)
+   - 500 error: might indicate injection, log separately
+
+3. EMPTY/NULL RESPONSES:
+   - {} vs {} with different auth: check if should return data
+   - null response: might be permission-based filtering
+
+4. PAGINATION:
+   - /users?page=1 vs /users?page=1 with diff auth
+   - User1 sees 100 items, user2 sees 10 → data leakage
+
+5. DYNAMIC IDS:
+   - If request has user1's ID hardcoded, also test with user2's ID
+   - /users/123 (user1's ID) → also test /users/456 (user2's ID)
+
+================================================================================
+PRIORITIZATION (if >500 endpoints)
+================================================================================
+Priority 1 (test first):
+  - Endpoints with "user", "account", "admin", "profile" in path
+  - Endpoints with numeric IDs in path
+  - POST/PUT/DELETE methods (state-changing)
+  - Endpoints from HAR with auth headers
+
+Priority 2:
+  - GET requests with query params containing IDs
+  - Endpoints discovered by kiterunner (API routes)
+
+Priority 3:
+  - Static-looking endpoints
+  - Public endpoints (might still have hidden params)
+
+================================================================================
+INTEGRATION WITH STEP 7 (IDOR)
+================================================================================
+This task (step 6) focuses on: SAME request, DIFFERENT auth
+Step 7 (IDOR) focuses on: SAME auth, DIFFERENT object IDs
+
+Output from this task feeds into step 7:
+  - bola_candidates.txt → endpoints to fuzz with different IDs
+  - detected_ids from requests_with_params.json → ID patterns to fuzz
+
+================================================================================
+SUCCESS CRITERIA
+================================================================================
+✓ All endpoints from inputs processed
+✓ Each endpoint tested with all available auth contexts
+✓ Diffs generated and anomalies flagged
+✓ No hardcoded parameter assumptions — all discovered dynamically
+✓ Findings include reproduction steps
+✓ Checkpoint/resume works across 9-minute boundaries

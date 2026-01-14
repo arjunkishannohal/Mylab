@@ -1,0 +1,889 @@
+================================================================================
+TASK 89 - SUBDOMAIN TAKEOVER
+================================================================================
+Covers testing_toolkit.txt Phase 13 Step 44
+Claim abandoned subdomains pointing to unclaimed cloud resources
+
+SUBDOMAIN TAKEOVER = FREE REAL ESTATE
+When a subdomain points to a service that's been deleted,
+YOU can register that service and control the subdomain.
+
+Result: Legitimate-looking phishing, cookie theft, full domain control.
+
+================================================================================
+INPUTS
+================================================================================
+outputs/activesubdomain.txt                <- All discovered subdomains
+temp/agent1/resolved.txt                   <- DNS resolution data
+outputs/coverage_takeover_candidates_subjack.txt <- Prior scan results
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/takeover/
+    vulnerable_subdomains.txt              <- Confirmed takeover targets
+    takeover_fingerprints.txt              <- Error page analysis
+    takeover_pocs.txt                      <- Proof of concept details
+    claimed_subdomains.txt                 <- Successfully claimed (if authorized)
+
+outputs/vulnerabilities/TAKEOVER-*-HIGH.md
+
+================================================================================
+🧠 AGENT DECISION FRAMEWORK
+================================================================================
+
+UNDERSTAND THE ATTACK:
+
+    How does subdomain takeover work?
+    |
+    +-- 1. Company creates: dev.company.com → Heroku
+    +-- 2. Company deletes Heroku app (forgets DNS)
+    +-- 3. CNAME still points to: xyz123.herokuapp.com
+    +-- 4. Attacker registers: xyz123.herokuapp.com
+    +-- 5. Attacker now controls: dev.company.com
+
+    What services are vulnerable?
+    |
+    +-- HIGH RISK (easy to claim):
+    |   +-- GitHub Pages (CNAME to *.github.io)
+    |   +-- Heroku (*.herokuapp.com)
+    |   +-- AWS S3 (*.s3.amazonaws.com)
+    |   +-- Azure (*.azurewebsites.net, *.blob.core.windows.net)
+    |   +-- Shopify (*.myshopify.com)
+    |   +-- Fastly (CNAME with no backend)
+    |   +-- Pantheon, WPEngine, Tumblr, etc.
+    |
+    +-- INDICATORS (error pages):
+        +-- "There isn't a GitHub Pages site here"
+        +-- "No such app" (Heroku)
+        +-- "NoSuchBucket" (S3)
+        +-- "404 - Web Site not found" (Azure)
+
+    What's the impact?
+    |
+    +-- Cookie theft (same-origin)
+    +-- Phishing (trusted domain)
+    +-- OAuth token theft (redirect_uri)
+    +-- Email takeover (MX records)
+    +-- Full domain reputation abuse
+
+================================================================================
+PHASE 1: DETECT DANGLING DNS
+================================================================================
+
+-----------------------------------------
+1.1 CNAME Analysis
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+dangling_cname.py - Find dangling CNAME records
+
+A CNAME pointing to a non-existent resource = takeover opportunity
+"""
+
+import subprocess
+import re
+import os
+
+# Services with known takeover potential
+TAKEOVER_SERVICES = {
+    'github.io': {
+        'name': 'GitHub Pages',
+        'fingerprint': "There isn't a GitHub Pages site here",
+        'claim_method': 'Create repo with CNAME file'
+    },
+    'herokuapp.com': {
+        'name': 'Heroku',
+        'fingerprint': 'No such app',
+        'claim_method': 'heroku create <app-name>'
+    },
+    's3.amazonaws.com': {
+        'name': 'AWS S3',
+        'fingerprint': 'NoSuchBucket',
+        'claim_method': 'aws s3 mb s3://<bucket-name>'
+    },
+    's3-website': {
+        'name': 'AWS S3 Website',
+        'fingerprint': 'NoSuchBucket',
+        'claim_method': 'Create bucket with static hosting'
+    },
+    'azurewebsites.net': {
+        'name': 'Azure App Service',
+        'fingerprint': 'Web Site not found',
+        'claim_method': 'Create app service with name'
+    },
+    'cloudapp.azure.com': {
+        'name': 'Azure CloudApp',
+        'fingerprint': 'The requested URL was not found',
+        'claim_method': 'Create Azure resource'
+    },
+    'blob.core.windows.net': {
+        'name': 'Azure Blob Storage',
+        'fingerprint': 'BlobNotFound',
+        'claim_method': 'Create storage account'
+    },
+    'trafficmanager.net': {
+        'name': 'Azure Traffic Manager',
+        'fingerprint': 'not found',
+        'claim_method': 'Create traffic manager profile'
+    },
+    'cloudfront.net': {
+        'name': 'AWS CloudFront',
+        'fingerprint': 'Bad Request',
+        'claim_method': 'Create distribution with CNAME'
+    },
+    'myshopify.com': {
+        'name': 'Shopify',
+        'fingerprint': 'Sorry, this shop is currently unavailable',
+        'claim_method': 'Create Shopify store'
+    },
+    'ghost.io': {
+        'name': 'Ghost Blog',
+        'fingerprint': 'The thing you were looking for is no longer here',
+        'claim_method': 'Register Ghost site'
+    },
+    'pantheonsite.io': {
+        'name': 'Pantheon',
+        'fingerprint': '404 error unknown site',
+        'claim_method': 'Create Pantheon site'
+    },
+    'tumblr.com': {
+        'name': 'Tumblr',
+        'fingerprint': 'There\'s nothing here',
+        'claim_method': 'Register Tumblr blog'
+    },
+    'wordpress.com': {
+        'name': 'WordPress.com',
+        'fingerprint': 'Do you want to register',
+        'claim_method': 'Register WordPress site'
+    },
+    'fastly.net': {
+        'name': 'Fastly',
+        'fingerprint': 'Fastly error: unknown domain',
+        'claim_method': 'Configure Fastly service'
+    },
+    'zendesk.com': {
+        'name': 'Zendesk',
+        'fingerprint': 'Help Center Closed',
+        'claim_method': 'Create Zendesk account'
+    },
+    'helpjuice.com': {
+        'name': 'HelpJuice',
+        'fingerprint': 'We could not find what you',
+        'claim_method': 'Register HelpJuice site'
+    },
+    'helpscoutdocs.com': {
+        'name': 'Help Scout',
+        'fingerprint': 'No settings were found',
+        'claim_method': 'Configure Help Scout docs'
+    },
+    'surge.sh': {
+        'name': 'Surge.sh',
+        'fingerprint': 'project not found',
+        'claim_method': 'surge --domain <subdomain>'
+    },
+    'bitbucket.io': {
+        'name': 'Bitbucket',
+        'fingerprint': 'Repository not found',
+        'claim_method': 'Create Bitbucket Pages repo'
+    },
+    'netlify.app': {
+        'name': 'Netlify',
+        'fingerprint': 'Not Found - Request ID',
+        'claim_method': 'Add custom domain in Netlify'
+    },
+    'fly.dev': {
+        'name': 'Fly.io',
+        'fingerprint': '404 Not Found',
+        'claim_method': 'Create Fly app'
+    },
+    'vercel.app': {
+        'name': 'Vercel',
+        'fingerprint': 'DEPLOYMENT_NOT_FOUND',
+        'claim_method': 'Deploy Vercel project'
+    }
+}
+
+def get_cname(subdomain):
+    """Get CNAME record for subdomain"""
+    
+    try:
+        result = subprocess.run(
+            ['nslookup', '-type=CNAME', subdomain],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        # Parse CNAME from output
+        for line in result.stdout.split('\n'):
+            if 'canonical name' in line.lower():
+                cname = line.split('=')[-1].strip().rstrip('.')
+                return cname
+                
+    except:
+        pass
+    
+    return None
+
+def check_takeover_potential(subdomain, cname):
+    """Check if CNAME points to vulnerable service"""
+    
+    for service_domain, info in TAKEOVER_SERVICES.items():
+        if service_domain in cname.lower():
+            return {
+                'subdomain': subdomain,
+                'cname': cname,
+                'service': info['name'],
+                'fingerprint': info['fingerprint'],
+                'claim_method': info['claim_method']
+            }
+    
+    return None
+
+# Analyze all subdomains
+os.makedirs('outputs/takeover', exist_ok=True)
+
+potential_takeovers = []
+
+with open('outputs/activesubdomain.txt') as f:
+    subdomains = [l.strip() for l in f if l.strip()]
+
+print(f"[*] Checking {len(subdomains)} subdomains for dangling CNAMEs...")
+
+for subdomain in subdomains:
+    cname = get_cname(subdomain)
+    
+    if cname:
+        potential = check_takeover_potential(subdomain, cname)
+        
+        if potential:
+            print(f"[+] POTENTIAL: {subdomain} -> {cname}")
+            print(f"    Service: {potential['service']}")
+            potential_takeovers.append(potential)
+
+with open('outputs/takeover/takeover_candidates.txt', 'w') as f:
+    for item in potential_takeovers:
+        f.write(f"Subdomain: {item['subdomain']}\n")
+        f.write(f"CNAME: {item['cname']}\n")
+        f.write(f"Service: {item['service']}\n")
+        f.write(f"Fingerprint: {item['fingerprint']}\n")
+        f.write(f"Claim: {item['claim_method']}\n")
+        f.write("---\n")
+
+print(f"\n[*] Found {len(potential_takeovers)} potential takeover candidates")
+
+================================================================================
+PHASE 2: SUBJACK AUTOMATED SCAN
+================================================================================
+
+-----------------------------------------
+2.1 Install and Run subjack
+-----------------------------------------
+# subjack - Fast subdomain takeover tool
+
+# Install
+go install github.com/haccer/subjack@latest
+
+# Run with all checks
+subjack -w outputs/activesubdomain.txt \
+        -t 100 \
+        -timeout 30 \
+        -ssl \
+        -c ~/go/pkg/mod/github.com/haccer/subjack@*/fingerprints.json \
+        -o outputs/takeover/subjack_results.txt \
+        -v
+
+# The -c flag points to fingerprints.json which contains
+# service-specific error patterns for detection
+
+-----------------------------------------
+2.2 Custom subjack Fingerprints
+-----------------------------------------
+# Add custom fingerprints for more services
+cat > temp/agent1/custom_fingerprints.json << 'EOF'
+[
+  {
+    "service": "github",
+    "cname": ["github.io"],
+    "fingerprint": ["There isn't a GitHub Pages site here"],
+    "nxdomain": false
+  },
+  {
+    "service": "heroku",
+    "cname": ["herokuapp.com"],
+    "fingerprint": ["No such app", "no-such-app"],
+    "nxdomain": false
+  },
+  {
+    "service": "s3",
+    "cname": ["s3.amazonaws.com"],
+    "fingerprint": ["NoSuchBucket", "The specified bucket does not exist"],
+    "nxdomain": false
+  },
+  {
+    "service": "azure",
+    "cname": ["azurewebsites.net"],
+    "fingerprint": ["Error 404 - Web app not found"],
+    "nxdomain": false
+  },
+  {
+    "service": "shopify",
+    "cname": ["myshopify.com"],
+    "fingerprint": ["Sorry, this shop is currently unavailable"],
+    "nxdomain": false
+  },
+  {
+    "service": "netlify",
+    "cname": ["netlify.app", "netlify.com"],
+    "fingerprint": ["Not Found - Request ID"],
+    "nxdomain": false
+  },
+  {
+    "service": "vercel",
+    "cname": ["vercel.app", "now.sh"],
+    "fingerprint": ["DEPLOYMENT_NOT_FOUND", "The deployment you are trying to access"],
+    "nxdomain": false
+  }
+]
+EOF
+
+# Run with custom fingerprints
+subjack -w outputs/activesubdomain.txt \
+        -c temp/agent1/custom_fingerprints.json \
+        -o outputs/takeover/subjack_custom.txt
+
+================================================================================
+PHASE 3: NUCLEI TAKEOVER TEMPLATES
+================================================================================
+
+-----------------------------------------
+3.1 Run Nuclei Takeover Templates
+-----------------------------------------
+# Nuclei has comprehensive takeover detection templates
+
+# Update templates first
+nuclei -update-templates
+
+# Run takeover templates
+nuclei -l outputs/activesubdomain.txt \
+       -t nuclei-templates/http/takeovers/ \
+       -o outputs/takeover/nuclei_takeovers.txt \
+       -timeout 30 \
+       -retries 2
+
+# The takeover templates check for:
+# - GitHub Pages
+# - Heroku
+# - AWS/S3
+# - Azure services
+# - Shopify, Tumblr, Ghost, etc.
+# - Many more cloud services
+
+-----------------------------------------
+3.2 Parse Nuclei Results
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+parse_nuclei_takeovers.py - Parse nuclei takeover results
+"""
+
+import os
+import json
+
+def parse_nuclei_output(output_file):
+    """Parse nuclei JSON/text output"""
+    
+    findings = []
+    
+    with open(output_file) as f:
+        for line in f:
+            line = line.strip()
+            
+            if not line:
+                continue
+            
+            # Try JSON format first
+            try:
+                data = json.loads(line)
+                findings.append({
+                    'subdomain': data.get('host', ''),
+                    'template': data.get('template-id', ''),
+                    'name': data.get('info', {}).get('name', ''),
+                    'severity': data.get('info', {}).get('severity', ''),
+                    'matched': data.get('matched-at', '')
+                })
+            except:
+                # Text format: [template-id] [severity] subdomain
+                if '[' in line:
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        findings.append({
+                            'template': parts[0].strip('[]'),
+                            'severity': parts[1].strip('[]'),
+                            'subdomain': parts[-1]
+                        })
+    
+    return findings
+
+# Parse results
+if os.path.exists('outputs/takeover/nuclei_takeovers.txt'):
+    findings = parse_nuclei_output('outputs/takeover/nuclei_takeovers.txt')
+    
+    with open('outputs/takeover/nuclei_parsed.txt', 'w') as f:
+        for finding in findings:
+            f.write(f"Subdomain: {finding.get('subdomain', '')}\n")
+            f.write(f"Template: {finding.get('template', '')}\n")
+            f.write(f"Severity: {finding.get('severity', '')}\n")
+            f.write("---\n")
+    
+    print(f"[*] Parsed {len(findings)} takeover findings")
+
+================================================================================
+PHASE 4: VERIFICATION
+================================================================================
+
+-----------------------------------------
+4.1 Verify Takeover Vulnerability
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+verify_takeover.py - Verify subdomain takeover vulnerabilities
+
+Don't trust tools blindly - VERIFY before claiming.
+"""
+
+import requests
+import re
+
+requests.packages.urllib3.disable_warnings()
+
+# Fingerprints for verification
+FINGERPRINTS = {
+    'github': {
+        'patterns': [
+            r"There isn't a GitHub Pages site here",
+            r"For root URLs.*you must provide an index\.html file"
+        ],
+        'status_codes': [404]
+    },
+    'heroku': {
+        'patterns': [
+            r"No such app",
+            r"no-such-app",
+            r"herokucdn\.com/error-pages"
+        ],
+        'status_codes': [404]
+    },
+    's3': {
+        'patterns': [
+            r"NoSuchBucket",
+            r"The specified bucket does not exist",
+            r"Code: NoSuchBucket"
+        ],
+        'status_codes': [404]
+    },
+    'azure': {
+        'patterns': [
+            r"Web App - Pair Error",
+            r"404 Web Site not found",
+            r"Error 404 - Web app not found"
+        ],
+        'status_codes': [404]
+    },
+    'shopify': {
+        'patterns': [
+            r"Sorry, this shop is currently unavailable",
+            r"Only one step left!"
+        ],
+        'status_codes': [200, 404]
+    },
+    'netlify': {
+        'patterns': [
+            r"Not Found",
+            r"Request ID"
+        ],
+        'status_codes': [404]
+    },
+    'fastly': {
+        'patterns': [
+            r"Fastly error: unknown domain",
+            r"Fastly"
+        ],
+        'status_codes': [500]
+    }
+}
+
+def verify_takeover(subdomain):
+    """Verify if subdomain is actually vulnerable to takeover"""
+    
+    result = {
+        'subdomain': subdomain,
+        'vulnerable': False,
+        'service': None,
+        'evidence': None,
+        'url': None
+    }
+    
+    # Test both HTTP and HTTPS
+    for protocol in ['https', 'http']:
+        url = f"{protocol}://{subdomain}"
+        
+        try:
+            resp = requests.get(
+                url,
+                timeout=15,
+                verify=False,
+                allow_redirects=True
+            )
+            
+            response_text = resp.text
+            response_status = resp.status_code
+            
+            # Check against each service fingerprint
+            for service, config in FINGERPRINTS.items():
+                for pattern in config['patterns']:
+                    if re.search(pattern, response_text, re.IGNORECASE):
+                        if response_status in config['status_codes']:
+                            result['vulnerable'] = True
+                            result['service'] = service
+                            result['evidence'] = pattern
+                            result['url'] = url
+                            result['status'] = response_status
+                            return result
+                            
+        except requests.exceptions.ConnectionError:
+            # Connection refused might indicate NXDOMAIN takeover
+            pass
+        except Exception as e:
+            pass
+    
+    return result
+
+# Verify all candidates
+verified = []
+
+with open('outputs/takeover/takeover_candidates.txt') as f:
+    content = f.read()
+
+# Parse candidates
+candidates = []
+current = {}
+for line in content.split('\n'):
+    if line.startswith('Subdomain:'):
+        current['subdomain'] = line.split(':')[1].strip()
+    elif line.startswith('---'):
+        if current.get('subdomain'):
+            candidates.append(current['subdomain'])
+        current = {}
+
+print(f"[*] Verifying {len(candidates)} takeover candidates...")
+
+for subdomain in candidates:
+    print(f"[*] Verifying: {subdomain}")
+    result = verify_takeover(subdomain)
+    
+    if result['vulnerable']:
+        print(f"[CONFIRMED] {subdomain} -> {result['service']}")
+        verified.append(result)
+
+# Save verified
+with open('outputs/takeover/vulnerable_subdomains.txt', 'w') as f:
+    for v in verified:
+        f.write(f"Subdomain: {v['subdomain']}\n")
+        f.write(f"Service: {v['service']}\n")
+        f.write(f"Evidence: {v['evidence']}\n")
+        f.write(f"URL: {v['url']}\n")
+        f.write("---\n")
+
+print(f"\n[*] Verified {len(verified)} vulnerable subdomains")
+
+================================================================================
+PHASE 5: EXPLOITATION (AUTHORIZED ONLY)
+================================================================================
+
+-----------------------------------------
+5.1 GitHub Pages Takeover
+-----------------------------------------
+# If subdomain points to unclaimed *.github.io
+
+# 1. Create GitHub repo
+# 2. Add CNAME file with target subdomain
+# 3. Enable GitHub Pages
+# 4. Wait for propagation
+
+# Example CNAME file content:
+echo "vulnerable-subdomain.target.com" > CNAME
+
+# GitHub will then serve content for that subdomain
+
+-----------------------------------------
+5.2 Heroku Takeover
+-----------------------------------------
+# If subdomain points to unclaimed *.herokuapp.com
+
+# 1. Login to Heroku
+heroku login
+
+# 2. Create app with same name
+heroku create xyz123  # If CNAME was xyz123.herokuapp.com
+
+# 3. Deploy proof-of-concept
+echo "Subdomain Takeover PoC - Report to security@target.com" > index.html
+git init
+git add .
+git commit -m "PoC"
+heroku git:remote -a xyz123
+git push heroku main
+
+-----------------------------------------
+5.3 S3 Bucket Takeover
+-----------------------------------------
+# If subdomain points to unclaimed S3 bucket
+
+# 1. Create bucket with same name
+aws s3 mb s3://bucket-name --region us-east-1
+
+# 2. Enable static website hosting
+aws s3 website s3://bucket-name --index-document index.html
+
+# 3. Upload PoC
+echo "Subdomain Takeover PoC" > index.html
+aws s3 cp index.html s3://bucket-name/index.html --acl public-read
+
+-----------------------------------------
+5.4 Azure Takeover
+-----------------------------------------
+# If subdomain points to unclaimed *.azurewebsites.net
+
+# 1. Login to Azure
+az login
+
+# 2. Create web app with same name
+az webapp create \
+    --resource-group myResourceGroup \
+    --plan myAppServicePlan \
+    --name xyz123  # If CNAME was xyz123.azurewebsites.net
+
+# 3. Deploy PoC
+az webapp deployment source config-zip \
+    --resource-group myResourceGroup \
+    --name xyz123 \
+    --src poc.zip
+
+================================================================================
+PHASE 6: FULL AUTOMATION
+================================================================================
+
+#!/usr/bin/env python3
+"""
+takeover_full.py - Complete subdomain takeover assessment
+"""
+
+import os
+import subprocess
+import requests
+import re
+import hashlib
+import json
+
+requests.packages.urllib3.disable_warnings()
+
+class TakeoverScanner:
+    
+    SERVICES = {
+        'github.io': ('GitHub Pages', "There isn't a GitHub Pages site here"),
+        'herokuapp.com': ('Heroku', 'No such app'),
+        's3.amazonaws.com': ('AWS S3', 'NoSuchBucket'),
+        'azurewebsites.net': ('Azure', 'Web app not found'),
+        'myshopify.com': ('Shopify', 'this shop is currently unavailable'),
+        'netlify.app': ('Netlify', 'Not Found'),
+        'vercel.app': ('Vercel', 'DEPLOYMENT_NOT_FOUND'),
+        'ghost.io': ('Ghost', 'The thing you were looking for'),
+        'surge.sh': ('Surge', 'project not found'),
+    }
+    
+    def __init__(self):
+        self.results = {
+            'candidates': [],
+            'verified': [],
+            'false_positives': []
+        }
+        os.makedirs('outputs/takeover', exist_ok=True)
+        os.makedirs('outputs/vulnerabilities', exist_ok=True)
+    
+    def get_cname(self, subdomain):
+        """Get CNAME record"""
+        try:
+            result = subprocess.run(
+                ['nslookup', '-type=CNAME', subdomain],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            for line in result.stdout.split('\n'):
+                if 'canonical name' in line.lower():
+                    return line.split('=')[-1].strip().rstrip('.')
+        except:
+            pass
+        return None
+    
+    def check_candidate(self, subdomain, cname):
+        """Check if CNAME indicates takeover potential"""
+        for service_domain, (name, fingerprint) in self.SERVICES.items():
+            if service_domain in cname.lower():
+                return {
+                    'subdomain': subdomain,
+                    'cname': cname,
+                    'service': name,
+                    'fingerprint': fingerprint
+                }
+        return None
+    
+    def verify(self, subdomain, fingerprint):
+        """Verify takeover is actually possible"""
+        for protocol in ['https', 'http']:
+            url = f"{protocol}://{subdomain}"
+            try:
+                resp = requests.get(url, timeout=15, verify=False)
+                if fingerprint.lower() in resp.text.lower():
+                    return {'verified': True, 'url': url, 'status': resp.status_code}
+            except:
+                pass
+        return {'verified': False}
+    
+    def generate_report(self, finding):
+        """Generate vulnerability report"""
+        
+        vuln_id = hashlib.md5(finding['subdomain'].encode()).hexdigest()[:8]
+        
+        report = f"""# Subdomain Takeover Vulnerability
+
+**Severity**: HIGH
+**Subdomain**: {finding['subdomain']}
+**CNAME**: {finding['cname']}
+**Service**: {finding['service']}
+
+## Description
+The subdomain has a dangling CNAME record pointing to an unclaimed 
+{finding['service']} resource. An attacker can register this resource 
+and gain control of the subdomain.
+
+## Impact
+- **Phishing**: Host convincing phishing pages on trusted domain
+- **Cookie Theft**: Steal cookies scoped to parent domain
+- **OAuth Abuse**: Intercept OAuth flows using redirect_uri
+- **Reputation Damage**: Associate malicious content with trusted brand
+- **Email Spoofing**: If combined with MX misconfiguration
+
+## Evidence
+- CNAME: `{finding['cname']}`
+- Fingerprint: "{finding['fingerprint']}"
+
+## Recommendations
+1. Remove the dangling DNS record
+2. If service is needed, reclaim the resource
+3. Audit all DNS records periodically
+4. Implement DNS monitoring
+"""
+        
+        with open(f"outputs/vulnerabilities/TAKEOVER-{vuln_id}-HIGH.md", 'w') as f:
+            f.write(report)
+    
+    def scan(self, subdomain_file):
+        """Full takeover scan"""
+        
+        with open(subdomain_file) as f:
+            subdomains = [l.strip() for l in f if l.strip()]
+        
+        print(f"[*] Scanning {len(subdomains)} subdomains for takeover...")
+        
+        # Phase 1: Find candidates
+        for subdomain in subdomains:
+            cname = self.get_cname(subdomain)
+            
+            if cname:
+                candidate = self.check_candidate(subdomain, cname)
+                if candidate:
+                    print(f"[+] Candidate: {subdomain} -> {cname}")
+                    self.results['candidates'].append(candidate)
+        
+        # Phase 2: Verify candidates
+        for candidate in self.results['candidates']:
+            print(f"[*] Verifying: {candidate['subdomain']}")
+            
+            verification = self.verify(candidate['subdomain'], candidate['fingerprint'])
+            
+            if verification['verified']:
+                print(f"[CONFIRMED] {candidate['subdomain']}")
+                candidate['verified'] = True
+                candidate['url'] = verification['url']
+                self.results['verified'].append(candidate)
+                self.generate_report(candidate)
+            else:
+                self.results['false_positives'].append(candidate)
+        
+        return self.results
+    
+    def save(self):
+        """Save results"""
+        
+        with open('outputs/takeover/scan_results.json', 'w') as f:
+            json.dump(self.results, f, indent=2)
+        
+        with open('outputs/takeover/vulnerable_subdomains.txt', 'w') as f:
+            for v in self.results['verified']:
+                f.write(f"{v['subdomain']}|{v['service']}|{v['cname']}\n")
+
+# Run
+if __name__ == "__main__":
+    scanner = TakeoverScanner()
+    scanner.scan('outputs/activesubdomain.txt')
+    scanner.save()
+    
+    print(f"\n{'='*60}")
+    print(f"[*] Candidates found: {len(scanner.results['candidates'])}")
+    print(f"[*] VERIFIED TAKEOVERS: {len(scanner.results['verified'])}")
+
+================================================================================
+SUMMARY CHECKLIST
+================================================================================
+
+[ ] CNAME records analyzed for all subdomains
+[ ] subjack scan completed
+[ ] Nuclei takeover templates run
+[ ] Candidates verified with fingerprint matching
+[ ] False positives eliminated
+[ ] Vulnerability reports generated
+[ ] (If authorized) PoC takeovers demonstrated
+
+================================================================================
+TOOLS REFERENCE
+================================================================================
+
+DETECTION:
+- subjack - Fast Go-based takeover scanner
+- nuclei -t takeovers/ - Template-based detection
+- Custom CNAME analysis scripts
+
+SERVICES COVERED:
+- GitHub Pages, Heroku, AWS S3
+- Azure (WebApps, Blob, CloudApp, TrafficManager)
+- Shopify, Tumblr, Ghost, WordPress
+- Netlify, Vercel, Surge.sh
+- Fastly, Pantheon, Zendesk, etc.
+
+INDICATORS:
+- Specific error page content
+- HTTP status codes
+- Response headers
+
+SEVERITY: HIGH
+- Full control over trusted subdomain
+- Cookie/session theft potential
+- Phishing attack vector
+
+================================================================================
+NEXT TASK
+================================================================================
+Task 90: DNS Zone Attacks (zone transfer, NS takeover)

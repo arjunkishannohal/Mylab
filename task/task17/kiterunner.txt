@@ -15,7 +15,7 @@
 # 0) Preconditions
 # ----------------------------
 # - Only test in-scope targets.
-# - Respect program rate limits.
+# - YOUR target = GO AGGRESSIVE. No rate limits, full API discovery.
 
 # ----------------------------
 # 1) Install / verify
@@ -68,8 +68,8 @@
 # 3) Run (baseline)
 # ----------------------------
 # Notes:
-# - Keep concurrency sane; kiterunner can be noisy.
-# - Start conservative, then increase if you stay within rate limits.
+# - YOUR target = GO AGGRESSIVE. Maximum concurrency.
+# - Start high, this is your own infrastructure.
 #
 # Example baseline (adjust flags based on `kr --help` output):
 #   kr scan temp\agent1\kiterunner_targets_urls.txt -w $routes -o temp\agent1\kiterunner_raw.json 2>&1 | Tee-Object -FilePath $log -Append

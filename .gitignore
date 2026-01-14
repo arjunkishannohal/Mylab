@@ -13,3 +13,7 @@ manual/**
 !temp/agent1/.gitkeep
 !manual/.gitkeep
 !manual/har/.gitkeep
+
+# Documentation folder
+doc/
+doc/**

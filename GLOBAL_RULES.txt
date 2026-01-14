@@ -1,0 +1,144 @@
+# GLOBAL RULES
+
+These rules apply to ALL tasks (1-106). Follow them at all times.
+NEVER STOP TESTING UNTIL IT BECOMES GENUINELY IMPOSSIBLE.
+
+---
+
+1) Vulnerability Documentation First
+- If you find ANY vulnerability, IMMEDIATELY document it in outputs/vulnerabilities/ BEFORE continuing.
+- Create file: outputs/vulnerabilities/VULN-TYPE-XXXX-SEVERITY.md
+- Include: endpoint, payload, evidence, severity, impact.
+- Then continue with remaining work.
+- DO NOT wait until end of task to document findings.
+
+2) Installation Failures
+- If any tool installation errors, retry with a fix.
+- If it errors again, diagnose the cause and apply a different fix, then retry.
+- Try alternative installation methods (pip, apt, go install, git clone + build, docker).
+- Do not skip the tool unless it is genuinely impossible in this environment.
+
+3) Execution Failures
+- If any tool run errors, retry with a fix (flags, inputs, PATH, permissions, rate/timeout, etc.).
+- If it errors again, diagnose the cause and apply a different fix, then retry.
+- Do not skip the tool unless it is genuinely impossible in this environment.
+
+4) 9-Minute Command Limit
+- Do not run any single foreground command that is likely to exceed ~9 minutes.
+- If a step will take longer, adapt the approach:
+	- Run in batches/chunks (split inputs; run sequentially and merge outputs).
+	- Use resume/checkpoint features if the tool supports it.
+	- Reduce rate/concurrency and combine with batching to avoid timeouts.
+- Goal: use the tool to its full capability within environment limits (avoid silent false negatives from timeouts).
+
+5) Timeout Handling — NEVER GIVE UP
+- If a command times out, DO NOT skip it.
+- Split the target list into smaller batches and run sequentially.
+- Reduce threads/concurrency (e.g., -t 5 instead of -t 50).
+- Add longer timeouts per request if tool supports it.
+- Use --resume or checkpoint files if available.
+- Run against high-priority targets first, then expand.
+- Merge all batch outputs into final result.
+
+6) Rate Limiting / 429 Errors — BYPASS AND CONTINUE
+- If you hit rate limits (HTTP 429, "too many requests"):
+	- Reduce request rate (add delays: --delay, --rate-limit, -rl flags).
+	- Rotate through targets (don't hammer one host continuously).
+	- Use jitter/randomization if tool supports it.
+	- Split into batches with pauses between batches.
+	- Try different User-Agent strings.
+	- If one endpoint is rate-limited, move to others and return later.
+- DO NOT stop testing due to rate limits — adapt and continue.
+
+7) WAF / IP Blocking — EVADE AND CONTINUE
+- If requests are being blocked (403, connection reset, empty responses):
+	- Reduce concurrency and request rate significantly.
+	- Add random delays between requests.
+	- Rotate User-Agent headers.
+	- Try different encoding (URL encode, double encode, unicode).
+	- Use HTTP/1.1 instead of HTTP/2 or vice versa.
+	- Change request method if applicable (GET vs POST).
+	- If specific payloads are blocked, try WAF bypass techniques.
+	- Test from different source ports if possible.
+- Document which hosts have WAF and adjust testing approach per-host.
+- DO NOT stop testing due to blocking — reduce aggression and continue.
+
+8) Connection Errors — RETRY AND CONTINUE
+- If you get connection refused, connection reset, DNS failures:
+	- Retry with exponential backoff (wait 1s, 2s, 4s, etc.).
+	- Check if target is actually down vs blocking you.
+	- Reduce concurrent connections.
+	- Try alternative ports if applicable.
+	- Skip temporarily unreachable hosts, continue with others, return later.
+- DO NOT abandon testing due to transient network issues.
+
+9) Empty Results — VERIFY BEFORE MOVING ON
+- If a tool returns zero findings:
+	- Verify the tool actually ran (check for errors in output).
+	- Test with a known-vulnerable input to confirm tool works.
+	- Try alternative tools for the same vulnerability class.
+	- Check if WAF/rate-limit caused silent failures.
+- Only accept "no vulnerabilities" after confirming tool executed properly.
+
+10) Persistence Principle
+- Exhaust ALL options before declaring something impossible.
+- Try at least 3-5 different approaches before giving up on any task.
+- If one tool fails, use an alternative tool for the same purpose.
+- Document what was tried and why it failed if truly impossible.
+- The goal is MAXIMUM COVERAGE — find every vulnerability.
+
+11) Task Completion Report — MANDATORY
+- After completing EVERY task, create a report in the `time/` folder.
+- Create folder if not exists: `time/`
+- File name: `time/taskN_report.txt` (e.g., time/task43_report.txt)
+- Report MUST include:
+
+```
+=== TASK N EXECUTION REPORT ===
+Task: [Task Name]
+Date: [YYYY-MM-DD HH:MM:SS]
+Status: [COMPLETED / PARTIAL / FAILED]
+
+--- TIMING SUMMARY ---
+Total Execution Time: [X minutes Y seconds]
+
+--- TOOLS USED ---
+1. [Tool Name]
+   - Start: [HH:MM:SS]
+   - End: [HH:MM:SS]
+   - Duration: [X min Y sec]
+   - Status: [SUCCESS / FAILED / TIMEOUT]
+   - Targets Processed: [N]
+
+2. [Tool Name]
+   - Start: [HH:MM:SS]
+   - End: [HH:MM:SS]
+   - Duration: [X min Y sec]
+   - Status: [SUCCESS / FAILED / TIMEOUT]
+   - Targets Processed: [N]
+
+[... repeat for all tools ...]
+
+--- ERROR REPORT ---
+Total Errors: [N]
+
+Error 1:
+- Tool: [Tool Name]
+- Type: [TIMEOUT / RATE_LIMIT / WAF_BLOCK / CONNECTION / INSTALL / OTHER]
+- Message: [Error message]
+- Resolution: [How it was resolved / workaround applied]
+
+[... repeat for all errors ...]
+
+--- OUTPUT FILES CREATED ---
+- [file path 1]
+- [file path 2]
+[...]
+
+--- VULNERABILITIES FOUND ---
+- [Count] vulnerabilities documented in outputs/vulnerabilities/
+```
+
+- Write this report BEFORE moving to next task.
+- Track time using timestamps at start/end of each tool execution.
+

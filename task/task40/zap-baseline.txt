@@ -1,0 +1,288 @@
+# Task 40: ZAP Daemon Baseline Scan (Passive + Spider)
+# Phase 3 - Broad Coverage | Step 9 from testing_toolkit.txt
+# Mode: SAFE - Passive rules only, no attack payloads
+
+================================================================================
+OVERVIEW
+================================================================================
+OWASP ZAP running in daemon mode performs:
+- Spidering to discover all links/forms
+- Passive scanning (analyzing responses for issues)
+- NO active attacks (safe for any environment)
+
+Finds: Missing security headers, information disclosure, cookie issues,
+       CSP problems, CORS issues, session management flaws, etc.
+
+================================================================================
+PREREQUISITES
+================================================================================
+ZAP must be available. Check and install if needed:
+
+```bash
+# Check if ZAP is installed
+which zap.sh || which zap-cli || docker images | grep zap
+
+# Option 1: Docker (RECOMMENDED - no install needed)
+docker pull ghcr.io/zaproxy/zaproxy:stable
+
+# Option 2: Package manager
+# Linux: sudo apt install zaproxy
+# Mac: brew install --cask owasp-zap
+# Windows: Download from https://www.zaproxy.org/download/
+```
+
+================================================================================
+INPUT FILES
+================================================================================
+| Source | Path | Purpose |
+|--------|------|---------|
+| Live URLs | outputs/live_base_urls.txt | Primary scan targets |
+| API endpoints | outputs/queue_api_endpoints_kiterunner.txt | API surface |
+| Dynamic URLs | outputs/queue_dynamic_endpoints_urls.txt | Parameterized URLs |
+| HAR data | outputs/har/har_summary.json | Auth context (if available) |
+| Brain knowledge | outputs/nuclei/tech_stack.json | Tech intel from Nuclei |
+
+================================================================================
+DYNAMIC BRAIN INTELLIGENCE
+================================================================================
+Jules: DO NOT use static configurations. Your brain should:
+
+1. ANALYZE FIRST - Before scanning:
+   - Read outputs/nuclei/tech_stack.json for tech stack intel
+   - Check what technologies were detected per host
+   - Look for authentication requirements from HAR data
+   - Identify high-value targets (APIs, auth endpoints, admin panels)
+
+2. ADAPT SCAN STRATEGY:
+   - If target has APIs → enable OpenAPI import if spec available
+   - If target uses JWT → focus on session/auth passive rules
+   - If target has forms → enable form-based spider
+   - If target is SPA/JS-heavy → use AJAX spider mode
+
+3. PRIORITIZE HOSTS:
+   - Hosts with more findings from Nuclei → scan first
+   - Hosts with detected auth mechanisms → deeper crawl
+   - API endpoints → higher priority than static pages
+
+4. LEARN FROM RESULTS:
+   - Track which passive rules fire most
+   - Correlate with Nuclei findings
+   - Build host → vulnerability-type mappings
+   - Feed insights to Task 41 (full scan)
+
+================================================================================
+EXECUTION INSTRUCTIONS FOR JULES
+================================================================================
+DO NOT run a static script. Instead, dynamically build and execute:
+
+STEP 1: Create the scanner script
+----------------------------------------
+Create file: task/task40/zap_baseline_scanner.py
+
+The script MUST:
+a) Load brain knowledge from outputs/nuclei/tech_stack.json
+b) Dynamically prioritize targets based on learned intel
+c) Configure ZAP based on detected technologies
+d) Run in batches (9-minute rule) with checkpointing
+e) Parse results and learn from findings
+f) Generate vulnerability reports
+
+Key classes to implement:
+- ZapBrainIntelligence: Loads/updates learned knowledge
+- AdaptiveZapConfig: Dynamically configures ZAP based on target
+- ZapBaselineScanner: Orchestrates scan with batching/resume
+- FindingsAnalyzer: Parses ZAP output, learns patterns
+
+STEP 2: Dynamic ZAP configuration
+----------------------------------------
+Based on brain analysis, generate zap config:
+
+```python
+# EXAMPLE LOGIC (implement dynamically, not copy-paste):
+
+def get_adaptive_config(self, target_url: str) -> dict:
+    """Generate ZAP config based on learned intelligence."""
+    config = {
+        'spider': {'maxDepth': 5, 'threadCount': 5},
+        'passive': {'scanOnlyInScope': True},
+        'ajax': {'enabled': False},  # Enable if JS-heavy
+    }
+    
+    # Check brain knowledge for this host
+    host_intel = self.brain.get_host_intel(target_url)
+    
+    if host_intel:
+        techs = host_intel.get('technologies', [])
+        
+        # Adapt based on detected tech
+        if any(t in techs for t in ['react', 'angular', 'vue', 'javascript']):
+            config['ajax']['enabled'] = True
+            config['ajax']['maxDuration'] = 60
+        
+        if any(t in techs for t in ['api', 'rest', 'graphql']):
+            config['spider']['parseComments'] = True
+            config['spider']['parseRobots'] = True
+        
+        if 'wordpress' in techs or 'drupal' in techs:
+            config['spider']['maxDepth'] = 7  # CMS have deep structures
+    
+    return config
+```
+
+STEP 3: Run with Docker (recommended)
+----------------------------------------
+```bash
+# Start ZAP daemon
+docker run -d --name zap-daemon \
+    -p 8080:8080 \
+    ghcr.io/zaproxy/zaproxy:stable \
+    zap.sh -daemon -host 0.0.0.0 -port 8080 \
+    -config api.disablekey=true
+
+# Wait for ZAP to start
+sleep 10
+
+# Run your dynamic scanner
+python task/task40/zap_baseline_scanner.py \
+    --targets outputs/live_base_urls.txt \
+    --output outputs/zap \
+    --temp temp/task40 \
+    --mode baseline
+
+# Stop daemon when done
+docker stop zap-daemon && docker rm zap-daemon
+```
+
+STEP 4: Alternative - Direct script execution
+----------------------------------------
+```bash
+# Using zap-baseline.py directly (if installed)
+zap-baseline.py -t <target_url> \
+    -r outputs/zap/baseline_report.html \
+    -J outputs/zap/baseline_results.json \
+    -I  # Don't fail on warnings
+```
+
+================================================================================
+BATCHING STRATEGY (9-MINUTE RULE)
+================================================================================
+Jules: Implement this batching logic:
+
+```python
+# CONCEPTUAL - implement with your brain:
+
+BATCH_TIME_LIMIT = 540  # 9 minutes in seconds
+TARGETS_PER_BATCH = 10  # Adjust based on site complexity
+
+def run_batched_scan(self, targets: List[str]):
+    checkpoint = self.load_checkpoint()
+    start_idx = checkpoint.get('last_completed', 0)
+    
+    for batch_num, batch_start in enumerate(range(start_idx, len(targets), TARGETS_PER_BATCH)):
+        batch = targets[batch_start:batch_start + TARGETS_PER_BATCH]
+        batch_start_time = time.time()
+        
+        for target in batch:
+            # Check time limit
+            if time.time() - batch_start_time > BATCH_TIME_LIMIT:
+                self.save_checkpoint(batch_start)
+                print(f"[!] Time limit reached. Resume from batch {batch_num}")
+                return
+            
+            # Scan with adaptive config
+            config = self.get_adaptive_config(target)
+            self.scan_target(target, config)
+        
+        # Save progress after each batch
+        self.save_checkpoint(batch_start + len(batch))
+        self.brain.save()  # Persist learned intelligence
+```
+
+================================================================================
+OUTPUT FILES
+================================================================================
+| Output | Path | Description |
+|--------|------|-------------|
+| All alerts | outputs/zap/baseline_alerts.json | All passive findings |
+| HTML report | outputs/zap/baseline_report.html | Human-readable report |
+| Brain update | outputs/zap/zap_brain_knowledge.json | Learned patterns |
+| Host scores | outputs/zap/host_risk_scores.json | Prioritized for Task 41 |
+| Vuln reports | outputs/vulnerabilities/ZAP-XXXX-*.md | Individual findings |
+| Checkpoint | temp/task40/checkpoint.json | Resume state |
+| Spider tree | temp/task40/spider_results.json | Discovered URLs |
+
+================================================================================
+VULNERABILITY REPORT TEMPLATE
+================================================================================
+For each finding, create: outputs/vulnerabilities/ZAP-{ID}-{RULE}-{SEVERITY}.md
+
+```markdown
+# Vulnerability Report: ZAP-{ID}
+
+## Overview
+| Field | Value |
+|-------|-------|
+| **ID** | ZAP-{sequential_id} |
+| **Rule** | {alert.pluginId} - {alert.name} |
+| **Severity** | {alert.risk} |
+| **Confidence** | {alert.confidence} |
+| **URL** | {alert.url} |
+| **Method** | {alert.method} |
+| **Discovered** | {timestamp} |
+
+## Description
+{alert.description}
+
+## Evidence
+- **Parameter**: {alert.param}
+- **Attack**: {alert.attack}
+- **Evidence**: {alert.evidence}
+
+## Solution
+{alert.solution}
+
+## References
+{alert.reference}
+
+## 🧠 AI Intelligence
+### Correlated Findings
+{list any related Nuclei findings on same host}
+
+### Technology Context
+{technologies detected on this host}
+
+### Risk Assessment
+{AI-generated risk score based on all findings}
+```
+
+================================================================================
+LEARNING OUTPUTS FOR TASK 41
+================================================================================
+After baseline scan, generate intelligence for full scan:
+
+1. HIGH_PRIORITY_HOSTS: Hosts with most passive findings
+2. INTERESTING_URLS: URLs that had alerts (attack surface)
+3. TECH_SPECIFIC_RULES: Which active scan rules to enable per host
+4. AUTHENTICATION_NEEDED: Hosts that need auth for deeper scan
+
+Save to: outputs/zap/task41_intel.json
+
+================================================================================
+SUCCESS CRITERIA
+================================================================================
+- [ ] ZAP daemon started successfully
+- [ ] All live URLs spidered
+- [ ] Passive scan completed on all targets
+- [ ] Findings parsed and categorized by severity
+- [ ] Vulnerability reports generated for Medium+ findings
+- [ ] Brain knowledge updated with new patterns
+- [ ] Task 41 intelligence file generated
+- [ ] Checkpoint saved for resume capability
+
+================================================================================
+NOTES
+================================================================================
+- This is PASSIVE phase - prepares intelligence for aggressive full scan
+- Full active scan is Task 41 - GO AGGRESSIVE there
+- Use brain intel from Nuclei to prioritize
+- Feed learnings forward to Task 41

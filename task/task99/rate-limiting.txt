@@ -1,0 +1,586 @@
+================================================================================
+TASK 99 - RATE LIMITING & BRUTE FORCE
+================================================================================
+Covers testing_toolkit.txt Phase 15 Step 54
+Rate limit testing and bypass techniques
+
+NO RATE LIMIT = UNLIMITED ATTEMPTS
+Login brute force, OTP guessing, API abuse.
+Even with rate limits, bypasses exist.
+
+================================================================================
+INPUTS
+================================================================================
+outputs/live_base_urls.txt                 <- Live hosts
+outputs/url_corpus_all_in_scope.txt        <- URL corpus  
+outputs/har/accounts/*_auth.json           <- Auth endpoints from HAR
+outputs/queue_login_panels_urls.txt        <- Login page URLs
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/ratelimit/
+    no_ratelimit_endpoints.txt             <- Endpoints without rate limit
+    weak_ratelimit.txt                     <- Easily bypassable rate limits
+    bypass_techniques.txt                  <- Working bypass methods
+    brute_force_targets.txt                <- Good targets for brute force
+
+outputs/vulnerabilities/RATE-LIMIT-*-MEDIUM.md
+
+================================================================================
+🧠 AGENT DECISION FRAMEWORK
+================================================================================
+
+UNDERSTAND RATE LIMITING:
+
+    Why rate limits matter:
+    |
+    +-- Login brute force (credential stuffing)
+    +-- OTP/PIN brute force (4-6 digit = weak)
+    +-- Password reset abuse
+    +-- API abuse (scraping, spam)
+    +-- Denial of service
+
+    Common rate limit implementations:
+    |
+    +-- Per IP address
+    +-- Per user account
+    +-- Per session/cookie
+    +-- Per API key
+    +-- Sliding window vs fixed window
+
+    Bypass techniques:
+    |
+    +-- IP rotation (proxies/Tor)
+    +-- Header spoofing (X-Forwarded-For)
+    +-- Case variations (Email vs email)
+    +-- Parameter pollution
+    +-- HTTP/2 concurrent streams
+    +-- Unicode normalization bypass
+
+================================================================================
+PHASE 1: DETECT RATE LIMITS
+================================================================================
+
+-----------------------------------------
+1.1 Basic Rate Limit Detection
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+ratelimit_scanner.py - Rate limit detection and bypass testing
+"""
+
+import requests
+import time
+import os
+from urllib.parse import urlparse
+
+os.makedirs('outputs/ratelimit', exist_ok=True)
+os.makedirs('outputs/vulnerabilities', exist_ok=True)
+
+requests.packages.urllib3.disable_warnings()
+
+class RateLimitScanner:
+    
+    def __init__(self):
+        self.session = requests.Session()
+        self.results = []
+    
+    def detect_rate_limit(self, url, method='POST', data=None, 
+                          requests_count=50, delay=0):
+        """Detect if rate limiting is present"""
+        
+        responses = []
+        
+        for i in range(requests_count):
+            try:
+                if method == 'POST':
+                    resp = self.session.post(
+                        url, json=data or {}, 
+                        timeout=15, verify=False
+                    )
+                else:
+                    resp = self.session.get(url, timeout=15, verify=False)
+                
+                responses.append({
+                    'request_num': i + 1,
+                    'status': resp.status_code,
+                    'length': len(resp.text),
+                    'time': time.time()
+                })
+                
+                # Stop if we hit rate limit
+                if resp.status_code == 429:
+                    return {
+                        'url': url,
+                        'rate_limited': True,
+                        'triggered_at': i + 1,
+                        'responses': responses
+                    }
+                
+                if delay:
+                    time.sleep(delay)
+                    
+            except Exception as e:
+                responses.append({'request_num': i + 1, 'error': str(e)})
+        
+        # No rate limit detected
+        return {
+            'url': url,
+            'rate_limited': False,
+            'requests_sent': requests_count,
+            'responses': responses
+        }
+    
+    def analyze_rate_limit(self, result):
+        """Analyze rate limit response for bypass hints"""
+        
+        if not result['rate_limited']:
+            return {'status': 'no_rate_limit', 'severity': 'HIGH'}
+        
+        analysis = {
+            'triggered_at': result['triggered_at'],
+            'bypass_hints': []
+        }
+        
+        # Check if rate limit is per-IP
+        analysis['bypass_hints'].append('Try X-Forwarded-For spoofing')
+        
+        # If triggered quickly, might be weak
+        if result['triggered_at'] < 10:
+            analysis['bypass_hints'].append('Strong rate limit, try slower')
+        else:
+            analysis['severity'] = 'LOW'  # Rate limit exists
+        
+        return analysis
+
+================================================================================
+PHASE 2: BYPASS TECHNIQUES
+================================================================================
+
+-----------------------------------------
+2.1 Header-Based Bypasses
+-----------------------------------------
+def test_header_bypasses(url, method='POST', data=None):
+    """Test rate limit bypass via header manipulation"""
+    
+    session = requests.Session()
+    
+    # Headers that might bypass IP-based rate limits
+    bypass_headers = [
+        {'X-Forwarded-For': '127.0.0.1'},
+        {'X-Forwarded-For': '10.0.0.1'},
+        {'X-Originating-IP': '127.0.0.1'},
+        {'X-Remote-IP': '127.0.0.1'},
+        {'X-Remote-Addr': '127.0.0.1'},
+        {'X-Client-IP': '127.0.0.1'},
+        {'X-Real-IP': '127.0.0.1'},
+        {'True-Client-IP': '127.0.0.1'},
+        {'Cluster-Client-IP': '127.0.0.1'},
+        {'X-ProxyUser-Ip': '127.0.0.1'},
+        {'Via': '1.0 proxy.example.com'},
+        {'Forwarded': 'for=127.0.0.1'},
+    ]
+    
+    bypasses = []
+    
+    for headers in bypass_headers:
+        try:
+            # First trigger rate limit normally
+            for _ in range(60):
+                resp = session.post(url, json=data or {}, verify=False, timeout=10)
+                if resp.status_code == 429:
+                    break
+            
+            # Now try with bypass header
+            resp = session.post(url, json=data or {}, headers=headers, 
+                               verify=False, timeout=10)
+            
+            if resp.status_code != 429:
+                bypasses.append({
+                    'header': list(headers.keys())[0],
+                    'value': list(headers.values())[0],
+                    'status_after_bypass': resp.status_code
+                })
+                
+        except:
+            continue
+    
+    return bypasses
+
+-----------------------------------------
+2.2 IP Rotation Bypass
+-----------------------------------------
+def test_ip_rotation(url, method='POST', data=None, num_ips=10):
+    """Test if rate limit is per-IP by rotating X-Forwarded-For"""
+    
+    session = requests.Session()
+    
+    success_count = 0
+    
+    for i in range(num_ips):
+        # Generate random IP
+        ip = f"192.168.{i}.{i+1}"
+        headers = {'X-Forwarded-For': ip}
+        
+        # Send multiple requests per "IP"
+        for _ in range(10):
+            try:
+                resp = session.post(
+                    url, json=data or {},
+                    headers=headers,
+                    timeout=10, verify=False
+                )
+                
+                if resp.status_code != 429:
+                    success_count += 1
+                    
+            except:
+                pass
+    
+    # If most requests succeeded, bypass works
+    if success_count > num_ips * 5:
+        return {
+            'bypass': 'ip_rotation',
+            'success_rate': success_count / (num_ips * 10),
+            'note': 'X-Forwarded-For rotation bypasses rate limit'
+        }
+    
+    return None
+
+================================================================================
+PHASE 3: SPECIFIC ENDPOINT TESTING
+================================================================================
+
+-----------------------------------------
+3.1 Login Rate Limit Testing
+-----------------------------------------
+def test_login_rate_limit(login_url, username_field='email', 
+                          password_field='password'):
+    """Test rate limiting on login endpoint"""
+    
+    session = requests.Session()
+    
+    # Test with invalid credentials
+    test_creds = {
+        username_field: 'test@example.com',
+        password_field: 'wrongpassword'
+    }
+    
+    attempts = 0
+    rate_limited = False
+    
+    for i in range(100):
+        try:
+            resp = session.post(
+                login_url,
+                json=test_creds,
+                timeout=15,
+                verify=False
+            )
+            
+            attempts += 1
+            
+            if resp.status_code == 429:
+                rate_limited = True
+                break
+            
+            # Check response for rate limit indicators
+            if any(ind in resp.text.lower() for ind in 
+                   ['too many', 'rate limit', 'try again', 'locked']):
+                rate_limited = True
+                break
+                
+        except:
+            continue
+    
+    return {
+        'url': login_url,
+        'attempts_before_limit': attempts if rate_limited else '>100',
+        'rate_limited': rate_limited,
+        'brute_force_viable': not rate_limited or attempts > 50
+    }
+
+-----------------------------------------
+3.2 OTP Rate Limit Testing
+-----------------------------------------
+def test_otp_rate_limit(otp_url, token_field='token', 
+                        otp_field='otp', auth_token=None):
+    """Test rate limiting on OTP verification"""
+    
+    session = requests.Session()
+    
+    headers = {}
+    if auth_token:
+        headers['Authorization'] = f'Bearer {auth_token}'
+    
+    # Test OTP brute force viability
+    # 4-digit OTP = 10,000 combinations
+    # 6-digit OTP = 1,000,000 combinations
+    
+    attempts = 0
+    rate_limited = False
+    
+    for i in range(200):
+        try:
+            resp = session.post(
+                otp_url,
+                json={otp_field: f'{i:06d}'},  # 000000 to 000199
+                headers=headers,
+                timeout=15,
+                verify=False
+            )
+            
+            attempts += 1
+            
+            if resp.status_code == 429:
+                rate_limited = True
+                break
+                
+        except:
+            continue
+    
+    otp_analysis = {
+        'url': otp_url,
+        'attempts_before_limit': attempts if rate_limited else '>200',
+        'rate_limited': rate_limited
+    }
+    
+    # Calculate brute force time
+    if not rate_limited:
+        otp_analysis['4_digit_brute_time'] = '~16 minutes (no limit)'
+        otp_analysis['6_digit_brute_time'] = '~27 hours (no limit)'
+        otp_analysis['severity'] = 'HIGH'
+    
+    return otp_analysis
+
+================================================================================
+PHASE 4: FULL AUTOMATION
+================================================================================
+
+#!/usr/bin/env python3
+"""
+ratelimit_complete.py - Complete rate limit testing
+"""
+
+import os
+import json
+import requests
+import time
+from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+os.makedirs('outputs/ratelimit', exist_ok=True)
+os.makedirs('outputs/vulnerabilities', exist_ok=True)
+
+requests.packages.urllib3.disable_warnings()
+
+class RateLimitAudit:
+    
+    def __init__(self):
+        self.session = requests.Session()
+        self.findings = []
+    
+    def test_endpoint(self, url, method='POST'):
+        """Test single endpoint for rate limiting"""
+        
+        results = {
+            'url': url,
+            'method': method,
+            'rate_limited': False,
+            'triggered_at': None
+        }
+        
+        try:
+            for i in range(100):
+                if method == 'POST':
+                    resp = self.session.post(
+                        url, json={'test': 'data'},
+                        timeout=10, verify=False
+                    )
+                else:
+                    resp = self.session.get(url, timeout=10, verify=False)
+                
+                if resp.status_code == 429:
+                    results['rate_limited'] = True
+                    results['triggered_at'] = i + 1
+                    break
+                    
+        except:
+            pass
+        
+        return results
+    
+    def test_bypass(self, url):
+        """Test rate limit bypass techniques"""
+        
+        bypasses = []
+        
+        # Test X-Forwarded-For
+        headers_to_test = [
+            'X-Forwarded-For',
+            'X-Real-IP',
+            'X-Originating-IP',
+        ]
+        
+        for header in headers_to_test:
+            # Trigger rate limit first
+            for _ in range(60):
+                try:
+                    self.session.post(url, json={}, timeout=5, verify=False)
+                except:
+                    break
+            
+            # Try bypass
+            try:
+                resp = self.session.post(
+                    url, json={},
+                    headers={header: '127.0.0.1'},
+                    timeout=10, verify=False
+                )
+                
+                if resp.status_code != 429:
+                    bypasses.append({
+                        'header': header,
+                        'works': True
+                    })
+                    
+            except:
+                pass
+        
+        return bypasses
+    
+    def find_sensitive_endpoints(self, urls):
+        """Find endpoints that should have rate limits"""
+        
+        sensitive_patterns = [
+            'login', 'signin', 'auth', 'authenticate',
+            'password', 'reset', 'forgot', 'recover',
+            'otp', 'verify', 'code', 'token', 'mfa', '2fa',
+            'register', 'signup', 'create-account',
+            'api', 'graphql', 'webhook'
+        ]
+        
+        sensitive = []
+        
+        for url in urls:
+            url_lower = url.lower()
+            for pattern in sensitive_patterns:
+                if pattern in url_lower:
+                    sensitive.append({
+                        'url': url,
+                        'pattern': pattern
+                    })
+                    break
+        
+        return sensitive
+    
+    def scan_all(self, urls):
+        """Scan all URLs"""
+        
+        # Find sensitive endpoints
+        sensitive = self.find_sensitive_endpoints(urls)
+        print(f"[*] Found {len(sensitive)} sensitive endpoints")
+        
+        # Test each for rate limiting
+        for ep in sensitive:
+            result = self.test_endpoint(ep['url'])
+            
+            if not result['rate_limited']:
+                result['severity'] = 'HIGH' if 'login' in ep['pattern'] else 'MEDIUM'
+                self.findings.append(result)
+            else:
+                # Test bypasses
+                bypasses = self.test_bypass(ep['url'])
+                if bypasses:
+                    result['bypasses'] = bypasses
+                    result['severity'] = 'MEDIUM'
+                    self.findings.append(result)
+    
+    def generate_reports(self):
+        """Generate vulnerability reports"""
+        
+        for i, finding in enumerate(self.findings):
+            severity = finding.get('severity', 'MEDIUM')
+            
+            report = f"""# Rate Limit Vulnerability
+
+**URL**: {finding['url']}
+**Severity**: {severity}
+**Rate Limited**: {finding.get('rate_limited', False)}
+**Triggered At**: {finding.get('triggered_at', 'Never')}
+
+## Description
+{'No rate limiting detected on sensitive endpoint.' if not finding.get('rate_limited')
+ else 'Rate limit can be bypassed using header manipulation.'}
+
+## Impact
+{'Credential brute force attacks possible.' if 'login' in finding['url'].lower()
+ else 'API abuse and automated attacks possible.'}
+
+## Bypasses Found
+{json.dumps(finding.get('bypasses', []), indent=2)}
+
+## Recommendations
+1. Implement rate limiting based on multiple factors
+2. Don't trust X-Forwarded-For header
+3. Use CAPTCHA after failed attempts
+4. Implement account lockout
+5. Log and alert on brute force patterns
+"""
+            
+            with open(f'outputs/vulnerabilities/RATE-LIMIT-{i}-{severity}.md', 'w') as f:
+                f.write(report)
+    
+    def save_results(self):
+        """Save all results"""
+        
+        no_limit = [f for f in self.findings if not f.get('rate_limited')]
+        with open('outputs/ratelimit/no_ratelimit_endpoints.txt', 'w') as f:
+            for finding in no_limit:
+                f.write(f"{finding['url']}\n")
+        
+        with_bypass = [f for f in self.findings if f.get('bypasses')]
+        with open('outputs/ratelimit/weak_ratelimit.txt', 'w') as f:
+            for finding in with_bypass:
+                f.write(f"{finding['url']}\n")
+        
+        with open('outputs/ratelimit/brute_force_targets.txt', 'w') as f:
+            for finding in self.findings:
+                if 'login' in finding['url'].lower() or 'otp' in finding['url'].lower():
+                    f.write(f"{finding['url']}\n")
+        
+        with open('outputs/ratelimit/findings.json', 'w') as f:
+            json.dump(self.findings, f, indent=2)
+
+# Run
+if __name__ == "__main__":
+    with open('outputs/url_corpus_all_in_scope.txt') as f:
+        urls = [l.strip() for l in f if l.strip()]
+    
+    print(f"[*] Scanning for rate limit issues...")
+    
+    audit = RateLimitAudit()
+    audit.scan_all(urls)
+    audit.save_results()
+    audit.generate_reports()
+    
+    print(f"\n[*] Rate limit findings: {len(audit.findings)}")
+
+================================================================================
+SUMMARY CHECKLIST
+================================================================================
+
+[ ] Login endpoints tested for rate limits
+[ ] OTP/2FA endpoints tested
+[ ] Password reset tested
+[ ] API endpoints tested
+[ ] Header bypass techniques tested
+[ ] IP rotation bypass tested
+[ ] Brute force viability assessed
+[ ] Reports generated for findings
+
+================================================================================
+NEXT TASK
+================================================================================
+Task 100: Session Management Flaws (Phase 15 - Misc Advanced)

@@ -1,0 +1,351 @@
+# Task 46: Commix Command Injection Scanner
+# ==============================================================================
+# JULES AI AGENT INSTRUCTIONS - FULL BRAIN MODE
+# ==============================================================================
+
+## TASK IDENTITY
+- **Task Number**: 46
+- **Task Name**: Commix Command Injection Scanner
+- **Category**: Phase 4 - Injection Testing (Step 12)
+- **Depends On**: Tasks 14-18 (parameterized URLs), Task 32 (WAF detection)
+- **AI Brain**: commix_scanner.py
+
+## PURPOSE
+Automated command injection testing using Commix on ALL parameterized endpoints.
+Focuses on standard injection techniques - bypass techniques are in Task 47.
+
+## INPUT FILES
+
+```
+PRIMARY SOURCES (parameterized URLs):
+├── outputs/queue_dynamic_endpoints_urls.txt      # URLs with query params
+├── outputs/arjun_found_params.txt                # Hidden params discovered
+├── outputs/zap/injection_candidates.txt          # ZAP-identified injection points
+├── outputs/api_endpoints_live.txt                # Live API endpoints
+├── outputs/queue_api_endpoints_kiterunner.txt    # Kiterunner API routes
+├── outputs/har/common_data.txt                   # HAR-extracted requests
+
+INTELLIGENCE:
+├── outputs/waf/waf_results.json                  # WAF detection (Task 32)
+├── outputs/nuclei/tech_stack.json                # Tech stack info (Task 35)
+```
+
+## OUTPUT FILES
+
+```
+outputs/cmdi/
+├── commix_vulnerable.txt            # Confirmed CMDi URLs
+├── commix_possible.txt              # Possible/timeout CMDi
+├── commix_results.json              # Full scan results
+├── task47_targets.txt               # Failed targets for Task 47 bypass
+
+outputs/vulnerabilities/
+├── CMDI-{hash}-CRITICAL.md          # Per-vulnerability reports
+```
+
+## COMMAND-LIKE PARAMETER PATTERNS
+
+The brain should PRIORITIZE these parameters:
+
+```python
+# Highest Priority - Direct command execution patterns
+CRITICAL_PARAMS = [
+    'cmd', 'command', 'exec', 'execute', 'run', 'shell',
+    'ping', 'query', 'jump', 'code', 'reg', 'do', 'func',
+    'arg', 'option', 'load', 'process', 'step', 'read',
+    'function', 'req', 'feature', 'exe', 'module', 'payload',
+    'cli', 'daemon', 'upload', 'dir', 'download', 'log',
+]
+
+# High Priority - System interaction patterns
+SYSTEM_PARAMS = [
+    'host', 'ip', 'hostname', 'domain', 'server', 'port',
+    'path', 'file', 'folder', 'doc', 'mail', 'email',
+    'url', 'uri', 'src', 'source', 'dest', 'destination',
+    'to', 'from', 'target', 'address', 'name', 'filename',
+]
+
+# Medium Priority - Action/debug patterns
+ACTION_PARAMS = [
+    'action', 'type', 'mode', 'debug', 'test', 'config',
+    'cfg', 'env', 'setting', 'template', 'format', 'output',
+    'callback', 'return', 'redirect', 'continue', 'checkout',
+]
+```
+
+## COMMIX COMMAND STRUCTURE
+
+### Basic Scan (per URL):
+```bash
+commix --url="{url}" \
+    --batch \
+    --level=3 \
+    --technique=CT \
+    --output-dir=temp/task46/commix_output
+```
+
+### With POST data:
+```bash
+commix --url="{url}" \
+    --data="{post_body}" \
+    --batch \
+    --level=3
+```
+
+### With cookies/headers:
+```bash
+commix --url="{url}" \
+    --cookie="{cookies}" \
+    --headers="Authorization: Bearer {token}" \
+    --batch
+```
+
+## COMMIX TECHNIQUES
+
+```yaml
+# Commix technique codes:
+C: Classic (results-based)
+E: Eval-based (code evaluation)
+T: Time-based blind (sleep detection)
+F: File-based (write + check)
+
+# Default: CT (Classic + Time-based) - fastest
+# For deeper scan: CETF (all techniques)
+```
+
+## INJECTION SEPARATORS
+
+Commix tests these automatically:
+```
+;      - Command separator (Unix)
+|      - Pipe (Unix/Windows)
+||     - OR operator
+&&     - AND operator
+&      - Background (Unix) / separator (Windows)
+`cmd`  - Backtick execution (Unix)
+$(cmd) - Command substitution (Unix)
+\n     - Newline injection
+```
+
+## OS DETECTION
+
+Commix auto-detects OS, but brain should also use Nuclei tech detection:
+
+```python
+# From Task 35 tech_stack.json
+if 'Windows' in detected_tech:
+    os_hint = '--os=windows'
+elif 'Linux' in detected_tech or 'Apache' in detected_tech:
+    os_hint = '--os=unix'
+```
+
+## DETECTION METHODS
+
+### 1. Results-based (Classic):
+```
+Input: ;id
+Output contains: uid=1000(user)...
+→ VULNERABLE
+```
+
+### 2. Time-based Blind:
+```
+Input: ;sleep 5
+Response time: >5 seconds
+→ VULNERABLE (blind)
+```
+
+### 3. File-based:
+```
+Input: ;echo test > /tmp/test.txt
+Check: ;cat /tmp/test.txt
+Output: test
+→ VULNERABLE
+```
+
+## AI BRAIN LOGIC
+
+```
+1. COLLECT TARGETS
+   ├── Load all parameterized URLs
+   ├── Prioritize by param name (cmd > host > action)
+   └── Load WAF info for adaptive testing
+
+2. FOR EACH TARGET:
+   a. Check if param is high-value (cmd, exec, ping, etc.)
+   b. Determine likely OS from tech detection
+   c. Run commix with appropriate options
+   d. Parse output for vulnerability indicators
+   e. If vulnerable: generate report
+   f. If WAF-blocked/timeout: add to task47_targets.txt
+
+3. CATEGORIZE RESULTS:
+   - vulnerable → outputs/cmdi/commix_vulnerable.txt
+   - possible   → outputs/cmdi/commix_possible.txt  
+   - waf_blocked → task47_targets.txt (for bypass)
+   - clean      → skip
+
+4. GENERATE REPORTS:
+   - Per-vuln: CMDI-{hash}-CRITICAL.md
+```
+
+## VULNERABILITY REPORT TEMPLATE
+
+```markdown
+# Command Injection: CMDI-{hash}
+
+## Summary
+| Field | Value |
+|-------|-------|
+| **ID** | CMDI-{hash} |
+| **URL** | {url} |
+| **Parameter** | {param} |
+| **Technique** | {classic/time-based/file-based} |
+| **OS** | {linux/windows} |
+| **Severity** | CRITICAL |
+
+## Proof of Concept
+```bash
+# Reproduce with:
+commix --url="{url}" --batch
+```
+
+## Payload
+```
+{payload}
+```
+
+## Evidence
+```
+{commix_output}
+```
+
+## Impact
+- Remote Code Execution (RCE)
+- Full server compromise
+- Data exfiltration
+- Lateral movement
+
+## Recommendations
+1. Never pass user input to shell commands
+2. Use allowlist validation for expected values
+3. Use parameterized APIs (subprocess with list args)
+4. Implement WAF rules for command injection
+```
+
+## EXECUTION FLOW
+
+```
+┌─────────────────────────────────────────┐
+│  Load parameterized URLs from:          │
+│  - queue_dynamic_endpoints_urls.txt     │
+│  - arjun_found_params.txt               │
+│  - api_endpoints_live.txt               │
+│  - zap/injection_candidates.txt         │
+└─────────────────────────────────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────┐
+│  Prioritize by parameter name:          │
+│  cmd/exec/ping → CRITICAL (test first)  │
+│  host/file/path → HIGH                  │
+│  action/type → MEDIUM                   │
+└─────────────────────────────────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────┐
+│  For each URL (9-min batches):          │
+│  1. Run: commix --url X --batch         │
+│  2. Parse output for vulns              │
+│  3. If blocked → add to Task 47 queue   │
+└─────────────────────────────────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────┐
+│  Output:                                │
+│  - commix_vulnerable.txt                │
+│  - task47_targets.txt (for bypass)      │
+│  - CMDI-*.md reports                    │
+└─────────────────────────────────────────┘
+```
+
+## TIME MANAGEMENT
+
+```
+Commix per-URL timing:
+- Quick scan (level 1): ~30 seconds
+- Standard scan (level 3): ~2-3 minutes
+- Deep scan (level 5): ~5-10 minutes
+
+Strategy:
+- Use level 3 for high-priority params
+- Use level 1 for low-priority params
+- Batch limit: ~50-100 URLs per 9 minutes
+```
+
+## HOW TO RUN
+
+```bash
+# Full scan
+python commix_scanner.py --workspace d:\wallet\Mylab
+
+# High-priority params only
+python commix_scanner.py --workspace d:\wallet\Mylab --priority-only
+
+# Resume from checkpoint
+python commix_scanner.py --workspace d:\wallet\Mylab --resume
+
+# Specific URL test
+python commix_scanner.py --workspace d:\wallet\Mylab --url "http://target/?cmd=test"
+```
+
+## HANDOFF TO TASK 47
+
+If Commix fails due to WAF or no results on suspicious params:
+```
+outputs/cmdi/task47_targets.txt
+```
+
+Task 47 will:
+1. Use advanced bypass techniques (${IFS}, base64, etc.)
+2. Use OOB callbacks via Interactsh
+3. Catch blind CMDi that Commix misses
+
+## AI AGENT CREATIVITY DIRECTIVE
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    🧠 YOU ARE AN INTELLIGENT AGENT 🧠                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Commix is automated, but YOU decide how to use it intelligently.            │
+│                                                                             │
+│ PRIORITIZE SMARTLY:                                                         │
+│                                                                             │
+│ 1. HIGHEST PRIORITY - Direct command params:                                │
+│    cmd, exec, command, shell, run, ping, host, ip                           │
+│    → These SCREAM command injection. Test thoroughly.                       │
+│                                                                             │
+│ 2. MEDIUM PRIORITY - System interaction params:                             │
+│    file, path, dir, url, domain, server                                     │
+│    → May pass to system commands internally.                                │
+│                                                                             │
+│ 3. LOWER PRIORITY - Generic params:                                         │
+│    action, type, mode, debug                                                │
+│    → Quick test, don't waste time if no response.                           │
+│                                                                             │
+│ OBSERVE THE BACKEND:                                                        │
+│                                                                             │
+│ • Linux server? → Test: id, whoami, cat /etc/passwd                         │
+│ • Windows server? → Test: whoami, dir, type                                 │
+│ • Unknown? → Test both command sets                                         │
+│                                                                             │
+│ ANALYZE RESPONSES:                                                          │
+│                                                                             │
+│ • Response time changed? → Possible time-based blind injection              │
+│ • Error message appeared? → Read it! Reveals command processing             │
+│ • Different response length? → Command output may be embedded               │
+│                                                                             │
+│ DON'T GIVE UP ON FAILURES:                                                  │
+│ • No results? → Send to Task 47 for bypass techniques                       │
+│ • WAF blocked? → Note WAF type, Task 47 will handle                         │
+│ • Timeout? → Mark as possible, needs manual verification                    │
+└─────────────────────────────────────────────────────────────────────────────┘

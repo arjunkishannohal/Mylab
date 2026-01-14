@@ -1,0 +1,1115 @@
+================================================================================
+TASK 90 - DNS ZONE ATTACKS
+================================================================================
+Covers testing_toolkit.txt Phase 13 Step 45
+Zone transfers, NS takeover, dangling A-records, DNS poisoning
+
+DNS = THE FOUNDATION
+Control DNS = Control where traffic goes
+Misconfigured DNS = Free infrastructure takeover
+
+================================================================================
+INPUTS
+================================================================================
+outputs/activesubdomain.txt               <- Discovered subdomains
+temp/agent1/resolved.txt                  <- DNS resolution data
+Target root domain(s)                     <- Main domains to test
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/dns/
+    zone_transfer_results.txt             <- AXFR dump if successful
+    ns_takeover_candidates.txt            <- NS records pointing to claimable
+    dangling_a_records.txt                <- A records to non-existent IPs
+    dns_misconfig_report.txt              <- All DNS issues found
+
+outputs/vulnerabilities/DNS-*-HIGH.md
+
+================================================================================
+🧠 AGENT DECISION FRAMEWORK
+================================================================================
+
+UNDERSTAND DNS ATTACK SURFACE:
+
+    What DNS records exist?
+    |
+    +-- A/AAAA - IP address mappings
+    +-- CNAME - Alias to another domain
+    +-- MX - Mail server
+    +-- NS - Nameserver delegation
+    +-- TXT - Arbitrary text (SPF, DKIM, etc.)
+    +-- SOA - Zone authority
+    +-- SRV - Service location
+
+    What can go wrong?
+    |
+    +-- ZONE TRANSFER (AXFR):
+    |   +-- Anyone can dump entire zone
+    |   +-- Reveals ALL subdomains
+    |   +-- Internal naming patterns exposed
+    |
+    +-- NS TAKEOVER:
+    |   +-- NS points to claimable domain
+    |   +-- Attacker controls entire zone
+    |   +-- Full DNS hijack possible
+    |
+    +-- DANGLING A-RECORDS:
+    |   +-- Points to released cloud IP
+    |   +-- Attacker claims IP
+    |   +-- Traffic redirected to attacker
+    |
+    +-- MX TAKEOVER:
+        +-- MX points to claimable resource
+        +-- Attacker receives ALL email
+        +-- Password resets, confidential data
+
+    Why is this CRITICAL?
+    |
+    +-- DNS is trusted infrastructure
+    +-- Users don't verify DNS records
+    +-- Control DNS = control everything
+    +-- Often overlooked in security audits
+
+================================================================================
+PHASE 1: ZONE TRANSFER (AXFR)
+================================================================================
+
+-----------------------------------------
+1.1 Enumerate Nameservers
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+dns_recon.py - Comprehensive DNS reconnaissance
+"""
+
+import subprocess
+import socket
+import os
+
+def get_nameservers(domain):
+    """Get all NS records for domain"""
+    
+    nameservers = []
+    
+    try:
+        result = subprocess.run(
+            ['nslookup', '-type=NS', domain],
+            capture_output=True,
+            text=True,
+            timeout=15
+        )
+        
+        for line in result.stdout.split('\n'):
+            if 'nameserver' in line.lower() and '=' in line:
+                ns = line.split('=')[-1].strip().rstrip('.')
+                nameservers.append(ns)
+                
+    except Exception as e:
+        print(f"[-] Error getting NS: {e}")
+    
+    # Also try dig
+    try:
+        result = subprocess.run(
+            ['dig', '+short', 'NS', domain],
+            capture_output=True,
+            text=True,
+            timeout=15
+        )
+        
+        for line in result.stdout.strip().split('\n'):
+            ns = line.strip().rstrip('.')
+            if ns and ns not in nameservers:
+                nameservers.append(ns)
+                
+    except:
+        pass
+    
+    return nameservers
+
+def get_ns_ip(nameserver):
+    """Resolve NS to IP"""
+    try:
+        return socket.gethostbyname(nameserver)
+    except:
+        return None
+
+# Get nameservers for target
+DOMAIN = "target.com"  # Agent: Replace with actual target
+
+nameservers = get_nameservers(DOMAIN)
+
+print(f"[*] Nameservers for {DOMAIN}:")
+for ns in nameservers:
+    ip = get_ns_ip(ns)
+    print(f"    {ns} -> {ip}")
+
+-----------------------------------------
+1.2 Attempt Zone Transfer
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+zone_transfer.py - Attempt AXFR on all nameservers
+
+Zone transfer should be restricted but often isn't.
+"""
+
+import subprocess
+import os
+
+os.makedirs('outputs/dns', exist_ok=True)
+
+def try_zone_transfer(domain, nameserver):
+    """Attempt AXFR zone transfer"""
+    
+    print(f"[*] Trying AXFR: {domain} @ {nameserver}")
+    
+    # Method 1: dig
+    try:
+        result = subprocess.run(
+            ['dig', 'AXFR', domain, f'@{nameserver}'],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        
+        output = result.stdout
+        
+        # Check if transfer was successful
+        if 'Transfer failed' not in output and 'XFR size' in output:
+            print(f"[!!!] ZONE TRANSFER SUCCESSFUL: {domain} @ {nameserver}")
+            return {'success': True, 'data': output, 'method': 'dig'}
+            
+        if 'AXFR' in output and len(output.split('\n')) > 10:
+            # May have succeeded
+            if ';; ->>HEADER<<-' in output:
+                records = [l for l in output.split('\n') 
+                          if l.strip() and not l.startswith(';')]
+                if records:
+                    print(f"[!!!] ZONE TRANSFER SUCCESSFUL: {domain} @ {nameserver}")
+                    return {'success': True, 'data': output, 'method': 'dig'}
+                    
+    except Exception as e:
+        print(f"[-] dig AXFR failed: {e}")
+    
+    # Method 2: nslookup
+    try:
+        result = subprocess.run(
+            f'nslookup -type=AXFR {domain} {nameserver}',
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        
+        output = result.stdout
+        
+        # Check for records
+        if 'origin' in output.lower() or 'serial' in output.lower():
+            lines = [l for l in output.split('\n') if l.strip()]
+            if len(lines) > 5:
+                print(f"[!!!] ZONE TRANSFER SUCCESSFUL via nslookup")
+                return {'success': True, 'data': output, 'method': 'nslookup'}
+                
+    except Exception as e:
+        pass
+    
+    # Method 3: host command (Linux)
+    try:
+        result = subprocess.run(
+            ['host', '-t', 'AXFR', domain, nameserver],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        
+        if 'has address' in result.stdout or 'name server' in result.stdout:
+            print(f"[!!!] ZONE TRANSFER SUCCESSFUL via host")
+            return {'success': True, 'data': result.stdout, 'method': 'host'}
+            
+    except:
+        pass
+    
+    return {'success': False}
+
+# AXFR all nameservers
+DOMAIN = "target.com"  # Replace with target
+nameservers = []  # From previous step
+
+successful_transfers = []
+
+for ns in nameservers:
+    result = try_zone_transfer(DOMAIN, ns)
+    
+    if result['success']:
+        successful_transfers.append({
+            'domain': DOMAIN,
+            'nameserver': ns,
+            'data': result['data'],
+            'method': result['method']
+        })
+        
+        # Save immediately
+        with open(f'outputs/dns/axfr_{ns.replace(".", "_")}.txt', 'w') as f:
+            f.write(result['data'])
+
+if successful_transfers:
+    print(f"\n[!!!] {len(successful_transfers)} ZONE TRANSFERS SUCCEEDED!")
+    
+    with open('outputs/dns/zone_transfer_results.txt', 'w') as f:
+        for transfer in successful_transfers:
+            f.write(f"=== {transfer['domain']} @ {transfer['nameserver']} ===\n")
+            f.write(transfer['data'])
+            f.write("\n\n")
+
+================================================================================
+PHASE 2: NS RECORD TAKEOVER
+================================================================================
+
+-----------------------------------------
+2.1 Check NS Claimability
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+ns_takeover.py - Check if NS records point to claimable resources
+
+If NS points to expired domain or claimable cloud resource,
+attacker can control entire DNS zone.
+"""
+
+import subprocess
+import socket
+import requests
+import whois
+from datetime import datetime
+
+def get_all_ns_records(subdomains_file):
+    """Get NS records for all subdomains"""
+    
+    ns_records = {}
+    
+    with open(subdomains_file) as f:
+        domains = list(set([l.strip().split('.')[-2] + '.' + l.strip().split('.')[-1] 
+                           for l in f if l.strip()]))
+    
+    for domain in domains:
+        try:
+            result = subprocess.run(
+                ['dig', '+short', 'NS', domain],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            for line in result.stdout.strip().split('\n'):
+                ns = line.strip().rstrip('.')
+                if ns:
+                    if domain not in ns_records:
+                        ns_records[domain] = []
+                    ns_records[domain].append(ns)
+                    
+        except:
+            pass
+    
+    return ns_records
+
+def check_ns_resolvable(ns):
+    """Check if NS resolves to valid IP"""
+    try:
+        ip = socket.gethostbyname(ns)
+        return {'resolvable': True, 'ip': ip}
+    except socket.gaierror:
+        return {'resolvable': False, 'ip': None}
+
+def check_domain_available(domain):
+    """Check if NS domain might be expired/available"""
+    
+    # Extract root domain from NS
+    parts = domain.split('.')
+    if len(parts) >= 2:
+        root = '.'.join(parts[-2:])
+    else:
+        root = domain
+    
+    try:
+        w = whois.whois(root)
+        
+        if w.status is None:
+            return {'available': True, 'reason': 'No WHOIS data'}
+            
+        # Check expiration
+        if w.expiration_date:
+            exp = w.expiration_date
+            if isinstance(exp, list):
+                exp = exp[0]
+            if exp < datetime.now():
+                return {'available': True, 'reason': 'Domain expired'}
+                
+        return {'available': False, 'registrar': w.registrar}
+        
+    except Exception as e:
+        # No WHOIS data might indicate available
+        return {'available': 'maybe', 'reason': str(e)}
+
+def check_cloud_ns(ns):
+    """Check if NS is cloud-based and claimable"""
+    
+    cloud_patterns = {
+        'AWS Route53': ['awsdns', 'amazonaws.com'],
+        'Google Cloud DNS': ['googledomains.com', 'google.com'],
+        'Azure DNS': ['azure-dns.com', 'azure-dns.net'],
+        'Cloudflare': ['cloudflare.com'],
+        'NS1': ['nsone.net'],
+        'DNSimple': ['dnsimple.com']
+    }
+    
+    for provider, patterns in cloud_patterns.items():
+        for pattern in patterns:
+            if pattern in ns.lower():
+                return {'cloud': True, 'provider': provider}
+    
+    return {'cloud': False}
+
+# Check all NS records
+print("[*] Analyzing NS records for takeover potential...")
+
+ns_records = get_all_ns_records('outputs/activesubdomain.txt')
+vulnerable_ns = []
+
+for domain, nameservers in ns_records.items():
+    for ns in nameservers:
+        print(f"[*] Checking: {ns} (for {domain})")
+        
+        # Check if NS resolves
+        resolution = check_ns_resolvable(ns)
+        
+        if not resolution['resolvable']:
+            print(f"[!] NS DOESN'T RESOLVE: {ns}")
+            vulnerable_ns.append({
+                'domain': domain,
+                'ns': ns,
+                'issue': 'NS does not resolve',
+                'severity': 'HIGH'
+            })
+            continue
+        
+        # Check domain availability
+        availability = check_domain_available(ns)
+        
+        if availability.get('available') == True:
+            print(f"[!!!] NS DOMAIN AVAILABLE: {ns}")
+            vulnerable_ns.append({
+                'domain': domain,
+                'ns': ns,
+                'issue': f"NS domain may be available: {availability.get('reason')}",
+                'severity': 'CRITICAL'
+            })
+            continue
+        
+        # Check cloud NS
+        cloud = check_cloud_ns(ns)
+        
+        if cloud['cloud']:
+            print(f"[*] Cloud NS: {ns} ({cloud['provider']})")
+            # Cloud NS generally not takeover-able unless misconfigured
+
+# Save results
+with open('outputs/dns/ns_takeover_candidates.txt', 'w') as f:
+    for vuln in vulnerable_ns:
+        f.write(f"Domain: {vuln['domain']}\n")
+        f.write(f"NS: {vuln['ns']}\n")
+        f.write(f"Issue: {vuln['issue']}\n")
+        f.write(f"Severity: {vuln['severity']}\n")
+        f.write("---\n")
+
+print(f"\n[*] Found {len(vulnerable_ns)} NS takeover candidates")
+
+================================================================================
+PHASE 3: DANGLING A-RECORDS (IP TAKEOVER)
+================================================================================
+
+-----------------------------------------
+3.1 Find Dangling A Records
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+dangling_a.py - Find A records pointing to released IPs
+
+Cloud IPs get reassigned. If A record still points to old IP,
+whoever gets that IP now controls the subdomain.
+"""
+
+import subprocess
+import socket
+import requests
+
+# IP ranges for major cloud providers
+CLOUD_RANGES = {
+    'AWS EC2': [
+        '3.', '13.', '18.', '34.', '35.', '44.', '46.', '52.', '54.', 
+        '99.', '100.', '107.', '108.', '150.', '157.', '174.', '175.',
+        '176.', '184.', '204.', '205.'
+    ],
+    'Azure': [
+        '13.', '20.', '23.', '40.', '51.', '52.', '65.', '70.', '74.',
+        '104.', '137.', '138.', '157.', '168.', '191.', '207.'
+    ],
+    'GCP': [
+        '34.', '35.', '104.', '108.', '130.', '142.', '146.', '199.'
+    ],
+    'DigitalOcean': [
+        '104.', '134.', '137.', '138.', '139.', '142.', '143.', '146.',
+        '157.', '159.', '161.', '162.', '163.', '164.', '165.', '167.'
+    ]
+}
+
+def is_cloud_ip(ip):
+    """Check if IP belongs to cloud provider"""
+    for provider, prefixes in CLOUD_RANGES.items():
+        for prefix in prefixes:
+            if ip.startswith(prefix):
+                return provider
+    return None
+
+def check_ip_active(ip, timeout=5):
+    """Check if IP responds to anything"""
+    
+    # Try common ports
+    ports = [80, 443, 22, 8080, 8443]
+    
+    for port in ports:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            result = sock.connect_ex((ip, port))
+            sock.close()
+            
+            if result == 0:
+                return {'active': True, 'port': port}
+                
+        except:
+            pass
+    
+    # Try HTTP
+    for protocol in ['http', 'https']:
+        try:
+            resp = requests.get(
+                f"{protocol}://{ip}",
+                timeout=timeout,
+                verify=False
+            )
+            return {'active': True, 'port': 80 if protocol == 'http' else 443}
+        except:
+            pass
+    
+    return {'active': False, 'port': None}
+
+def check_subdomain_matches_ip(subdomain, ip):
+    """Check if HTTP response matches expected subdomain"""
+    
+    for protocol in ['https', 'http']:
+        try:
+            resp = requests.get(
+                f"{protocol}://{subdomain}",
+                timeout=10,
+                verify=False
+            )
+            
+            # Get IP that actually responded
+            # (might be different due to CDN, etc.)
+            
+            return {
+                'matches': True,
+                'status': resp.status_code,
+                'title': extract_title(resp.text)
+            }
+            
+        except requests.exceptions.ConnectionError:
+            return {'matches': False, 'error': 'Connection refused'}
+        except:
+            pass
+    
+    return {'matches': 'unknown'}
+
+def extract_title(html):
+    """Extract page title"""
+    import re
+    match = re.search(r'<title[^>]*>([^<]+)</title>', html, re.IGNORECASE)
+    return match.group(1) if match else None
+
+# Analyze A records
+dangling = []
+
+with open('temp/agent1/resolved.txt') as f:
+    for line in f:
+        parts = line.strip().split()
+        if len(parts) >= 2:
+            subdomain = parts[0]
+            ip = parts[1]
+            
+            # Check if cloud IP
+            provider = is_cloud_ip(ip)
+            
+            if provider:
+                # Check if IP is active
+                activity = check_ip_active(ip)
+                
+                if not activity['active']:
+                    print(f"[!] DANGLING: {subdomain} -> {ip} ({provider})")
+                    dangling.append({
+                        'subdomain': subdomain,
+                        'ip': ip,
+                        'provider': provider,
+                        'issue': 'IP does not respond'
+                    })
+                else:
+                    # Check if response matches subdomain
+                    match = check_subdomain_matches_ip(subdomain, ip)
+                    
+                    if not match.get('matches'):
+                        print(f"[?] POTENTIAL: {subdomain} -> {ip} (no HTTP match)")
+                        dangling.append({
+                            'subdomain': subdomain,
+                            'ip': ip,
+                            'provider': provider,
+                            'issue': 'IP active but no HTTP match'
+                        })
+
+with open('outputs/dns/dangling_a_records.txt', 'w') as f:
+    for d in dangling:
+        f.write(f"Subdomain: {d['subdomain']}\n")
+        f.write(f"IP: {d['ip']}\n")
+        f.write(f"Provider: {d['provider']}\n")
+        f.write(f"Issue: {d['issue']}\n")
+        f.write("---\n")
+
+print(f"\n[*] Found {len(dangling)} dangling A records")
+
+================================================================================
+PHASE 4: MX RECORD TAKEOVER
+================================================================================
+
+-----------------------------------------
+4.1 Check MX Records
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+mx_takeover.py - Check for MX takeover opportunities
+
+Control MX = Receive ALL email for domain
+Including: password resets, confidential data, 2FA codes
+"""
+
+import subprocess
+import socket
+
+def get_mx_records(domain):
+    """Get MX records for domain"""
+    
+    mx_records = []
+    
+    try:
+        result = subprocess.run(
+            ['dig', '+short', 'MX', domain],
+            capture_output=True,
+            text=True,
+            timeout=15
+        )
+        
+        for line in result.stdout.strip().split('\n'):
+            if line.strip():
+                parts = line.strip().split()
+                if len(parts) >= 2:
+                    priority = parts[0]
+                    mx = parts[1].rstrip('.')
+                    mx_records.append({'priority': priority, 'mx': mx})
+                    
+    except:
+        pass
+    
+    return mx_records
+
+def check_mx_resolvable(mx):
+    """Check if MX host resolves"""
+    try:
+        ip = socket.gethostbyname(mx)
+        return {'resolvable': True, 'ip': ip}
+    except:
+        return {'resolvable': False, 'ip': None}
+
+def check_mx_responds(mx, port=25):
+    """Check if MX accepts SMTP connections"""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(10)
+        ip = socket.gethostbyname(mx)
+        result = sock.connect_ex((ip, port))
+        sock.close()
+        return result == 0
+    except:
+        return False
+
+# Check all domains
+vulnerable_mx = []
+
+# Get unique domains
+with open('outputs/activesubdomain.txt') as f:
+    domains = list(set([
+        '.'.join(l.strip().split('.')[-2:]) 
+        for l in f if l.strip()
+    ]))
+
+for domain in domains:
+    print(f"[*] Checking MX for: {domain}")
+    
+    mx_records = get_mx_records(domain)
+    
+    for record in mx_records:
+        mx = record['mx']
+        
+        # Check resolution
+        resolution = check_mx_resolvable(mx)
+        
+        if not resolution['resolvable']:
+            print(f"[!] MX DOESN'T RESOLVE: {mx} (for {domain})")
+            vulnerable_mx.append({
+                'domain': domain,
+                'mx': mx,
+                'priority': record['priority'],
+                'issue': 'MX does not resolve - potential takeover'
+            })
+            continue
+        
+        # Check SMTP
+        if not check_mx_responds(mx):
+            print(f"[?] MX no SMTP: {mx} (for {domain})")
+            vulnerable_mx.append({
+                'domain': domain,
+                'mx': mx,
+                'priority': record['priority'],
+                'issue': 'MX resolves but no SMTP - investigate'
+            })
+
+with open('outputs/dns/mx_takeover_candidates.txt', 'w') as f:
+    for v in vulnerable_mx:
+        f.write(f"Domain: {v['domain']}\n")
+        f.write(f"MX: {v['mx']} (priority: {v['priority']})\n")
+        f.write(f"Issue: {v['issue']}\n")
+        f.write("---\n")
+
+================================================================================
+PHASE 5: DNS CACHE POISONING (THEORETICAL)
+================================================================================
+
+-----------------------------------------
+5.1 Check DNSSEC Status
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+dnssec_check.py - Check DNSSEC configuration
+
+DNSSEC prevents DNS spoofing/poisoning.
+No DNSSEC = Vulnerable to cache poisoning attacks.
+"""
+
+import subprocess
+
+def check_dnssec(domain):
+    """Check if domain has DNSSEC enabled"""
+    
+    # Check for DNSKEY records
+    try:
+        result = subprocess.run(
+            ['dig', '+short', 'DNSKEY', domain],
+            capture_output=True,
+            text=True,
+            timeout=15
+        )
+        
+        has_dnskey = bool(result.stdout.strip())
+        
+    except:
+        has_dnskey = False
+    
+    # Check for DS records
+    try:
+        result = subprocess.run(
+            ['dig', '+short', 'DS', domain],
+            capture_output=True,
+            text=True,
+            timeout=15
+        )
+        
+        has_ds = bool(result.stdout.strip())
+        
+    except:
+        has_ds = False
+    
+    # Check DNSSEC validation
+    try:
+        result = subprocess.run(
+            ['dig', '+dnssec', domain],
+            capture_output=True,
+            text=True,
+            timeout=15
+        )
+        
+        has_rrsig = 'RRSIG' in result.stdout
+        
+    except:
+        has_rrsig = False
+    
+    return {
+        'domain': domain,
+        'dnskey': has_dnskey,
+        'ds': has_ds,
+        'rrsig': has_rrsig,
+        'dnssec_enabled': has_dnskey and has_ds
+    }
+
+# Check target domains
+with open('outputs/activesubdomain.txt') as f:
+    domains = list(set([
+        '.'.join(l.strip().split('.')[-2:]) 
+        for l in f if l.strip()
+    ]))
+
+no_dnssec = []
+
+for domain in domains:
+    result = check_dnssec(domain)
+    
+    if not result['dnssec_enabled']:
+        print(f"[!] No DNSSEC: {domain}")
+        no_dnssec.append(domain)
+    else:
+        print(f"[+] DNSSEC enabled: {domain}")
+
+with open('outputs/dns/no_dnssec_domains.txt', 'w') as f:
+    f.write('\n'.join(no_dnssec))
+
+print(f"\n[*] {len(no_dnssec)} domains without DNSSEC")
+
+================================================================================
+PHASE 6: FULL DNS AUDIT
+================================================================================
+
+#!/usr/bin/env python3
+"""
+dns_full_audit.py - Complete DNS security assessment
+"""
+
+import subprocess
+import socket
+import os
+import json
+
+os.makedirs('outputs/dns', exist_ok=True)
+
+class DNSAuditor:
+    
+    def __init__(self):
+        self.findings = {
+            'zone_transfers': [],
+            'ns_takeover': [],
+            'dangling_a': [],
+            'mx_takeover': [],
+            'no_dnssec': [],
+            'spf_issues': [],
+            'dmarc_issues': []
+        }
+    
+    def get_nameservers(self, domain):
+        """Get NS records"""
+        try:
+            result = subprocess.run(
+                ['dig', '+short', 'NS', domain],
+                capture_output=True, text=True, timeout=15
+            )
+            return [l.strip().rstrip('.') for l in result.stdout.split('\n') if l.strip()]
+        except:
+            return []
+    
+    def try_zone_transfer(self, domain, nameserver):
+        """Attempt AXFR"""
+        try:
+            result = subprocess.run(
+                ['dig', 'AXFR', domain, f'@{nameserver}'],
+                capture_output=True, text=True, timeout=60
+            )
+            if 'XFR size' in result.stdout and 'Transfer failed' not in result.stdout:
+                return {'success': True, 'data': result.stdout}
+        except:
+            pass
+        return {'success': False}
+    
+    def check_spf(self, domain):
+        """Check SPF record"""
+        try:
+            result = subprocess.run(
+                ['dig', '+short', 'TXT', domain],
+                capture_output=True, text=True, timeout=15
+            )
+            
+            for line in result.stdout.split('\n'):
+                if 'v=spf1' in line.lower():
+                    # Check for weak SPF
+                    if '+all' in line:
+                        return {'exists': True, 'weak': True, 'issue': 'SPF allows all (+all)'}
+                    if '?all' in line:
+                        return {'exists': True, 'weak': True, 'issue': 'SPF neutral (?all)'}
+                    return {'exists': True, 'weak': False}
+            
+            return {'exists': False, 'issue': 'No SPF record'}
+            
+        except:
+            return {'exists': False}
+    
+    def check_dmarc(self, domain):
+        """Check DMARC record"""
+        try:
+            result = subprocess.run(
+                ['dig', '+short', 'TXT', f'_dmarc.{domain}'],
+                capture_output=True, text=True, timeout=15
+            )
+            
+            if 'v=dmarc1' in result.stdout.lower():
+                policy = 'none'
+                if 'p=reject' in result.stdout.lower():
+                    policy = 'reject'
+                elif 'p=quarantine' in result.stdout.lower():
+                    policy = 'quarantine'
+                
+                return {
+                    'exists': True,
+                    'policy': policy,
+                    'weak': policy == 'none'
+                }
+            
+            return {'exists': False, 'issue': 'No DMARC record'}
+            
+        except:
+            return {'exists': False}
+    
+    def audit_domain(self, domain):
+        """Full DNS audit for domain"""
+        
+        print(f"\n[*] Auditing: {domain}")
+        
+        # 1. Zone transfer
+        nameservers = self.get_nameservers(domain)
+        for ns in nameservers:
+            result = self.try_zone_transfer(domain, ns)
+            if result['success']:
+                print(f"[!!!] ZONE TRANSFER: {domain} @ {ns}")
+                self.findings['zone_transfers'].append({
+                    'domain': domain,
+                    'ns': ns
+                })
+        
+        # 2. NS resolution
+        for ns in nameservers:
+            try:
+                socket.gethostbyname(ns)
+            except:
+                print(f"[!] NS UNRESOLVABLE: {ns}")
+                self.findings['ns_takeover'].append({
+                    'domain': domain,
+                    'ns': ns
+                })
+        
+        # 3. SPF check
+        spf = self.check_spf(domain)
+        if not spf.get('exists') or spf.get('weak'):
+            print(f"[!] SPF ISSUE: {spf.get('issue', 'Weak SPF')}")
+            self.findings['spf_issues'].append({
+                'domain': domain,
+                'issue': spf.get('issue', 'Missing or weak SPF')
+            })
+        
+        # 4. DMARC check
+        dmarc = self.check_dmarc(domain)
+        if not dmarc.get('exists') or dmarc.get('weak'):
+            print(f"[!] DMARC ISSUE: {dmarc.get('issue', 'Weak policy')}")
+            self.findings['dmarc_issues'].append({
+                'domain': domain,
+                'issue': dmarc.get('issue', 'Missing or weak DMARC')
+            })
+    
+    def save_report(self):
+        """Save comprehensive report"""
+        
+        with open('outputs/dns/dns_audit.json', 'w') as f:
+            json.dump(self.findings, f, indent=2)
+        
+        report = ["# DNS Security Audit Report\n"]
+        
+        if self.findings['zone_transfers']:
+            report.append("## CRITICAL: Zone Transfers Allowed\n")
+            for f in self.findings['zone_transfers']:
+                report.append(f"- {f['domain']} @ {f['ns']}\n")
+        
+        if self.findings['ns_takeover']:
+            report.append("\n## HIGH: NS Takeover Candidates\n")
+            for f in self.findings['ns_takeover']:
+                report.append(f"- {f['domain']}: {f['ns']} does not resolve\n")
+        
+        if self.findings['spf_issues']:
+            report.append("\n## MEDIUM: SPF Issues\n")
+            for f in self.findings['spf_issues']:
+                report.append(f"- {f['domain']}: {f['issue']}\n")
+        
+        if self.findings['dmarc_issues']:
+            report.append("\n## MEDIUM: DMARC Issues\n")
+            for f in self.findings['dmarc_issues']:
+                report.append(f"- {f['domain']}: {f['issue']}\n")
+        
+        with open('outputs/dns/dns_misconfig_report.txt', 'w') as f:
+            f.write(''.join(report))
+
+# Run audit
+auditor = DNSAuditor()
+
+# Get unique root domains
+with open('outputs/activesubdomain.txt') as f:
+    domains = list(set([
+        '.'.join(l.strip().split('.')[-2:]) 
+        for l in f if l.strip()
+    ]))
+
+for domain in domains:
+    auditor.audit_domain(domain)
+
+auditor.save_report()
+
+print("\n" + "="*60)
+print(f"Zone Transfers: {len(auditor.findings['zone_transfers'])}")
+print(f"NS Takeover: {len(auditor.findings['ns_takeover'])}")
+print(f"SPF Issues: {len(auditor.findings['spf_issues'])}")
+print(f"DMARC Issues: {len(auditor.findings['dmarc_issues'])}")
+
+================================================================================
+PHASE 7: GENERATE REPORTS
+================================================================================
+
+#!/usr/bin/env python3
+"""
+Generate vulnerability reports for DNS findings
+"""
+
+import os
+import hashlib
+
+os.makedirs('outputs/vulnerabilities', exist_ok=True)
+
+def generate_zone_transfer_report(domain, ns):
+    """Generate AXFR vuln report"""
+    
+    vuln_id = hashlib.md5(f"axfr-{domain}".encode()).hexdigest()[:8]
+    
+    report = f"""# DNS Zone Transfer Information Disclosure
+
+**Severity**: HIGH
+**Domain**: {domain}
+**Vulnerable NS**: {ns}
+
+## Description
+The nameserver allows unauthorized zone transfer (AXFR), exposing 
+the complete DNS zone including all subdomains and their records.
+
+## Impact
+- **Complete subdomain enumeration**
+- **Internal naming convention disclosure**
+- **Network topology exposure**
+- **Potential credential patterns in records**
+- **Attack surface mapping**
+
+## Evidence
+```
+dig AXFR {domain} @{ns}
+```
+
+## Recommendations
+1. Restrict zone transfers to authorized secondary DNS only
+2. Implement TSIG (Transaction SIGnature) for transfer authentication
+3. Configure ACLs on nameserver to limit AXFR
+4. Monitor for unauthorized transfer attempts
+"""
+    
+    with open(f"outputs/vulnerabilities/DNS-AXFR-{vuln_id}-HIGH.md", 'w') as f:
+        f.write(report)
+
+def generate_ns_takeover_report(domain, ns):
+    """Generate NS takeover vuln report"""
+    
+    vuln_id = hashlib.md5(f"ns-{domain}-{ns}".encode()).hexdigest()[:8]
+    
+    report = f"""# DNS Nameserver Takeover
+
+**Severity**: CRITICAL
+**Domain**: {domain}
+**Vulnerable NS**: {ns}
+
+## Description
+The NS record points to a nameserver that does not resolve or may be 
+claimable. An attacker could register this resource and gain complete 
+control over DNS resolution for the domain.
+
+## Impact
+- **Complete domain hijack**
+- **All traffic redirected to attacker**
+- **Email interception**
+- **SSL certificate issuance**
+- **Transparent phishing**
+
+## Evidence
+- NS Record: `{ns}`
+- Resolution: FAILED
+
+## Recommendations
+1. Remove or update the dangling NS record
+2. Audit all NS records regularly
+3. Implement NS record monitoring
+4. Consider DNSSEC to prevent DNS hijacking
+"""
+    
+    with open(f"outputs/vulnerabilities/DNS-NS-{vuln_id}-CRITICAL.md", 'w') as f:
+        f.write(report)
+
+================================================================================
+SUMMARY CHECKLIST
+================================================================================
+
+[ ] Zone transfer (AXFR) attempted on all nameservers
+[ ] NS records checked for takeover potential
+[ ] Dangling A records identified (cloud IP reuse)
+[ ] MX records checked for takeover
+[ ] SPF record strength verified
+[ ] DMARC policy checked
+[ ] DNSSEC status verified
+[ ] All findings documented with reports
+
+================================================================================
+TOOLS REFERENCE
+================================================================================
+
+RECONNAISSANCE:
+- dig - DNS lookup utility
+- nslookup - Windows DNS tool
+- host - DNS lookup (Linux)
+
+CHECKS:
+- Zone Transfer: dig AXFR domain @ns
+- NS Records: dig +short NS domain
+- MX Records: dig +short MX domain
+- DNSSEC: dig +dnssec domain
+
+SEVERITY LEVELS:
+- CRITICAL: Zone transfer, NS takeover
+- HIGH: Dangling A records, MX takeover
+- MEDIUM: Missing SPF/DMARC, no DNSSEC
+
+================================================================================
+NEXT TASK
+================================================================================
+Task 91: Supply Chain & Second-Order (Phase 14)

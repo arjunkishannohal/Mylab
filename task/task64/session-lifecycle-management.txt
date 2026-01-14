@@ -1,0 +1,609 @@
+================================================================================
+TASK 64 · SESSION LIFECYCLE & MANAGEMENT
+================================================================================
+Covers testing_toolkit.txt Phase 7 Step 25 (Part 2)
+Attacks on session LIFECYCLE, TERMINATION, and MANAGEMENT.
+
+OBJECTIVE:
+- Test if sessions are properly invalidated on logout
+- Exploit concurrent session abuse for credential sharing
+- Test session timeout and expiration handling
+- Identify session persistence issues across devices/IPs
+- Test session binding and validation weaknesses
+
+================================================================================
+INPUTS
+================================================================================
+outputs/har/accounts/*_auth.json          ← Session cookies from HAR (per-account)
+outputs/session_attacks/session_mechanisms.txt ← From Task 63
+outputs/live_base_urls.txt                ← Target hosts
+outputs/url_corpus_all_in_scope.txt       ← URL corpus (grep for login/logout paths)
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/session_attacks/
+├── logout_invalidation.txt        ← Logout bypass results
+├── concurrent_sessions.txt        ← Concurrent session abuse findings
+├── session_timeout.txt            ← Timeout/expiration issues
+├── session_persistence.txt        ← Cross-device/IP persistence
+├── session_binding.txt            ← IP/device binding weaknesses
+└── lifecycle_scan_log.txt         ← Full execution log
+
+================================================================================
+PHASE 1: LOGOUT INVALIDATION TESTING
+================================================================================
+
+───────────────────────────────────────
+1.1 Understanding Logout Vulnerabilities
+───────────────────────────────────────
+SECURE LOGOUT:
+1. User clicks logout
+2. Server DESTROYS session on server-side
+3. Server clears session cookie (Set-Cookie with expiry in past)
+4. Old session ID is completely invalid
+
+INSECURE LOGOUT PATTERNS:
+- Client-side only: Cookie deleted but session still valid on server
+- No server invalidation: Session remains active indefinitely
+- Partial cleanup: Some tokens invalidated, others remain
+- Redirect without invalidation: Just redirects to login
+
+───────────────────────────────────────
+1.2 Basic Logout Invalidation Test
+───────────────────────────────────────
+#!/bin/bash
+# test_logout_invalidation.sh
+
+TARGET="$1"
+LOGIN_URL="$2"
+LOGOUT_URL="$3"
+PROTECTED_URL="$4"
+
+echo "[*] Testing logout invalidation"
+
+# Step 1: Login and get session
+curl -s -c session.txt -X POST "$LOGIN_URL" \
+    -d "username=testuser&password=testpass"
+
+SESSION_ID=$(grep -oP 'PHPSESSID\s+\K\S+' session.txt)
+echo "[*] Session ID: $SESSION_ID"
+
+# Step 2: Verify session works
+echo "[*] Testing session before logout..."
+response_before=$(curl -s -b "PHPSESSID=$SESSION_ID" "$PROTECTED_URL")
+if echo "$response_before" | grep -qi "profile\|dashboard\|welcome"; then
+    echo "[+] Session valid before logout"
+else
+    echo "[-] Session not working, check credentials"
+    exit 1
+fi
+
+# Step 3: Logout (save new cookies but keep old session ID)
+curl -s -c logout_cookies.txt -b session.txt "$LOGOUT_URL" > /dev/null
+
+# Step 4: Try using OLD session ID after logout
+echo "[*] Testing old session after logout..."
+response_after=$(curl -s -b "PHPSESSID=$SESSION_ID" "$PROTECTED_URL")
+
+if echo "$response_after" | grep -qi "profile\|dashboard\|welcome"; then
+    echo "[!] VULNERABLE: Session NOT invalidated after logout!"
+    echo "[!] Old session still grants access!"
+else
+    echo "[+] SECURE: Session properly invalidated after logout"
+fi
+
+───────────────────────────────────────
+1.3 Logout Invalidation - Different Methods
+───────────────────────────────────────
+# Method 1: GET-based logout
+curl -s -b "PHPSESSID=$SESSION" "https://target.com/logout"
+curl -s -b "PHPSESSID=$SESSION" "https://target.com/logout.php"
+curl -s -b "PHPSESSID=$SESSION" "https://target.com/signout"
+curl -s -b "PHPSESSID=$SESSION" "https://target.com/api/logout"
+
+# Method 2: POST-based logout
+curl -s -X POST -b "PHPSESSID=$SESSION" "https://target.com/logout"
+curl -s -X POST -b "PHPSESSID=$SESSION" "https://target.com/api/auth/logout"
+
+# Method 3: DELETE-based logout (RESTful)
+curl -s -X DELETE -b "PHPSESSID=$SESSION" "https://target.com/api/session"
+
+# After each, test if old session still works
+curl -s -b "PHPSESSID=$SESSION" "https://target.com/profile"
+
+───────────────────────────────────────
+1.4 Token Invalidation (JWT/Bearer)
+───────────────────────────────────────
+# For JWT/Bearer token apps, logout should:
+# 1. Invalidate token server-side (blocklist)
+# 2. Clear refresh tokens
+# 3. Revoke all associated tokens
+
+# Test: Does logout invalidate the token?
+TOKEN="Bearer eyJhbG..."
+
+# Login, get token
+# Logout
+curl -s -X POST "https://target.com/api/logout" \
+    -H "Authorization: $TOKEN"
+
+# Try using old token
+response=$(curl -s "https://target.com/api/profile" \
+    -H "Authorization: $TOKEN")
+
+# If still works → Token not invalidated (common with stateless JWT)
+
+───────────────────────────────────────
+1.5 Logout from All Devices
+───────────────────────────────────────
+# Check if "logout from all devices" feature exists and works
+
+# Create multiple sessions
+curl -s -c session1.txt -X POST "https://target.com/login" -d "username=test&password=pass"
+curl -s -c session2.txt -X POST "https://target.com/login" -d "username=test&password=pass"
+curl -s -c session3.txt -X POST "https://target.com/login" -d "username=test&password=pass"
+
+# Logout all from session1
+curl -s -b session1.txt "https://target.com/logout-all"
+
+# Test if session2 and session3 still work
+curl -s -b session2.txt "https://target.com/profile"
+curl -s -b session3.txt "https://target.com/profile"
+
+# If they work → "Logout all" doesn't actually invalidate all sessions
+
+================================================================================
+PHASE 2: CONCURRENT SESSION TESTING
+================================================================================
+
+───────────────────────────────────────
+2.1 Understanding Concurrent Session Risks
+───────────────────────────────────────
+RISKS OF UNLIMITED CONCURRENT SESSIONS:
+- Credential sharing (against ToS, revenue loss)
+- Compromised credentials remain active
+- Hard to detect account compromise
+- Session hijacking goes unnoticed
+
+SECURE PATTERNS:
+- Limit concurrent sessions (e.g., max 3)
+- Notify user of new logins
+- Allow user to view/terminate sessions
+- Auto-terminate oldest session on new login
+
+───────────────────────────────────────
+2.2 Test Concurrent Session Limits
+───────────────────────────────────────
+#!/bin/bash
+# test_concurrent_sessions.sh
+
+TARGET_LOGIN="$1"
+TARGET_PROFILE="$2"
+USERNAME="$3"
+PASSWORD="$4"
+
+echo "[*] Testing concurrent session limits"
+
+# Create multiple concurrent sessions
+for i in {1..10}; do
+    curl -s -c "session_$i.txt" -X POST "$TARGET_LOGIN" \
+        -d "username=$USERNAME&password=$PASSWORD" > /dev/null
+    echo "[*] Created session $i"
+done
+
+# Test if all sessions are still valid
+valid_count=0
+for i in {1..10}; do
+    response=$(curl -s -b "session_$i.txt" "$TARGET_PROFILE")
+    if echo "$response" | grep -qi "profile\|dashboard\|welcome\|$USERNAME"; then
+        ((valid_count++))
+        echo "[+] Session $i: VALID"
+    else
+        echo "[-] Session $i: INVALID"
+    fi
+done
+
+echo ""
+echo "[*] Results: $valid_count out of 10 sessions are valid"
+if [ $valid_count -eq 10 ]; then
+    echo "[!] No concurrent session limit detected"
+else
+    echo "[*] Concurrent session limit appears to be around $valid_count"
+fi
+
+───────────────────────────────────────
+2.3 New Login Invalidates Old Session?
+───────────────────────────────────────
+# Some apps invalidate previous session on new login
+# This prevents concurrent access but has UX tradeoffs
+
+# Step 1: Login, get session A
+curl -s -c sessionA.txt -X POST "https://target.com/login" \
+    -d "username=test&password=pass"
+
+# Step 2: Login again, get session B
+curl -s -c sessionB.txt -X POST "https://target.com/login" \
+    -d "username=test&password=pass"
+
+# Step 3: Test session A
+curl -s -b sessionA.txt "https://target.com/profile"
+
+# If session A invalid → New login invalidates old sessions
+# If both valid → Concurrent sessions allowed
+
+───────────────────────────────────────
+2.4 Device/Location Tracking
+───────────────────────────────────────
+# Check if app tracks sessions by device/location
+
+# Test session management page (if exists)
+curl -s -b session.txt "https://target.com/settings/sessions"
+curl -s -b session.txt "https://target.com/account/devices"
+curl -s -b session.txt "https://target.com/security/active-sessions"
+
+# Look for:
+# - List of active sessions
+# - Device info (browser, OS)
+# - IP addresses
+# - Last activity time
+# - Ability to terminate individual sessions
+
+================================================================================
+PHASE 3: SESSION TIMEOUT & EXPIRATION
+================================================================================
+
+───────────────────────────────────────
+3.1 Idle Timeout Testing
+───────────────────────────────────────
+# Session should expire after period of inactivity
+
+# Step 1: Login and get session
+curl -s -c session.txt -X POST "https://target.com/login" \
+    -d "username=test&password=pass"
+
+# Step 2: Wait and periodically check
+echo "[*] Testing idle timeout..."
+for minutes in 5 10 15 30 60 120; do
+    echo "[*] Waiting $minutes minutes..."
+    sleep $((minutes * 60))
+    
+    response=$(curl -s -b session.txt "https://target.com/profile")
+    if echo "$response" | grep -qi "login\|session expired\|unauthorized"; then
+        echo "[+] Session expired after $minutes minutes"
+        break
+    else
+        echo "[*] Session still valid after $minutes minutes"
+    fi
+done
+
+# Reasonable idle timeouts:
+# - High security: 5-15 minutes
+# - Medium security: 30-60 minutes
+# - Low security: 2-4 hours
+# - Dangerous: Never expires
+
+───────────────────────────────────────
+3.2 Absolute Timeout Testing
+───────────────────────────────────────
+# Session should expire regardless of activity
+
+# Keep session active but test after long time
+# (Script should run for hours with periodic requests)
+
+while true; do
+    # Keep session active
+    curl -s -b session.txt "https://target.com/api/heartbeat" > /dev/null
+    
+    # Check if session still works on protected resource
+    response=$(curl -s -b session.txt "https://target.com/profile")
+    
+    timestamp=$(date "+%Y-%m-%d %H:%M:%S")
+    if echo "$response" | grep -qi "login\|expired"; then
+        echo "[$timestamp] Session expired (absolute timeout)"
+        break
+    fi
+    
+    echo "[$timestamp] Session still active"
+    sleep 300  # Check every 5 minutes
+done
+
+───────────────────────────────────────
+3.3 Session Refresh Behavior
+───────────────────────────────────────
+# Some apps use sliding expiration (activity resets timer)
+# Others use absolute expiration (fixed time from creation)
+
+# Test: Does activity extend session?
+
+# Get session timestamp
+curl -s -c session.txt -D headers.txt "https://target.com/login" \
+    -X POST -d "username=test&password=pass"
+
+# Check cookie expiry in headers
+grep -i "set-cookie" headers.txt | grep -i "expires"
+
+# Make activity request
+curl -s -b session.txt "https://target.com/api/activity" > /dev/null
+
+# Check if expiry changed
+curl -s -c session2.txt -b session.txt -D headers2.txt "https://target.com/profile"
+grep -i "set-cookie" headers2.txt | grep -i "expires"
+
+───────────────────────────────────────
+3.4 Token Refresh Testing (JWT/OAuth)
+───────────────────────────────────────
+# For token-based auth, test refresh token behavior
+
+# Get access token and refresh token
+# Wait for access token to expire
+# Use refresh token to get new access token
+# Test if old refresh token is invalidated (rotation)
+
+ACCESS_TOKEN="..."
+REFRESH_TOKEN="..."
+
+# After access token expires, refresh
+curl -s -X POST "https://target.com/api/token/refresh" \
+    -d "refresh_token=$REFRESH_TOKEN"
+
+# Try using OLD refresh token again (should fail if rotated)
+curl -s -X POST "https://target.com/api/token/refresh" \
+    -d "refresh_token=$REFRESH_TOKEN"
+
+# If old refresh token works → Refresh token not rotated (weaker security)
+
+================================================================================
+PHASE 4: SESSION BINDING & VALIDATION
+================================================================================
+
+───────────────────────────────────────
+4.1 IP Address Binding
+───────────────────────────────────────
+# Test if session is bound to IP address
+
+# Step 1: Login from IP A, get session
+curl -s -c session.txt -X POST "https://target.com/login" \
+    -d "username=test&password=pass"
+
+# Step 2: Use session from different IP
+# (Use proxy, VPN, or different network)
+curl -s --proxy "http://different-ip:8080" \
+    -b session.txt "https://target.com/profile"
+
+# If works from different IP → No IP binding
+# If rejected → IP binding in place
+
+# Also test with header spoofing
+curl -s -b session.txt \
+    -H "X-Forwarded-For: 1.2.3.4" \
+    -H "X-Real-IP: 1.2.3.4" \
+    "https://target.com/profile"
+
+───────────────────────────────────────
+4.2 User-Agent Binding
+───────────────────────────────────────
+# Test if session is bound to User-Agent
+
+# Login with Chrome UA
+curl -s -c session.txt -X POST "https://target.com/login" \
+    -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0" \
+    -d "username=test&password=pass"
+
+# Try with different UA
+curl -s -b session.txt \
+    -A "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Safari/604.1" \
+    "https://target.com/profile"
+
+# If works with different UA → No UA binding
+
+───────────────────────────────────────
+4.3 Device Fingerprint Binding
+───────────────────────────────────────
+# Some apps use device fingerprinting beyond UA
+
+# Check for device fingerprint parameters
+grep -rP 'deviceId|device_id|fingerprint|fp' js_responses/
+
+# Test if session works without fingerprint
+curl -s -b session.txt "https://target.com/profile"
+
+# Compare with request that includes fingerprint
+curl -s -b session.txt \
+    -H "X-Device-Id: original_device_id" \
+    "https://target.com/profile"
+
+───────────────────────────────────────
+4.4 TLS Binding (TLS Session Resumption)
+───────────────────────────────────────
+# Advanced: Some apps bind session to TLS session
+
+# Check if changing TLS session affects application session
+# This is rare but exists in high-security applications
+
+================================================================================
+PHASE 5: SESSION HIJACKING DETECTION
+================================================================================
+
+───────────────────────────────────────
+5.1 Simultaneous Use Detection
+───────────────────────────────────────
+# Test if app detects simultaneous session use from different locations
+
+# From location A (original):
+curl -s -b session.txt "https://target.com/profile"
+
+# Simultaneously from location B (attacker):
+curl -s --proxy "http://different-ip:8080" \
+    -b session.txt "https://target.com/profile"
+
+# Check if:
+# - Both requests succeed (no detection)
+# - Original user gets warning
+# - One session is terminated
+# - Both sessions are terminated
+
+───────────────────────────────────────
+5.2 Anomaly Detection Testing
+───────────────────────────────────────
+# Test if app detects anomalous behavior
+
+# Rapid location changes (impossible travel)
+curl -s -b session.txt -H "X-Forwarded-For: 1.1.1.1" "https://target.com/api/action1"
+sleep 1
+curl -s -b session.txt -H "X-Forwarded-For: 200.200.200.200" "https://target.com/api/action2"
+
+# Different device characteristics
+curl -s -b session.txt -A "Chrome Windows" "https://target.com/api/action1"
+curl -s -b session.txt -A "Safari iPhone" "https://target.com/api/action2"
+
+# High-risk actions
+curl -s -b session.txt -X POST "https://target.com/api/change-password"
+curl -s -b session.txt -X POST "https://target.com/api/change-email"
+
+# Check for:
+# - Step-up authentication required
+# - Account locked
+# - Session terminated
+# - Security notifications
+
+================================================================================
+PHASE 6: COMPLETE LIFECYCLE TEST SCRIPT
+================================================================================
+
+#!/bin/bash
+# complete_session_lifecycle_test.sh
+
+TARGET="$1"
+LOGIN_URL="${TARGET}/login"
+LOGOUT_URL="${TARGET}/logout"
+PROFILE_URL="${TARGET}/profile"
+USERNAME="$2"
+PASSWORD="$3"
+
+OUTPUT_DIR="outputs/session_attacks"
+mkdir -p "$OUTPUT_DIR"
+
+echo "═══════════════════════════════════════════════════════════════"
+echo " Complete Session Lifecycle Test - $TARGET"
+echo "═══════════════════════════════════════════════════════════════"
+
+# TEST 1: Logout Invalidation
+echo ""
+echo "[TEST 1] Logout Invalidation"
+echo "─────────────────────────────"
+
+curl -s -c "$OUTPUT_DIR/test1_session.txt" -X POST "$LOGIN_URL" \
+    -d "username=$USERNAME&password=$PASSWORD" > /dev/null
+
+OLD_SESSION=$(grep -oP 'PHPSESSID\s+\K\S+' "$OUTPUT_DIR/test1_session.txt")
+
+curl -s -b "$OUTPUT_DIR/test1_session.txt" "$LOGOUT_URL" > /dev/null
+
+response=$(curl -s -b "PHPSESSID=$OLD_SESSION" "$PROFILE_URL")
+if echo "$response" | grep -qi "profile\|dashboard\|$USERNAME"; then
+    echo "[!] VULNERABLE: Logout does not invalidate session"
+    echo "VULNERABLE: Logout does not invalidate session" >> "$OUTPUT_DIR/logout_invalidation.txt"
+else
+    echo "[+] SECURE: Session properly invalidated on logout"
+    echo "SECURE: Session properly invalidated on logout" >> "$OUTPUT_DIR/logout_invalidation.txt"
+fi
+
+# TEST 2: Concurrent Sessions
+echo ""
+echo "[TEST 2] Concurrent Sessions"
+echo "─────────────────────────────"
+
+valid_sessions=0
+for i in {1..5}; do
+    curl -s -c "$OUTPUT_DIR/concurrent_$i.txt" -X POST "$LOGIN_URL" \
+        -d "username=$USERNAME&password=$PASSWORD" > /dev/null
+done
+
+for i in {1..5}; do
+    response=$(curl -s -b "$OUTPUT_DIR/concurrent_$i.txt" "$PROFILE_URL")
+    if echo "$response" | grep -qi "profile\|dashboard\|$USERNAME"; then
+        ((valid_sessions++))
+    fi
+done
+
+echo "[*] $valid_sessions out of 5 concurrent sessions valid"
+echo "Concurrent sessions allowed: $valid_sessions" >> "$OUTPUT_DIR/concurrent_sessions.txt"
+
+# TEST 3: Session Binding
+echo ""
+echo "[TEST 3] IP/UA Binding"
+echo "─────────────────────────────"
+
+curl -s -c "$OUTPUT_DIR/binding_session.txt" -X POST "$LOGIN_URL" \
+    -A "Mozilla/5.0 Chrome/120" \
+    -d "username=$USERNAME&password=$PASSWORD" > /dev/null
+
+# Test different UA
+response=$(curl -s -b "$OUTPUT_DIR/binding_session.txt" \
+    -A "Mozilla/5.0 Safari/604" "$PROFILE_URL")
+
+if echo "$response" | grep -qi "profile\|dashboard\|$USERNAME"; then
+    echo "[*] No User-Agent binding detected"
+    echo "No User-Agent binding" >> "$OUTPUT_DIR/session_binding.txt"
+else
+    echo "[+] User-Agent binding in place"
+    echo "User-Agent binding active" >> "$OUTPUT_DIR/session_binding.txt"
+fi
+
+echo ""
+echo "[*] Tests complete. Results in $OUTPUT_DIR"
+
+================================================================================
+🧠 YOU ARE AN INTELLIGENT AGENT 🧠
+================================================================================
+
+TESTING PRIORITY:
+─────────────────
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Priority │ Test                        │ Impact                            │
+├──────────┼─────────────────────────────┼───────────────────────────────────┤
+│ 1        │ Logout Invalidation         │ Persistent unauthorized access    │
+│ 2        │ Concurrent Sessions         │ Credential sharing, undetected    │
+│          │                             │ compromise                        │
+│ 3        │ Session Timeout             │ Long-term exposure                │
+│ 4        │ IP/Device Binding           │ Session hijacking difficulty      │
+│ 5        │ Refresh Token Rotation      │ Refresh token abuse               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+CRITICAL CHECKS:
+────────────────
+□ Session MUST be invalid after logout (test with old session ID)
+□ Reasonable concurrent session limit should exist
+□ Idle timeout should be enforced (5-60 min depending on sensitivity)
+□ Absolute timeout should exist (e.g., max 24 hours)
+□ High-security apps should bind session to IP/device
+
+SIGNS OF VULNERABILITY:
+───────────────────────
+✗ Old session works after logout
+✗ Unlimited concurrent sessions allowed
+✗ Session never expires (even after days)
+✗ Session works from any IP/device
+✗ No "logout from all devices" feature
+
+================================================================================
+COMMON MISTAKES TO AVOID
+================================================================================
+❌ Not testing with actual old session ID after logout
+❌ Only testing logout redirect, not server-side invalidation
+❌ Not testing concurrent sessions with same credentials
+❌ Not testing timeout with real time gaps
+❌ Assuming mobile and web apps share session management
+
+================================================================================
+SUCCESS CRITERIA
+================================================================================
+✓ Logout invalidation tested and documented
+✓ Concurrent session limits tested
+✓ Session timeout/expiration tested
+✓ Session binding (IP, UA, device) tested
+✓ Refresh token rotation tested (if applicable)
+✓ Session management UI tested (if exists)
+✓ All findings documented with evidence
+

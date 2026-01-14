@@ -1,0 +1,192 @@
+# Task 31: Playwright Headless UI Capture
+# Purpose: Discover endpoints only reachable through authenticated browser interaction.
+# Jules runs this BEFORE heavy vuln testing to fill gaps in the URL corpus.
+
+IMPORTANT (Dynamic task behavior)
+- This task is designed to be data-driven. It will try to auto-pick the target BASE_URL from existing HAR files.
+- If the target cannot be inferred, or if the chosen BASE_URL is NOT present in HAR traffic, it MUST ask the user to confirm or enter the correct BASE_URL.
+- It can also MERGE discovered endpoints into the correct corpus file automatically (or print the file paths to merge).
+
+====================
+Why this task exists
+====================
+Recon tools + HAR files capture a lot, but they miss:
+- SPA routes (React/Vue/Angular) that are client-side rendered
+- Endpoints triggered ONLY after specific UI state (login → dashboard → settings)
+- Internal APIs / GraphQL calls that fire in response to user actions
+- Feature-flagged or role-gated endpoints invisible until you act as a user
+
+This task uses Playwright in headless CLI mode to walk the app like a real user
+and record every network request into a HAR file for merging.
+
+====================
+Inputs (dynamic — read from existing data)
+====================
+1) Target discovery hints (to choose BASE_URL)
+  - Primary source: manual/har/*.har (extract most frequent host from captured traffic)
+  - Optional: temp/agent1/live_base_urls.txt (if your pipeline produced it)
+  - Optional: outputs/url_corpus_all_in_scope.txt (if your pipeline produced it)
+
+2) Auth credentials / session (you must supply)
+   - Option A: Username + password (if login form exists)
+   - Option B: Pre-captured cookies/localStorage from manual/har/*.har
+   - Option C: Bearer token from HAR analysis outputs
+
+3) Scope allowlist
+  - Preferred: outputs/activesubdomain.txt (if exists)
+  - Fallback: infer exact hosts from manual/har/*.har
+  - If neither exists: the script will warn and capture all hosts.
+
+====================
+Outputs
+====================
+- temp/agent1/ui_capture/capture_<timestamp>.har   (raw HAR from Playwright)
+- temp/agent1/ui_capture/endpoints_discovered.txt  (extracted URLs, one per line)
+- temp/agent1/ui_capture/capture_report.md         (summary: pages visited, requests captured, errors)
+
+Optional (recommended) auto-merge output:
+- outputs/url_corpus_all_in_scope.txt (if present or if you want a single canonical corpus)
+- If you do not have this file yet, the script can create it.
+
+After this task:
+- Merge endpoints_discovered.txt into your main corpus (append + dedupe).
+- Do NOT replace existing corpus files; only ADD new unique endpoints.
+
+====================
+Prerequisites / Install (one-time)
+====================
+# Node.js must be installed (v18+ recommended)
+# Run from repo root:
+
+cd task/task31
+npm install
+npx playwright install chromium
+
+# This installs headless Chromium (~300 MB). Only needed once.
+
+====================
+Capture Script (task/task31/capture.mjs)
+====================
+Use the checked-in script in: task/task31/capture.mjs
+
+This script is already dynamic:
+- Infers BASE_URL from manual/har/*.har if BASE_URL is not set
+- Prompts if BASE_URL is not found in HAR traffic
+- Optionally auto-merges discovered endpoints into your corpus (MERGE_TO)
+
+====================
+Run Instructions (Jules)
+====================
+1) Determine BASE_URL (dynamic):
+  - If you already know the exact target app URL: set BASE_URL.
+  - Otherwise: the script will read manual/har/*.har and propose the most frequent host.
+  - If the proposed host is wrong OR if BASE_URL is NOT present in HAR traffic, the script will prompt the user to confirm or enter the correct BASE_URL.
+
+2) Determine auth method:
+   - If you have username/password → set USERNAME and PASSWORD env vars.
+   - If you have a session cookie from HAR → inject via context.addCookies() (modify script).
+   - If you have a Bearer token → add Authorization header via context.setExtraHTTPHeaders().
+
+3) Pick pages/paths to visit (dynamic):
+  - Option A (simple): use the default list in capture.mjs.
+  - Option B (recommended): create a pages file and point PAGES_FILE to it.
+    - Candidate sources (if you have them): outputs/queue_login_panels_urls.txt, outputs/queue_dynamic_endpoints_urls.txt, outputs/url_corpus_all_in_scope.txt
+
+4) Run the capture:
+  cd task/task31
+   # Set env vars (PowerShell example)
+  # Optional (if you do NOT set BASE_URL, script will propose from HAR and prompt)
+  $env:BASE_URL = "https://app.target.com"
+   $env:LOGIN_URL = "https://app.target.com/login"
+   $env:USERNAME = "testuser@example.com"
+   $env:PASSWORD = "testpassword"
+  # Optional: scope allowlist (if missing, script will infer from HAR or warn)
+  $env:SCOPE_FILE = "../../outputs/activesubdomain.txt"
+   $env:OUTPUT_DIR = "../../temp/agent1/ui_capture"
+  # Optional: file with extra paths/urls to visit (one per line)
+  # $env:PAGES_FILE = "../../outputs/queue_login_panels_urls.txt"
+  # Optional: auto-merge discovered endpoints into a corpus file
+  # $env:MERGE_TO = "../../outputs/url_corpus_all_in_scope.txt"
+
+  # Optional: enforce the repo 9-minute rule (recommended)
+  # 540000 ms = 9 minutes. Use a little buffer.
+  $env:OVERALL_TIMEOUT_MS = "520000"
+  $env:NAV_TIMEOUT_MS = "20000"
+  $env:CLICK_LIMIT = "20"
+  $env:MAX_PAGES = "12"
+   node capture.mjs
+
+5) Merge results:
+  Preferred (automatic): set MERGE_TO and let the script merge/dedupe.
+
+  Manual fallback:
+  - Merge discovered endpoints into your canonical corpus file (append + dedupe).
+  - Recommended canonical corpus path:
+    - outputs/url_corpus_all_in_scope.txt
+  - If you keep corpuses elsewhere, merge there instead.
+
+====================
+9-minute rule (batch mode)
+====================
+Goal: keep each foreground run under ~9 minutes (same rule as other tasks).
+
+If you have MANY targets:
+- Run Task 31 per target (one BASE_URL at a time)
+- Use a per-target OUTPUT_DIR (so logs/HAR are separated)
+- Keep MAX_PAGES small and OVERALL_TIMEOUT_MS ~520000
+
+PowerShell example (batch over a file of base URLs):
+1) Create a file with base URLs (one per line), for example:
+  - temp/agent1/ui_base_urls.txt
+
+2) Batch run:
+  Get-Content "..\..\temp\agent1\ui_base_urls.txt" | ForEach-Object {
+    $u = $_.Trim(); if (-not $u) { return }
+    $host = ([Uri]$u).Host
+
+    $env:BASE_URL = $u
+    $env:LOGIN_URL = "$u/login"
+    $env:OUTPUT_DIR = "..\..\temp\agent1\ui_capture\$host"
+    $env:MERGE_TO = "..\..\outputs\url_corpus_all_in_scope.txt"
+    $env:OVERALL_TIMEOUT_MS = "520000"
+    $env:MAX_PAGES = "12"
+    $env:CLICK_LIMIT = "20"
+
+    node capture.mjs
+  }
+
+Resume strategy:
+- If a run times out or errors, re-run only that host.
+- Keep the per-host output folder so you can diff/compare runs later.
+
+====================
+Multi-account capture (recommended for authz testing)
+====================
+Run the script TWICE with different credentials:
+- Run 1: user1 credentials → capture_user1.har
+- Run 2: user2 credentials → capture_user2.har
+
+This gives you two endpoint sets you can diff for role-based access control testing.
+
+====================
+Error handling
+====================
+- If login fails: check selectors in script; adjust to match target's login form.
+- If pages 404/403: that's fine; the script continues and logs errors.
+- If Playwright crashes: ensure Chromium is installed (npx playwright install chromium).
+
+Record errors in: outputs/reports/agent1-error-report.md
+
+====================
+When to run this task
+====================
+- BEFORE heavy vulnerability testing (Phases 2–5 in testing_toolkit.txt).
+- AFTER recon tasks (1–30) are complete.
+- Re-run if scope expands or new features are deployed.
+
+====================
+Success criteria
+====================
+- HAR file saved with > 0 entries.
+- endpoints_discovered.txt contains URLs not already in your corpus.
+- No fatal errors in capture_report.md.

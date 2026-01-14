@@ -1,7 +1,7 @@
 # Tool 18 — httpx (probe API endpoints queue) — STRICT RUN-CARD
 # Goal: validate discovered API endpoint URLs and keep only live ones.
 # Input (contract):
-#   - temp/agent1/queue_api_endpoints_kiterunner.txt   (URLs)
+#   - outputs/queue_api_endpoints_kiterunner.txt   (URLs from Task 17)
 # Output (contract):
 #   - temp/agent1/api_endpoints_live_raw.txt
 #   - outputs/api_endpoints_live.txt              (deduped final)
@@ -22,10 +22,10 @@
 # ----------------------------
 #   New-Item -ItemType Directory -Force temp\agent1 | Out-Null
 #   New-Item -ItemType Directory -Force temp\agent1\logs | Out-Null
-#   if (!(Test-Path temp\agent1\queue_api_endpoints_kiterunner.txt)) { throw "Missing temp\\agent1\\queue_api_endpoints_kiterunner.txt" }
+#   if (!(Test-Path outputs\queue_api_endpoints_kiterunner.txt)) { throw "Missing outputs\\queue_api_endpoints_kiterunner.txt (run Task 17 first)" }
 #
 # Normalize input (trim, unique)
-#   Get-Content temp\agent1\queue_api_endpoints_kiterunner.txt |
+#   Get-Content outputs\queue_api_endpoints_kiterunner.txt |
 #     Where-Object { $_ -and $_.Trim() -ne "" } |
 #     ForEach-Object { $_.Trim() } |
 #     Sort-Object -Unique |

@@ -1,5 +1,5 @@
 # Subfinder
-# Run ONLY on targets you are authorized to test.
+# YOUR TARGET = GO AGGRESSIVE - Maximum subdomain enumeration
 
 Install
 go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest

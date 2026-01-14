@@ -1,8 +1,8 @@
-# Recon Workflow (Strict Run-Cards)
+# Recon Workflow (Strict Run-Cards) — 106 Tasks
 
-This repo is a **deterministic recon pipeline** governed by strict “run-cards”.
+This repo is a **deterministic security testing pipeline** governed by strict "run-cards".
 
-**Important:** Run tools **only** on targets you are explicitly authorized to test.
+**GO AGGRESSIVE.** This toolkit is designed for authorized penetration testing with full exploitation capability.
 
 ## Repo conventions
 
@@ -13,6 +13,176 @@ This repo is a **deterministic recon pipeline** governed by strict “run-cards�
 - `tools/` contains helper scripts (stdlib-only where possible).
 
 Time governance: see `rules.txt` (9-minute command limit; batch/chunk if needed).
+
+## Pipeline Phases (16 Phases, 106 Tasks)
+
+### Phase 0: Subdomain Discovery (Tasks 1-11)
+| Task | Tool | Output |
+|------|------|--------|
+| 1 | subfinder | temp/agent1/list_1_passive.txt |
+| 2 | amass | temp/agent1/list_1_passive.txt |
+| 3 | github-subdomains | temp/agent1/list_1_passive.txt |
+| 4 | waymore | temp/agent1/list_2_archives.txt |
+| 5 | puredns bruteforce | temp/agent1/list_3_bruteforce.txt |
+| 6 | alterx | temp/agent1/list_5_permutations.txt |
+| 7 | puredns resolve | **outputs/activesubdomain.txt** |
+| 8 | httpx | **outputs/live_base_urls.txt** |
+| 9 | httpx knownfiles | outputs/api_docs_urls.txt |
+| 10 | hakrevdns | temp/agent1/list_4_reverse.txt |
+| 11 | dnsx | temp/agent1/resolved_dnsx.txt |
+
+### Phase 1: Port & Service Discovery (Tasks 12-13)
+| Task | Tool | Output |
+|------|------|--------|
+| 12 | naabu | outputs/ports_open_hostport.txt |
+| 13 | httpx-hostport + katana | outputs/live_hostport_urls.txt |
+
+### Phase 2: URL Discovery & Filtering (Tasks 14-22)
+| Task | Tool | Output |
+|------|------|--------|
+| 14 | gau | outputs/gau_urls.txt |
+| 15 | allowlist filter | outputs/url_corpus_all_in_scope.txt |
+| 16 | arjun | outputs/arjun_found_params.txt |
+| 17 | kiterunner | outputs/queue_api_endpoints_kiterunner.txt |
+| 18 | httpx probe API | outputs/api_endpoints_live.txt |
+| 19 | js-urls | outputs/js_urls.txt |
+| 21 | httpx-fetch-js + analyze | outputs/js_endpoints_from_js.txt |
+| 22 | httpx probe JS | outputs/js_urls_live.txt |
+
+### Phase 3: Broad Coverage Scanning (Tasks 23-42)
+| Task | Tool | Output |
+|------|------|--------|
+| 23 | nuclei | outputs/nuclei_findings.txt |
+| 24 | gowitness | outputs/gowitness/ |
+| 25 | ffuf | outputs/ffuf_findings.txt |
+| 26 | nmap | outputs/nmap/ |
+| 27 | subjack | outputs/coverage_takeover_candidates_subjack.txt |
+| 29 | HAR analysis | outputs/har/ |
+| 30 | tlsx | outputs/coverage_tls_sans_in_scope.txt |
+| 31 | playwright-ui-capture | temp/agent1/playwright_har/ |
+| 32 | WAF fingerprinting | outputs/waf_fingerprints.txt |
+| 33 | role-diff access control | outputs/access_control_findings.json |
+| 34 | IDOR/BOLA fuzzing | outputs/idor_findings.json |
+| 35-39 | nuclei (tech, exposures, CVEs) | outputs/nuclei/ |
+| 40 | ZAP baseline | outputs/zap/zap_baseline_report.json |
+| 41 | ZAP full scan | outputs/zap/injection_candidates.txt |
+| 42 | source extraction | outputs/source/ |
+
+### Phase 4: Injection Testing (Tasks 43-49)
+| Task | Tool | Output |
+|------|------|--------|
+| 43 | ghauri SQLi triage | outputs/sqli/ghauri_vulnerable.txt |
+| 44 | sqlmap deep exploit | outputs/sqli/sqlmap_dumps/ |
+| 45 | nosqlmap | outputs/sqli/nosql_vulnerable.txt |
+| 46 | commix CMDi | outputs/cmdi/commix_vulnerable.txt |
+| 47 | CMDi bypass + OOB | outputs/cmdi/oob_vulnerable.txt |
+| 48 | SSTI scanner | outputs/ssti/ssti_vulnerable.txt |
+| 49 | LDAP/XPath injection | outputs/ldap_xpath/ |
+
+### Phase 5: SSRF & XXE (Tasks 50-53)
+| Task | Tool | Output |
+|------|------|--------|
+| 50 | SSRF detection | outputs/ssrf/ssrf_candidates.txt |
+| 51 | SSRF exploitation | outputs/ssrf/ssrf_confirmed.txt |
+| 52 | XXE detection | outputs/xxe/xxe_candidates.txt |
+| 53 | XXE exploitation | outputs/xxe/xxe_confirmed.txt |
+
+### Phase 6: Client-Side Attacks (Tasks 54-60)
+| Task | Tool | Output |
+|------|------|--------|
+| 54 | XSS reflection scanner | outputs/xss_reflections_kxss.txt |
+| 55 | XSS deep exploitation | outputs/xss/reflected_xss.txt |
+| 56 | blind XSS campaign | outputs/xss/blind_xss_triggered.txt |
+| 57 | prototype pollution | outputs/prototype_pollution/ |
+| 58 | DOM clobbering | outputs/dom_clobbering/ |
+| 59 | CSS injection | outputs/css_injection/ |
+| 60 | dangling markup | outputs/dangling_markup/ |
+
+### Phase 7: Auth & Session (Tasks 61-66)
+| Task | Tool | Output |
+|------|------|--------|
+| 61 | JWT attacks | outputs/jwt/ |
+| 62 | OAuth/SSO exploitation | outputs/oauth/ |
+| 63 | session fixation | outputs/session/ |
+| 64 | session lifecycle | outputs/session/ |
+| 65 | 2FA bypass | outputs/2fa/ |
+| 66 | password reset poisoning | outputs/reset/ |
+
+### Phase 8: API Attacks (Tasks 67-71)
+| Task | Tool | Output |
+|------|------|--------|
+| 67 | GraphQL discovery | outputs/graphql/ |
+| 68 | GraphQL DoS | outputs/graphql/ |
+| 69 | GraphQL exploitation | outputs/graphql/ |
+| 70 | REST API attacks | outputs/rest/ |
+| 71 | rate limit bypass | outputs/ratelimit/ |
+
+### Phase 9: File Handling (Tasks 72-77)
+| Task | Tool | Output |
+|------|------|--------|
+| 72 | LFI detection | outputs/lfi/lfi_confirmed.txt |
+| 73 | LFI to RCE | outputs/lfi/rce_confirmed.txt |
+| 74 | file upload detection | outputs/upload/upload_endpoints.txt |
+| 75 | file upload exploitation | outputs/upload/ |
+| 76 | deserialization detection | outputs/deser/ |
+| 77 | deserialization RCE | outputs/deser/java_rce_confirmed.txt |
+
+### Phase 10: Business Logic (Tasks 78-80)
+| Task | Tool | Output |
+|------|------|--------|
+| 78 | race conditions | outputs/race/ |
+| 79 | payment logic | outputs/payment/ |
+| 80 | business logic flaws | outputs/business_logic/ |
+
+### Phase 11: HTTP Protocol (Tasks 81-83)
+| Task | Tool | Output |
+|------|------|--------|
+| 81 | request smuggling | outputs/smuggling/ |
+| 82 | HTTP/2 attacks | outputs/http2/ |
+| 83 | browser desync | outputs/desync/ |
+
+### Phase 12: Cache & CDN (Tasks 84-86)
+| Task | Tool | Output |
+|------|------|--------|
+| 84 | cache poisoning | outputs/cache/ |
+| 85 | cache deception | outputs/cache/ |
+| 86 | ESI injection | outputs/esi/ |
+
+### Phase 13: Infrastructure (Tasks 87-90)
+| Task | Tool | Output |
+|------|------|--------|
+| 87 | cloud metadata SSRF | outputs/cloud/iam_credentials.txt |
+| 88 | cloud bucket abuse | outputs/cloud/buckets_public_write.txt |
+| 89 | subdomain takeover | outputs/takeover/ |
+| 90 | DNS zone attacks | outputs/dns/ |
+
+### Phase 14: Supply Chain (Tasks 91-92)
+| Task | Tool | Output |
+|------|------|--------|
+| 91 | dependency confusion | outputs/supply_chain/ |
+| 92 | second-order attacks | outputs/second_order/ |
+
+### Phase 15: Miscellaneous (Tasks 93-103)
+| Task | Tool | Output |
+|------|------|--------|
+| 93 | CORS misconfiguration | outputs/cors/ |
+| 94 | clickjacking | outputs/clickjacking/ |
+| 95 | CSP bypass | outputs/csp/ |
+| 96 | host header attacks | outputs/host_header/ |
+| 97 | open redirect | outputs/openredirect/ |
+| 98 | verb tampering | outputs/verb_tampering/ |
+| 99 | rate limiting | outputs/ratelimit/ |
+| 100 | session management | outputs/session/ |
+| 101 | business logic | outputs/business_logic/ |
+| 102 | GraphQL attacks | outputs/graphql/ |
+| 103 | WebSocket security | outputs/websocket/ |
+
+### Phase 16: Closeout (Tasks 104-106)
+| Task | Tool | Output |
+|------|------|--------|
+| 104 | vulnerability consolidation | outputs/reports/vulnerability_consolidation.md |
+| 105 | final report | outputs/reports/final_report.md |
+| 106 | evidence closeout | outputs/final_delivery/ |
 
 ## Canonical artifacts (what other steps consume)
 

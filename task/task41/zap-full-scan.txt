@@ -1,0 +1,522 @@
+# Task 41: ZAP Full Active Scan (Non-Injection Focus)
+# Phase 3 - Broad Coverage | Step 9 from testing_toolkit.txt
+# Mode: AGGRESSIVE - But EXCLUDING deep injection tests
+
+================================================================================
+OVERVIEW
+================================================================================
+OWASP ZAP full scan performs:
+- Everything from Task 40 (spider + passive)
+- Active checks for: CSRF, session issues, path traversal, XSS, security headers
+- **EXCLUDES** deep injection testing (SQLi, Command Injection, SSTI, NoSQLi)
+
+⚠️  WHY EXCLUDE INJECTIONS?
+Phase 4 has DEDICATED tools that are 100x better:
+- SQLi → SQLMap, Ghauri (Step 11)
+- Command Injection → Commix (Step 12)
+- SSTI → Tplmap, SSTImap (Step 13)
+- NoSQLi → NoSQLMap (Step 14)
+
+ZAP's injection tests are basic. Don't waste time duplicating what Phase 4 does better.
+
+
+
+================================================================================
+PREREQUISITES
+================================================================================
+1. Task 40 (baseline) SHOULD run first to:
+   - Build spider/URL map
+   - Generate intelligence for prioritization
+   - Identify high-value targets
+
+2. ZAP daemon must be running (same as Task 40)
+
+3. Read Task 40 outputs:
+   - outputs/zap/task41_intel.json (prioritized hosts)
+   - outputs/zap/zap_brain_knowledge.json (learned patterns)
+
+================================================================================
+INPUT FILES
+================================================================================
+| Source | Path | Purpose |
+|--------|------|---------|
+| Task 40 intel | outputs/zap/task41_intel.json | Prioritized targets |
+| Live URLs | outputs/live_base_urls.txt | Fallback if no Task 40 |
+| API endpoints | outputs/queue_api_endpoints_kiterunner.txt | API attack surface |
+| Dynamic URLs | outputs/queue_dynamic_endpoints_urls.txt | Parameterized (high value) |
+| Nuclei brain | outputs/nuclei/tech_stack.json | Tech intel |
+| ZAP brain | outputs/zap/zap_brain_knowledge.json | Task 40 learnings |
+| HAR data | outputs/har/har_summary.json | Auth tokens |
+
+================================================================================
+DYNAMIC BRAIN INTELLIGENCE
+================================================================================
+Jules: Your AI brain should DYNAMICALLY decide:
+
+1. WHICH ACTIVE SCANNERS TO ENABLE per host:
+   **ENABLE** (ZAP strengths):
+   - CSRF detection
+   - Session management issues
+   - Path traversal (basic)
+   - XSS (reflected, DOM, stored)
+   - Security misconfigurations
+   - Directory browsing
+   - Source code disclosure
+   - Backup file detection
+   - Hidden file finder
+   
+   **DISABLE** (Phase 4 handles these better):
+   - SQL Injection (all variants) → SQLMap/Ghauri
+   - Command Injection → Commix
+   - Server-Side Template Injection → Tplmap/SSTImap
+   - NoSQL Injection → NoSQLMap
+   - LDAP Injection
+   - XPath Injection
+   - Code Injection
+
+2. ATTACK INTENSITY per endpoint:
+   - High-value endpoints (auth, payment, admin) → full ZAP checks
+   - Static pages → minimal testing
+   - API endpoints → focus on access control, not injection
+
+3. SCAN DEPTH based on prior findings:
+   - Hosts with passive findings → deeper active scan
+   - Hosts with critical Nuclei findings → maximum intensity
+   - Clean hosts from baseline → lighter scan
+
+4. COORDINATE WITH PHASE 4:
+   - Generate outputs/zap/injection_candidates.txt
+   - List parameterized URLs for SQLMap/Commix/etc.
+   - Don't duplicate - FEED Phase 4 tools instead
+
+================================================================================
+EXECUTION INSTRUCTIONS FOR JULES
+================================================================================
+DO NOT use static scripts. Build dynamically based on intelligence:
+
+STEP 1: Analyze available intelligence
+----------------------------------------
+```python
+# CONCEPTUAL - implement with your brain:
+
+class ZapFullScanBrain:
+    def __init__(self):
+        self.nuclei_intel = self.load_json('outputs/nuclei/tech_stack.json')
+        self.zap_baseline_intel = self.load_json('outputs/zap/task41_intel.json')
+        self.har_intel = self.load_json('outputs/har/har_summary.json')
+    
+    # ZAP Scanner IDs to DISABLE (Phase 4 handles these)
+    INJECTION_SCANNERS_DISABLE = [
+        40018,  # SQL Injection
+        40019,  # SQL Injection - MySQL
+        40020,  # SQL Injection - Hypersonic
+        40021,  # SQL Injection - Oracle
+        40022,  # SQL Injection - PostgreSQL
+        40024,  # SQL Injection - SQLite
+        90039,  # NoSQL Injection - MongoDB
+        90019,  # Server Side Code Injection
+        90035,  # Server Side Template Injection
+        40012,  # PHP Code Injection
+        40032,  # Command Injection
+        40033,  # LDAP Injection
+        40034,  # XPath Injection
+    ]
+    
+    # ZAP Scanner IDs to ENABLE (ZAP strengths)
+    ZAP_STRENGTH_SCANNERS = [
+        10012,  # Cross Site Scripting (Reflected)
+        40014,  # Cross Site Scripting (Persistent)
+        10014,  # CSRF
+        40003,  # CRLF Injection
+        10010,  # Cookie No HttpOnly Flag
+        10011,  # Cookie Without Secure Flag
+        10017,  # Cross-Domain JavaScript Source File Inclusion
+        10020,  # X-Frame-Options Header Not Set
+        10021,  # X-Content-Type-Options Header Missing
+        10038,  # Content Security Policy (CSP) Header Not Set
+        10040,  # Secure Pages Include Mixed Content
+        40009,  # Server Side Include
+        40016,  # Path Traversal
+        10095,  # Backup File Disclosure
+        10096,  # Timestamp Disclosure
+        90022,  # Application Error Disclosure
+        90033,  # Loosely Scoped Cookie
+    ]
+    
+    def get_host_attack_profile(self, host: str) -> dict:
+        """Determine attack strategy - ZAP strengths only."""
+        profile = {
+            'scan_strength': 'HIGH',
+            'active_scanners_enable': self.ZAP_STRENGTH_SCANNERS.copy(),
+            'active_scanners_disable': self.INJECTION_SCANNERS_DISABLE.copy(),
+            'attack_vectors': [],
+        }
+        
+        # Get tech stack from Nuclei brain
+        techs = self.nuclei_intel.get('tech_to_hosts', {})
+        host_techs = [t for t, hosts in techs.items() if host in hosts]
+        
+        # Customize based on technology (but NOT injection)
+        for tech in host_techs:
+            tech_lower = tech.lower()
+            
+            # If JavaScript-heavy, focus on XSS variants
+            if any(t in tech_lower for t in ['react', 'angular', 'vue', 'javascript']):
+                profile['attack_vectors'].append('dom-xss')
+                profile['active_scanners_enable'].append(10014)  # DOM XSS
+        
+        # Check baseline findings to increase intensity
+        baseline_alerts = self.zap_baseline_intel.get('host_findings', {}).get(host, [])
+        if len(baseline_alerts) > 5:
+            profile['scan_strength'] = 'HIGH'
+        if len(baseline_alerts) > 10:
+            profile['scan_strength'] = 'INSANE'
+        
+        return profile
+```
+
+STEP 2: Configure ZAP active scan dynamically
+----------------------------------------
+```python
+# CONCEPTUAL - implement with your brain:
+
+def configure_active_scan(self, zap_api, target_url: str, profile: dict):
+    """Configure ZAP - DISABLE injection scanners, ENABLE ZAP strengths."""
+    
+    # Set scan strength
+    strength_map = {
+        'LOW': 'LOW',
+        'MEDIUM': 'MEDIUM', 
+        'HIGH': 'HIGH',
+        'INSANE': 'INSANE'
+    }
+    zap_api.ascan.set_option_attack_strength(strength_map[profile['scan_strength']])
+    
+    # DISABLE injection scanners (Phase 4 handles these)
+    for scanner_id in profile['active_scanners_disable']:
+        zap_api.ascan.disable_scanners(str(scanner_id))
+        print(f"    [config] Disabled scanner {scanner_id} (Phase 4 handles)")
+    
+    # ENABLE ZAP strength scanners
+    for scanner_id in profile['active_scanners_enable']:
+        zap_api.ascan.enable_scanners(str(scanner_id))
+    
+    # Set scan policy based on target type
+    if '/api/' in target_url or '/v1/' in target_url:
+        # API-focused: access control, headers, CORS
+        zap_api.ascan.enable_scanners('10098')  # Cross-Domain Misconfiguration
+```
+
+STEP 3: Batched execution (9-minute rule is CRITICAL here)
+----------------------------------------
+Full scans take MUCH longer. Batch aggressively:
+
+```python
+# CONCEPTUAL - implement with your brain:
+
+BATCH_TIME_LIMIT = 540  # 9 minutes
+MAX_SCAN_TIME_PER_TARGET = 300  # 5 minutes max per target
+
+def run_full_scan_batched(self, targets: List[str]):
+    """Run full active scan with aggressive batching."""
+    checkpoint = self.load_checkpoint()
+    
+    # Sort by priority (from brain analysis)
+    prioritized = self.brain.prioritize_targets(targets)
+    
+    for i, target in enumerate(prioritized):
+        if i < checkpoint.get('last_completed', 0):
+            continue  # Skip already scanned
+        
+        # Get brain-determined attack profile
+        profile = self.brain.get_host_attack_profile(target)
+        
+        # Start scan with timeout
+        scan_id = self.start_active_scan(target, profile)
+        
+        # Monitor with timeout
+        start_time = time.time()
+        while self.zap_api.ascan.status(scan_id) != '100':
+            if time.time() - start_time > MAX_SCAN_TIME_PER_TARGET:
+                print(f"[!] Timeout on {target}, moving to next")
+                self.zap_api.ascan.stop(scan_id)
+                break
+            time.sleep(5)
+        
+        # Collect and learn from results
+        alerts = self.zap_api.core.alerts(baseurl=target)
+        self.brain.learn_from_findings(target, alerts)
+        self.write_vulnerability_reports(alerts)
+        
+        # Checkpoint
+        self.save_checkpoint(i + 1)
+        self.brain.save()
+```
+
+STEP 4: ZAP API interaction
+----------------------------------------
+```python
+# CONCEPTUAL - implement with your brain:
+
+from zapv2 import ZAPv2
+
+class ZapActiveScanner:
+    def __init__(self, zap_host='localhost', zap_port=8080):
+        self.zap = ZAPv2(proxies={'http': f'http://{zap_host}:{zap_port}'})
+    
+    def start_active_scan(self, target: str, profile: dict) -> str:
+        """Start active scan and return scan ID."""
+        # First spider if not already done
+        self.zap.spider.scan(target)
+        while int(self.zap.spider.status()) < 100:
+            time.sleep(2)
+        
+        # Configure based on profile
+        self.configure_active_scan(self.zap, target, profile)
+        
+        # Start active scan
+        scan_id = self.zap.ascan.scan(target)
+        return scan_id
+    
+    def get_results(self, target: str) -> List[dict]:
+        """Get all alerts for target."""
+        return self.zap.core.alerts(baseurl=target)
+```
+
+================================================================================
+RUN COMMANDS
+================================================================================
+```bash
+# Ensure ZAP daemon is running (from Task 40 or start fresh)
+docker ps | grep zap-daemon || \
+docker run -d --name zap-daemon \
+    -p 8080:8080 \
+    ghcr.io/zaproxy/zaproxy:stable \
+    zap.sh -daemon -host 0.0.0.0 -port 8080 \
+    -config api.disablekey=true
+
+# Wait for ZAP
+sleep 10
+
+# Run your dynamic scanner
+python task/task41/zap_full_scanner.py \
+    --targets outputs/live_base_urls.txt \
+    --intel outputs/zap/task41_intel.json \
+    --output outputs/zap \
+    --temp temp/task41 \
+    --mode full
+
+# Alternative: Use zap-full-scan.py directly
+# zap-full-scan.py -t <target> -r report.html -J results.json
+```
+
+================================================================================
+OUTPUT FILES
+================================================================================
+| Output | Path | Description |
+|--------|------|-------------|
+| All findings | outputs/zap/full_scan_alerts.json | All active findings |
+| HTML report | outputs/zap/full_scan_report.html | Human-readable |
+| High severity | outputs/zap/critical_high_alerts.json | Priority findings |
+| Brain update | outputs/zap/zap_brain_knowledge.json | Updated patterns |
+| Vuln reports | outputs/vulnerabilities/ZAP-XXXX-*.md | Individual reports |
+| **Phase 4 feed** | outputs/zap/injection_candidates.txt | URLs for SQLMap/Commix |
+| Checkpoint | temp/task41/checkpoint.json | Resume state |
+| Scan stats | temp/task41/scan_statistics.json | Performance data |
+
+================================================================================
+PHASE 4 HANDOFF - INJECTION CANDIDATES
+================================================================================
+Generate injection_candidates.txt for Phase 4 tools:
+
+```python
+def generate_phase4_candidates(self):
+    """Generate URL list for Phase 4 injection tools."""
+    candidates = {
+        'sqli': [],      # For SQLMap/Ghauri
+        'cmdi': [],      # For Commix
+        'ssti': [],      # For Tplmap/SSTImap
+        'nosqli': [],    # For NoSQLMap
+    }
+    
+    # All URLs with parameters
+    for url in self.discovered_urls:
+        if '=' in url or '?' in url:
+            candidates['sqli'].append(url)
+            
+            # Command-like params (file, cmd, exec, run)
+            if any(p in url.lower() for p in ['cmd', 'exec', 'run', 'command', 'shell']):
+                candidates['cmdi'].append(url)
+            
+            # Template-like params (template, page, view, render)
+            if any(p in url.lower() for p in ['template', 'page', 'view', 'render', 'tpl']):
+                candidates['ssti'].append(url)
+    
+    # Save for Phase 4
+    with open('outputs/zap/injection_candidates.json', 'w') as f:
+        json.dump(candidates, f, indent=2)
+    
+    # Also plain text list for direct tool input
+    all_param_urls = list(set(candidates['sqli']))
+    with open('outputs/zap/injection_candidates.txt', 'w') as f:
+        for url in all_param_urls:
+            f.write(f"{url}\\n")
+    
+    print(f"[+] Phase 4 handoff: {len(all_param_urls)} injection candidates")
+```
+
+================================================================================
+VULNERABILITY REPORT TEMPLATE
+================================================================================
+Same as Task 40, but with additional attack evidence:
+
+```markdown
+# Vulnerability Report: ZAP-{ID}
+
+## Overview
+| Field | Value |
+|-------|-------|
+| **ID** | ZAP-{sequential_id} |
+| **Scanner** | {alert.pluginId} - {alert.name} |
+| **Severity** | {alert.risk} |
+| **Confidence** | {alert.confidence} |
+| **CWE** | {alert.cweid} |
+| **WASC** | {alert.wascid} |
+| **URL** | {alert.url} |
+| **Method** | {alert.method} |
+| **Discovered** | {timestamp} |
+
+## Description
+{alert.description}
+
+## Attack Details
+- **Parameter**: `{alert.param}`
+- **Attack Payload**: `{alert.attack}`
+- **Evidence in Response**: 
+```
+{alert.evidence}
+```
+
+## Proof of Concept
+```http
+{method} {url}
+{headers}
+
+{attack_payload}
+```
+
+## Response Analysis
+{relevant_response_snippet}
+
+## Solution
+{alert.solution}
+
+## References
+{alert.reference}
+
+## 🧠 AI Intelligence
+
+### Why This Host Was Prioritized
+{brain reasoning - technologies, prior findings}
+
+### Related Vulnerabilities
+{list related findings from Nuclei/baseline}
+
+### Exploitation Potential
+{AI assessment based on tech stack and finding type}
+
+### Suggested Follow-up Tests
+{what additional manual testing should be done}
+```
+
+================================================================================
+AGGRESSIVE MODE CONFIGURATION
+================================================================================
+Since this is YOUR OWN target, maximize coverage:
+
+```python
+# CONCEPTUAL - implement in your scanner:
+
+AGGRESSIVE_CONFIG = {
+    'spider': {
+        'maxDepth': 10,
+        'maxChildren': 0,  # Unlimited
+        'threadCount': 10,
+        'parseComments': True,
+        'parseGit': True,
+        'parseSVN': True,
+        'parseSitemap': True,
+        'parseRobots': True,
+    },
+    'ascan': {
+        'attackStrength': 'INSANE',
+        'alertThreshold': 'LOW',
+        'maxRuleDurationInMins': 5,
+        'maxScanDurationInMins': 60,
+        'threadPerHost': 5,
+        'delayInMs': 0,  # No delay - aggressive
+    },
+    'ajax_spider': {
+        'enabled': True,
+        'maxDuration': 5,
+        'maxCrawlDepth': 10,
+        'browserName': 'firefox-headless',
+    }
+}
+```
+
+================================================================================
+LEARNING & CORRELATION
+================================================================================
+After scan, correlate with other tools:
+
+```python
+# CONCEPTUAL - implement with your brain:
+
+def correlate_findings(self):
+    """Correlate ZAP findings with Nuclei and baseline."""
+    
+    correlations = []
+    
+    for finding in self.findings:
+        host = urlparse(finding['url']).netloc
+        
+        # Check Nuclei findings on same host
+        nuclei_findings = self.nuclei_brain.get_host_findings(host)
+        
+        # Check if same vuln type found by both
+        for nf in nuclei_findings:
+            if self.is_related(finding, nf):
+                correlations.append({
+                    'zap_finding': finding,
+                    'nuclei_finding': nf,
+                    'correlation_type': 'CONFIRMED_BY_BOTH',
+                    'combined_severity': 'CRITICAL'  # Higher confidence
+                })
+    
+    # Save correlations
+    self.save_json('outputs/zap/correlated_findings.json', correlations)
+```
+
+================================================================================
+SUCCESS CRITERIA
+================================================================================
+- [ ] Task 40 intelligence loaded (or fallback to direct targets)
+- [ ] Injection scanners DISABLED (Phase 4 handles)
+- [ ] ZAP-strength scanners ENABLED (XSS, CSRF, headers, etc.)
+- [ ] All priority hosts scanned with active payloads
+- [ ] Findings collected and categorized
+- [ ] Vulnerability reports generated for Medium+ findings
+- [ ] Brain knowledge updated with patterns
+- [ ] **injection_candidates.txt generated for Phase 4**
+- [ ] Checkpoint saved for resume capability
+
+================================================================================
+NOTES
+================================================================================
+- This scan EXCLUDES deep injection tests (SQLi, CMDi, SSTI, NoSQLi)
+- Phase 4 dedicated tools handle injections MUCH better
+- Focus on: XSS, CSRF, session issues, security headers, path traversal
+- Output injection_candidates.txt feeds Phase 4 tools directly
+- Full scan can take 30-60+ minutes per host
+- Use aggressive batching to fit 9-minute windows

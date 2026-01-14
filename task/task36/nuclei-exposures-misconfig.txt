@@ -1,0 +1,211 @@
+# ==============================================================================
+# TASK 36: NUCLEI EXPOSURES + MISCONFIGURATION SCAN
+# ==============================================================================
+# TOOL: Nuclei
+# MODE: AGGRESSIVE - No limits (own target)
+# TEMPLATES: exposures/ + misconfiguration/
+# ==============================================================================
+
+## OBJECTIVE
+
+Scan for exposed sensitive files, debug endpoints, backup files, 
+misconfigured services, and information disclosure issues.
+
+## PREREQUISITES
+
+✅ Nuclei installed: `nuclei -version`
+✅ Templates updated: `nuclei -update-templates`
+✅ Task 35 completed (technologies fingerprinting)
+✅ Input: live URLs from discovery phase
+
+## AGGRESSIVE MODE SETTINGS
+
+```bash
+# AGGRESSIVE - Your own target, no limits
+CONCURRENCY=100          # Max parallel templates
+RATE_LIMIT=0             # 0 = unlimited requests
+TIMEOUT=10               # 10 seconds per request
+RETRIES=3                # Retry failed requests
+BULK_SIZE=100            # Hosts per batch
+
+# Full aggressive command:
+nuclei -l targets.txt \
+    -t exposures/ -t misconfiguration/ \
+    -c 100 -rl 0 -timeout 10 -retries 3 \
+    -bulk-size 100 -stats -json -nc \
+    -o outputs/nuclei/exposures_misconfig_results.json
+```
+
+## TEMPLATE CATEGORIES COVERED
+
+### Exposures (~500 templates)
+- /.git/config exposure
+- /.env file exposure
+- /backup.sql, dump.sql
+- /debug, /trace endpoints
+- Swagger/OpenAPI without auth
+- GraphQL introspection
+- Source maps (.map files)
+- Credential files (.htpasswd)
+- Server-status, phpinfo()
+- AWS metadata endpoints
+
+### Misconfiguration (~400 templates)
+- CORS misconfiguration
+- Host header injection
+- Open redirects
+- Directory listing
+- Missing security headers
+- Insecure cookie flags
+- HSTS bypass
+- CSP bypass
+- X-Frame-Options missing
+- Unprotected admin panels
+
+## 🧠 DYNAMIC BRAIN INTELLIGENCE
+
+### NOT Hardcoded - Learns from Responses
+```python
+# The brain LEARNS dynamically from every finding:
+
+class IntelligentTechKnowledge:
+    """
+    Dynamic brain - NO hardcoded mappings.
+    Learns what technologies exist from actual scan results.
+    """
+    
+    def add_finding(self, finding):
+        # 1. LEARN from template tags dynamically
+        for tag in finding['info']['tags']:
+            self.tech_to_hosts[tag].add(host)  # Builds mapping
+        
+        # 2. EXTRACT tech from template name (not hardcoded list)
+        techs = self._extract_tech_dynamically(finding['name'])
+        
+        # 3. LEARN CVE correlations (for later scans)
+        if 'cve' in template_id:
+            for tech in detected_techs:
+                self.cve_to_tech[cve_id].add(tech)  # Learns correlation
+        
+        # 4. BUILD host profiles dynamically
+        self.hosts[host]['inferred_stack'] = self._infer_stack()
+```
+
+### AI-Powered Prioritization
+```python
+def get_priority_hosts(self, all_hosts, scan_type):
+    """AI prioritizes targets based on LEARNED intelligence."""
+    
+    for host in all_hosts:
+        score = 1.0
+        
+        # Hosts with versions = more interesting
+        score += len(host_data['versions']) * 1.5
+        
+        # Hosts where templates succeeded before
+        score += len(host_data['templates_matched']) * 0.3
+        
+        # Hosts with learned CVE correlations
+        for tech in host_data['technologies']:
+            if tech in self.tech_to_cves:  # LEARNED, not hardcoded
+                score += len(self.tech_to_cves[tech]) * 0.5
+        
+        scored_hosts.append((host, score))
+    
+    return sorted(scored_hosts, key=lambda x: -x[1])
+```
+
+### Real-Time Learning
+```
+Every finding → Brain learns:
+├── What technologies exist on this host
+├── What versions are running
+├── Which templates are effective
+├── CVE ↔ Technology correlations
+└── Host risk profiles
+```
+
+## 9-MINUTE BATCH APPROACH
+
+```
+[Batch Structure]
+┌─────────────────────────────────────────────────────┐
+│ URL File: 2000 URLs                                 │
+│ BATCH_SIZE = 500                                    │
+│ Batches: 4                                          │
+├─────────────────────────────────────────────────────┤
+│ Batch 1: URLs 1-500      → checkpoint.json         │
+│ Batch 2: URLs 501-1000   → checkpoint.json         │
+│ Batch 3: URLs 1001-1500  → checkpoint.json         │
+│ Batch 4: URLs 1501-2000  → DONE                    │
+└─────────────────────────────────────────────────────┘
+```
+
+## RESUME CAPABILITY
+
+```bash
+# Nuclei native resume
+nuclei -l targets.txt -t exposures/ -t misconfiguration/ -resume
+
+# Script checkpoint
+python nuclei_scanner.py --scan-type exposures --resume
+```
+
+## VULNERABILITY REPORTING
+
+All findings go to:
+- `outputs/nuclei/exposures_misconfig_results.json` (all findings)
+- `outputs/vulnerabilities/NUCLEI-XXXX-template-SEVERITY.md` (individual reports)
+
+### Critical Exposures to Escalate
+- .git/config → `NUCLEI-CRITICAL-git-config-exposure.md`
+- .env file → `NUCLEI-CRITICAL-env-exposure.md`
+- Database dumps → `NUCLEI-CRITICAL-database-exposure.md`
+- AWS credentials → `NUCLEI-CRITICAL-aws-creds.md`
+
+## EXECUTION
+
+### Using Python Script (Recommended)
+```bash
+cd d:\wallet\Mylab
+python task/task35/nuclei_scanner.py \
+    --scan-type exposures \
+    --targets outputs/live_base_urls.txt \
+    --output outputs \
+    --temp temp/task36
+```
+
+### Using Nuclei Directly
+```bash
+nuclei -l outputs/live_base_urls.txt \
+    -t exposures/ -t misconfiguration/ \
+    -c 100 -rl 0 -timeout 10 -retries 3 \
+    -json -stats -nc \
+    -o outputs/nuclei/exposures_results.json
+```
+
+## OUTPUT FILES
+
+| File | Description |
+|------|-------------|
+| `outputs/nuclei/exposures_results.json` | All exposure findings |
+| `outputs/nuclei/misconfig_results.json` | All misconfig findings |
+| `outputs/vulnerabilities/NUCLEI-*.md` | Individual vuln reports |
+| `temp/task36/checkpoint.json` | Resume checkpoint |
+
+## CHAIN TO NEXT TASK
+
+```
+Task 36 (Exposures) → Task 37 (Default Logins)
+
+# If .git exposed → clone and search for credentials
+# If env exposed → extract and validate credentials
+# If admin panel found → feed to Task 37 for login testing
+```
+
+## SUCCESS CRITERIA
+
+- [ ] All hosts scanned for ~900 exposure/misconfig templates
+- [ ] Critical exposures (.git, .env, creds) reported immediately
+- [ ] Vulnerability reports generated in outputs/vulnerabilities/
+- [ ] Tech knowledge updated (exposures add to host profiles)

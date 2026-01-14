@@ -1,8 +1,10 @@
-Recon Pipeline Outputs Index
+Recon Pipeline Outputs Index (106 Tasks)
 
 This file lists the expected artifacts produced by the run-cards.
 
+================================================================================
 1) IMPORTANT OUTPUTS (final / downstream artifacts)
+================================================================================
 
 Core allowlist / scope
 - outputs/activesubdomain.txt
@@ -28,8 +30,10 @@ URL corpora
 
 API / parameters
 - outputs/queue_api_endpoints_kiterunner.txt
+- outputs/queue_dynamic_endpoints_urls.txt (parameterized URLs; from allowlist filter)
 - outputs/api_endpoints_live.txt
 - outputs/arjun_found_params.txt
+- outputs/api_endpoints_from_openapi.txt
 
 JS pipeline
 - outputs/js_urls.txt
@@ -47,6 +51,191 @@ Coverage / scanning
 - outputs/coverage_takeover_candidates_subjack.txt
 - outputs/coverage_tls_sans_in_scope.txt
 
+WAF / CDN fingerprinting (Task 32)
+- outputs/waf_fingerprints.txt
+- outputs/waf_summary.json
+
+Access control testing (Task 33-34)
+- outputs/access_control_findings.json
+- outputs/bola_candidates.txt
+- outputs/auth_bypass_candidates.txt
+- outputs/role_diff_summary.md
+- outputs/idor_findings.json
+- outputs/idor_confirmed_endpoints.txt
+- outputs/idor_summary.md
+
+Nuclei Intelligence (Task 35-39)
+- outputs/nuclei/tech_stack.json
+- outputs/nuclei/tech_detected.txt
+- outputs/nuclei/exposures.txt
+- outputs/nuclei/cves_high.txt
+- outputs/nuclei/cves_all.txt
+
+ZAP Scanning (Task 40-41)
+- outputs/zap/zap_baseline_report.json
+- outputs/zap/zap_full_report.json
+- outputs/zap/injection_candidates.txt
+
+Source Extraction (Task 42)
+- outputs/source/git_dumps/
+- outputs/source/backup_files/
+- outputs/source/secrets_found.txt
+
+SQL Injection (Task 43-45)
+- outputs/sqli/ghauri_vulnerable.txt
+- outputs/sqli/ghauri_possible.txt
+- outputs/sqli/sqlmap_priority_targets.json
+- outputs/sqli/sqlmap_exploited.json
+- outputs/sqli/sqlmap_dumps/
+- outputs/sqli/nosql_vulnerable.txt
+
+Command Injection (Task 46-47)
+- outputs/cmdi/commix_vulnerable.txt
+- outputs/cmdi/commix_possible.txt
+- outputs/cmdi/bypass_vulnerable.txt
+- outputs/cmdi/oob_vulnerable.txt
+
+SSTI (Task 48)
+- outputs/ssti/ssti_vulnerable.txt
+- outputs/ssti/ssti_possible.txt
+- outputs/ssti/engine_detected.txt
+
+LDAP/XPath Injection (Task 49)
+- outputs/ldap_xpath/ldap_injection_findings.json
+- outputs/ldap_xpath/xpath_injection_findings.json
+
+SSRF (Task 50-51)
+- outputs/ssrf/ssrf_candidates.txt
+- outputs/ssrf/ssrf_confirmed.txt
+- outputs/ssrf/ssrf_endpoints.txt
+
+XXE (Task 52-53)
+- outputs/xxe/xxe_candidates.txt
+- outputs/xxe/xxe_confirmed.txt
+- outputs/xxe/blind_xxe_results.txt
+
+XSS (Task 54-56)
+- outputs/xss_reflections_kxss.txt
+- outputs/xss_confirmed_dalfox.txt
+- outputs/queue_xss_manual_exploitation.txt
+- outputs/xss/reflected_xss.txt
+- outputs/xss/stored_xss.txt
+- outputs/xss/dom_xss.txt
+- outputs/xss/blind_xss_injected.txt
+- outputs/xss/blind_xss_triggered.txt
+
+DOM Attacks (Task 57-60)
+- outputs/prototype_pollution/pp_vulnerable_endpoints.json
+- outputs/prototype_pollution/pp_gadgets_found.json
+- outputs/dom_clobbering/clobber_exploits.json
+- outputs/css_injection/css_injection_points.txt
+- outputs/dangling_markup/injection_points.txt
+
+Auth/Session (Task 61-66)
+- outputs/jwt/jwt_vulnerable.txt
+- outputs/jwt/algorithm_confusion.txt
+- outputs/oauth/redirect_bypass.txt
+- outputs/oauth/token_leakage.txt
+- outputs/session/fixation.txt
+- outputs/session/puzzling.txt
+- outputs/reset/host_injection.txt
+
+GraphQL (Task 67-69, 102)
+- outputs/graphql/endpoints.txt
+- outputs/graphql/introspection_raw.json
+- outputs/graphql/queries_list.txt
+- outputs/graphql/mutations_list.txt
+- outputs/graphql/batching_dos.txt
+- outputs/graphql/alias_idor.txt
+
+REST API (Task 70-71)
+- outputs/rest/schemathesis_results.json
+- outputs/rest/mass_assignment.txt
+- outputs/ratelimit/bypass_methods.txt
+- outputs/ratelimit/vulnerable_endpoints.txt
+
+LFI/Path Traversal (Task 72-73)
+- outputs/lfi/file_params_candidates.txt
+- outputs/lfi/traversal_confirmed.txt
+- outputs/lfi/lfi_confirmed.txt
+- outputs/lfi/wrapper_support.txt
+- outputs/lfi/rce_confirmed.txt
+- outputs/lfi/log_poisoning_results.txt
+
+File Upload (Task 74-75)
+- outputs/upload/upload_endpoints.txt
+- outputs/upload/extension_bypass_results.txt
+- outputs/upload/mime_bypass_results.txt
+- outputs/upload/svg_xss_results.txt
+- outputs/upload/xxe_docx_results.txt
+- outputs/upload/imagetragick_results.txt
+
+Deserialization (Task 76-77)
+- outputs/deser/serialized_data_found.txt
+- outputs/deser/java_deser_candidates.txt
+- outputs/deser/php_deser_candidates.txt
+- outputs/deser/python_deser_candidates.txt
+- outputs/deser/java_rce_confirmed.txt
+- outputs/deser/gadget_chains_used.txt
+
+Business Logic (Task 78-80, 101)
+- outputs/race/race_vulnerable.txt
+- outputs/race/race_prone_endpoints.txt
+- outputs/payment/payment_endpoints.txt
+- outputs/payment/negative_qty.txt
+- outputs/payment/promo_abuse.txt
+- outputs/business_logic/step_bypass.txt
+- outputs/business_logic/flow_manipulation.txt
+
+HTTP Protocol (Task 81-83)
+- outputs/smuggling/clte_vulnerable.txt
+- outputs/smuggling/tecl_vulnerable.txt
+- outputs/http2/hpack_bombing.txt
+- outputs/http2/stream_race.txt
+- outputs/desync/client_desync.txt
+- outputs/desync/pause_desync.txt
+
+Cache/CDN (Task 84-86)
+- outputs/cache/cache_keys.txt
+- outputs/cache/poison_confirmed.txt
+- outputs/cache/deception_vulnerable.txt
+- outputs/esi/esi_vulnerable.txt
+
+Cloud/Infrastructure (Task 87-90)
+- outputs/cloud/imds_accessible.txt
+- outputs/cloud/iam_credentials.txt
+- outputs/cloud/buckets_discovered.txt
+- outputs/cloud/buckets_public_read.txt
+- outputs/cloud/buckets_public_write.txt
+- outputs/takeover/takeover_confirmed.txt
+- outputs/dns/zone_transfer.txt
+- outputs/dns/ns_takeover.txt
+
+Supply Chain (Task 91-92)
+- outputs/supply_chain/internal_packages.txt
+- outputs/supply_chain/confusion_candidates.txt
+- outputs/second_order/sqli_secondorder.txt
+- outputs/second_order/xss_secondorder.txt
+
+Misc Security (Task 93-103)
+- outputs/cors/reflect_origin.txt
+- outputs/cors/credentials_leak.txt
+- outputs/clickjacking/missing_xframe.txt
+- outputs/csp/unsafe_inline.txt
+- outputs/csp/bypass_chains.txt
+- outputs/host_header/host_injection.txt
+- outputs/openredirect/open_redirects.txt
+- outputs/verb_tampering/method_override.txt
+- outputs/ratelimit/bypass_confirmed.txt
+- outputs/session/session_findings.txt
+- outputs/websocket/cswsh_vulnerable.txt
+
+Final Reports (Task 104-106)
+- outputs/reports/vulnerability_consolidation.md
+- outputs/reports/final_report.md
+- outputs/reports/executive_summary.md
+- outputs/final_delivery/
+
 Manual enrichment (HAR)
 - outputs/har/common_data.txt
 - outputs/har/har-report.md
@@ -54,24 +243,36 @@ Manual enrichment (HAR)
 - outputs/har/accounts/<harname>_auth.txt
 - outputs/har/accounts/<harname>_auth.json
 
+Vulnerability reports (individual findings)
+- outputs/vulnerabilities/ACL-XXXX-TYPE-SEVERITY.md
+- outputs/vulnerabilities/IDOR-XXXX-TYPE-SEVERITY.md
+- outputs/vulnerabilities/SQLI-XXXX-CRITICAL.md
+- outputs/vulnerabilities/CMDI-XXXX-CRITICAL.md
+- outputs/vulnerabilities/SSTI-XXXX-CRITICAL.md
+- outputs/vulnerabilities/SSRF-XXXX-CRITICAL.md
+- outputs/vulnerabilities/XXE-XXXX-CRITICAL.md
+- outputs/vulnerabilities/XSS-XXXX-HIGH.md
+- outputs/vulnerabilities/DESER-XXXX-CRITICAL.md
+- outputs/vulnerabilities/LFI-XXXX-HIGH.md
+- outputs/vulnerabilities/UPLOAD-XXXX-HIGH.md
+- outputs/vulnerabilities/*.md (all vuln types)
+
 Enrichment (Cariddi; runs inside Task 8)
 - outputs/cariddi/cariddi_findings.txt
 - outputs/cariddi/cariddi_urls_raw.txt
 - outputs/cariddi/cariddi_urls_in_scope.txt
 
-Audit/diagnostic reports (repo helper outputs)
-- outputs/workflow_extracted.json
-- outputs/temp_agent1_refs_report.json
-- outputs/temp_agent1_refs_report.md
+OOB Testing
+- outputs/interactsh_id.txt (callback domain for blind testing)
 
-
+================================================================================
 2) TEMP OUTPUTS (intermediate / raw / logs)
+================================================================================
 
-NOTE: These are expected under temp/agent1/ when running the pipeline. They are not stable contracts.
+NOTE: These are expected under temp/agent1/ when running the pipeline.
 
 Subdomain enumeration / candidates
 - temp/agent1/subfinder.txt
-- temp/agent1/subfinder.log
 - temp/agent1/amass.txt
 - temp/agent1/list_1_passive.txt
 - temp/agent1/list_2_archives.txt
@@ -81,15 +282,12 @@ Subdomain enumeration / candidates
 
 Resolvers / DNS resolution
 - temp/agent1/resolvers_good.txt
-- temp/agent1/resolvers.txt (raw resolver list)
+- temp/agent1/resolvers.txt
 - temp/agent1/candidates_all.txt
 - temp/agent1/resolved.txt
-- temp/agent1/wildcards.txt (optional debug)
-- temp/agent1/massdns.txt (optional debug)
 
 HTTP probing intermediates
-- temp/agent1/httpx_chunks/ (chunk files)
-- temp/agent1/_httpx_tmp.txt
+- temp/agent1/httpx_chunks/
 - temp/agent1/known_files_probes.txt
 - temp/agent1/known_files_hits.txt
 
@@ -102,10 +300,20 @@ Crawling / discovery intermediates
 JS fetch intermediates
 - temp/agent1/js_fetch_dir/
 - temp/agent1/js_fetch_index.txt
+- temp/agent1/js_files.txt
 
-Port scanning intermediates
-- temp/agent1/naabu_raw.txt (or tool logs)
+Queue files (for next task consumption)
+- temp/agent1/queue_lfi_exploitation.txt
+- temp/agent1/queue_upload_exploitation.txt
+- temp/agent1/queue_deser_exploitation.txt
+
+Scanning intermediates
+- temp/agent1/xss_all_params.txt
+- temp/agent1/xss_high_priority.txt
+- temp/agent1/kxss_*.txt
+- temp/agent1/dalfox_*.txt
 
 General
 - temp/agent1/*.log
 - temp/agent1/*_raw.*
+- temp/agent1/logs/

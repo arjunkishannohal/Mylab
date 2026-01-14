@@ -1,0 +1,701 @@
+================================================================================
+TASK 67 · GRAPHQL DISCOVERY & FINGERPRINTING
+================================================================================
+Covers testing_toolkit.txt Phase 8 Step 27 (Part 1)
+GraphQL endpoint discovery, introspection, and schema extraction.
+
+OBJECTIVE:
+- Discover GraphQL endpoints across target infrastructure
+- Fingerprint GraphQL engine (Apollo, Hasura, etc.)
+- Dump full schema via introspection
+- Enumerate types, queries, mutations, subscriptions
+- Bypass introspection restrictions
+
+================================================================================
+INPUTS
+================================================================================
+outputs/live_base_urls.txt                ← Target hosts
+outputs/har/common_data.txt               ← Known API endpoints from HAR
+outputs/url_corpus_all_in_scope.txt       ← Full URL corpus
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/graphql/
+├── endpoints.txt                  ← Discovered GraphQL endpoints
+├── fingerprints.txt               ← Engine identification results
+├── introspection_raw.json         ← Raw introspection response
+├── schema_analysis.txt            ← Analyzed schema (types, fields)
+├── queries_list.txt               ← Available queries
+├── mutations_list.txt             ← Available mutations
+├── subscriptions_list.txt         ← Available subscriptions
+└── scan_log.txt                   ← Full execution log
+
+================================================================================
+🧠 GRAPHQL FUNDAMENTALS 🧠
+================================================================================
+
+───────────────────────────────────────
+What is GraphQL?
+───────────────────────────────────────
+- Query language for APIs (alternative to REST)
+- Single endpoint (usually /graphql)
+- Client specifies exactly what data it needs
+- Schema defines available operations
+
+KEY CONCEPTS:
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Concept       │ Description                                                │
+├───────────────┼────────────────────────────────────────────────────────────┤
+│ Query         │ Read data (like GET)                                       │
+│ Mutation      │ Write/modify data (like POST/PUT/DELETE)                   │
+│ Subscription  │ Real-time updates (WebSocket)                              │
+│ Type          │ Data structure (User, Post, etc.)                          │
+│ Field         │ Property of a type (id, name, email)                       │
+│ Resolver      │ Function that fetches data for a field                     │
+│ Introspection │ Query the schema itself (self-documenting)                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+───────────────────────────────────────
+GraphQL Request Format
+───────────────────────────────────────
+POST /graphql HTTP/1.1
+Content-Type: application/json
+
+{
+  "query": "query { user(id: 1) { id name email } }",
+  "variables": {"id": 1},
+  "operationName": "GetUser"
+}
+
+RESPONSE:
+{
+  "data": {
+    "user": {
+      "id": "1",
+      "name": "John",
+      "email": "john@example.com"
+    }
+  }
+}
+
+================================================================================
+PHASE 1: ENDPOINT DISCOVERY
+================================================================================
+
+───────────────────────────────────────
+1.1 Common GraphQL Endpoint Paths
+───────────────────────────────────────
+# Primary endpoints
+/graphql
+/graphiql
+/graphql/console
+/graphql/explorer
+/v1/graphql
+/v2/graphql
+/api/graphql
+/api/v1/graphql
+
+# Alternative paths
+/query
+/gql
+/graph
+/playground
+/altair
+/voyager
+
+# Framework-specific
+/api/graphql/v1
+/__graphql
+/graphql/schema
+/graphql/api
+/dev/graphql
+
+───────────────────────────────────────
+1.2 Endpoint Discovery Script
+───────────────────────────────────────
+#!/bin/bash
+# graphql_endpoint_discovery.sh
+
+TARGET="$1"
+OUTPUT_DIR="outputs/graphql"
+mkdir -p "$OUTPUT_DIR"
+
+# GraphQL endpoint wordlist
+ENDPOINTS=(
+    "graphql"
+    "graphiql"
+    "graphql/console"
+    "v1/graphql"
+    "v2/graphql"
+    "api/graphql"
+    "api/v1/graphql"
+    "query"
+    "gql"
+    "playground"
+    "__graphql"
+    "graphql/explorer"
+)
+
+echo "[*] Scanning for GraphQL endpoints on $TARGET"
+
+for endpoint in "${ENDPOINTS[@]}"; do
+    url="${TARGET}/${endpoint}"
+    
+    # Test with introspection query
+    response=$(curl -s -o /dev/null -w "%{http_code}" \
+        -X POST "$url" \
+        -H "Content-Type: application/json" \
+        -d '{"query":"{__typename}"}' \
+        --max-time 10)
+    
+    if [[ "$response" =~ ^(200|400|401|403)$ ]]; then
+        echo "[+] Potential GraphQL: $url (HTTP $response)"
+        echo "$url" >> "$OUTPUT_DIR/endpoints.txt"
+    fi
+done
+
+# Also test GET method (some implementations support it)
+for endpoint in "${ENDPOINTS[@]}"; do
+    url="${TARGET}/${endpoint}?query={__typename}"
+    response=$(curl -s -o /dev/null -w "%{http_code}" "$url" --max-time 10)
+    
+    if [[ "$response" =~ ^(200|400)$ ]]; then
+        echo "[+] GET GraphQL: ${TARGET}/${endpoint} (HTTP $response)"
+    fi
+done
+
+───────────────────────────────────────
+1.3 Detection via Response Analysis
+───────────────────────────────────────
+# GraphQL responses have characteristic structure
+# Look for: "data", "errors", "__typename"
+
+curl -s -X POST "https://target.com/graphql" \
+    -H "Content-Type: application/json" \
+    -d '{"query":"{__typename}"}' | jq .
+
+# Valid GraphQL response patterns:
+# {"data":{"__typename":"Query"}}
+# {"errors":[{"message":"..."}]}
+
+# Check for GraphQL error messages
+curl -s -X POST "https://target.com/graphql" \
+    -H "Content-Type: application/json" \
+    -d '{"query":"invalid"}' 2>&1 | grep -i "graphql\|syntax\|query"
+
+───────────────────────────────────────
+1.4 Discovery from JavaScript/HAR
+───────────────────────────────────────
+# Search JS files for GraphQL references
+grep -rPi 'graphql|/gql|apollo|hasura|relay' temp/agent1/js_responses/
+
+# Search HAR files
+grep -i "graphql" outputs/har_*.json | head -20
+
+# Look for Apollo client patterns
+grep -rP 'ApolloClient|gql`|useQuery|useMutation' temp/agent1/js_responses/
+
+================================================================================
+PHASE 2: ENGINE FINGERPRINTING
+================================================================================
+
+───────────────────────────────────────
+2.1 Using graphw00f
+───────────────────────────────────────
+# Install graphw00f
+pip install graphw00f
+
+# Fingerprint GraphQL engine
+graphw00f -t https://target.com/graphql
+
+# Common engines:
+# - Apollo Server
+# - Hasura
+# - GraphQL Yoga
+# - Ariadne
+# - Graphene (Python)
+# - graphql-ruby
+# - Sangria (Scala)
+# - Juniper (Rust)
+# - gqlgen (Go)
+# - AWS AppSync
+
+───────────────────────────────────────
+2.2 Manual Fingerprinting Techniques
+───────────────────────────────────────
+# Technique 1: Error message analysis
+curl -s -X POST "https://target.com/graphql" \
+    -H "Content-Type: application/json" \
+    -d '{"query":"{ __INVALID__ }"}' | jq .
+
+# Apollo: "Cannot query field \"__INVALID__\" on type \"Query\""
+# Hasura: Different error format
+# Check error structure and wording
+
+# Technique 2: Server headers
+curl -s -I -X POST "https://target.com/graphql" \
+    -H "Content-Type: application/json" \
+    -d '{"query":"{__typename}"}'
+
+# Look for:
+# X-Hasura-*
+# Apollo-*
+# Server: graphql-yoga
+
+# Technique 3: Debug/diagnostic endpoints
+curl -s "https://target.com/graphql/.well-known/apollo/server-health"
+curl -s "https://target.com/graphql/health"
+curl -s "https://target.com/v1/graphql/health"
+
+───────────────────────────────────────
+2.3 Feature Detection
+───────────────────────────────────────
+# Test subscription support (indicates WebSocket)
+curl -s -X POST "https://target.com/graphql" \
+    -H "Content-Type: application/json" \
+    -d '{"query":"subscription { __typename }"}' | jq .
+
+# Test batching support
+curl -s -X POST "https://target.com/graphql" \
+    -H "Content-Type: application/json" \
+    -d '[{"query":"{__typename}"},{"query":"{__typename}"}]' | jq .
+
+# If array response → Batching supported (attack vector!)
+
+# Test persisted queries (Apollo)
+curl -s -X POST "https://target.com/graphql" \
+    -H "Content-Type: application/json" \
+    -d '{"extensions":{"persistedQuery":{"version":1,"sha256Hash":"test"}}}'
+
+================================================================================
+PHASE 3: INTROSPECTION DUMP
+================================================================================
+
+───────────────────────────────────────
+3.1 Full Introspection Query
+───────────────────────────────────────
+# The "magic" query that dumps entire schema
+
+INTROSPECTION_QUERY='
+query IntrospectionQuery {
+  __schema {
+    queryType { name }
+    mutationType { name }
+    subscriptionType { name }
+    types {
+      ...FullType
+    }
+    directives {
+      name
+      description
+      locations
+      args {
+        ...InputValue
+      }
+    }
+  }
+}
+
+fragment FullType on __Type {
+  kind
+  name
+  description
+  fields(includeDeprecated: true) {
+    name
+    description
+    args {
+      ...InputValue
+    }
+    type {
+      ...TypeRef
+    }
+    isDeprecated
+    deprecationReason
+  }
+  inputFields {
+    ...InputValue
+  }
+  interfaces {
+    ...TypeRef
+  }
+  enumValues(includeDeprecated: true) {
+    name
+    description
+    isDeprecated
+    deprecationReason
+  }
+  possibleTypes {
+    ...TypeRef
+  }
+}
+
+fragment InputValue on __InputValue {
+  name
+  description
+  type {
+    ...TypeRef
+  }
+  defaultValue
+}
+
+fragment TypeRef on __Type {
+  kind
+  name
+  ofType {
+    kind
+    name
+    ofType {
+      kind
+      name
+      ofType {
+        kind
+        name
+        ofType {
+          kind
+          name
+          ofType {
+            kind
+            name
+            ofType {
+              kind
+              name
+              ofType {
+                kind
+                name
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+'
+
+# Execute introspection
+curl -s -X POST "https://target.com/graphql" \
+    -H "Content-Type: application/json" \
+    -d "{\"query\":\"$(echo $INTROSPECTION_QUERY | tr '\n' ' ')\"}" \
+    | jq . > outputs/graphql/introspection_raw.json
+
+───────────────────────────────────────
+3.2 Simple Introspection Queries
+───────────────────────────────────────
+# Quick schema check
+curl -s -X POST "https://target.com/graphql" \
+    -H "Content-Type: application/json" \
+    -d '{"query":"{ __schema { types { name } } }"}' | jq '.data.__schema.types[].name'
+
+# Get query root type
+curl -s -X POST "https://target.com/graphql" \
+    -H "Content-Type: application/json" \
+    -d '{"query":"{ __schema { queryType { name fields { name } } } }"}' | jq .
+
+# Get mutation root type
+curl -s -X POST "https://target.com/graphql" \
+    -H "Content-Type: application/json" \
+    -d '{"query":"{ __schema { mutationType { name fields { name } } } }"}' | jq .
+
+# Get specific type details
+curl -s -X POST "https://target.com/graphql" \
+    -H "Content-Type: application/json" \
+    -d '{"query":"{ __type(name: \"User\") { name fields { name type { name } } } }"}' | jq .
+
+───────────────────────────────────────
+3.3 Introspection with Authentication
+───────────────────────────────────────
+# Some schemas require auth for introspection
+
+# With Bearer token
+curl -s -X POST "https://target.com/graphql" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer YOUR_TOKEN" \
+    -d '{"query":"{ __schema { types { name } } }"}'
+
+# With Cookie
+curl -s -X POST "https://target.com/graphql" \
+    -H "Content-Type: application/json" \
+    -b "session=YOUR_SESSION_COOKIE" \
+    -d '{"query":"{ __schema { types { name } } }"}'
+
+# Test different auth contexts (may reveal different schema!)
+# Admin might see more types than regular user
+
+================================================================================
+PHASE 4: BYPASS INTROSPECTION RESTRICTIONS
+================================================================================
+
+───────────────────────────────────────
+4.1 Common Introspection Blocks
+───────────────────────────────────────
+# Production often disables introspection
+# Error: "GraphQL introspection is not allowed"
+
+# But many bypass techniques exist!
+
+───────────────────────────────────────
+4.2 Case Variation Bypass
+───────────────────────────────────────
+# Try different cases
+curl -s -X POST "https://target.com/graphql" \
+    -H "Content-Type: application/json" \
+    -d '{"query":"{ __SCHEMA { types { name } } }"}'
+
+curl -s -X POST "https://target.com/graphql" \
+    -H "Content-Type: application/json" \
+    -d '{"query":"{ __Schema { types { name } } }"}'
+
+───────────────────────────────────────
+4.3 Alternative Introspection Fields
+───────────────────────────────────────
+# __typename is often allowed even when __schema blocked
+curl -s -X POST "https://target.com/graphql" \
+    -H "Content-Type: application/json" \
+    -d '{"query":"{ user { __typename } }"}'
+
+# __type might be allowed
+curl -s -X POST "https://target.com/graphql" \
+    -H "Content-Type: application/json" \
+    -d '{"query":"{ __type(name: \"Query\") { fields { name } } }"}'
+
+───────────────────────────────────────
+4.4 GET Method Bypass
+───────────────────────────────────────
+# POST might be blocked, try GET
+curl -s "https://target.com/graphql?query={__schema{types{name}}}"
+
+# URL encoded
+curl -s "https://target.com/graphql?query=%7B__schema%7Btypes%7Bname%7D%7D%7D"
+
+───────────────────────────────────────
+4.5 Using Clairvoyance (Schema Inference)
+───────────────────────────────────────
+# When introspection disabled, infer schema from errors
+
+# Install Clairvoyance
+pip install clairvoyance
+
+# Run schema inference
+clairvoyance https://target.com/graphql -o schema.json
+
+# Clairvoyance uses wordlists to guess field names
+# Based on error messages like "Did you mean X?"
+
+───────────────────────────────────────
+4.6 Field Suggestion Extraction
+───────────────────────────────────────
+# GraphQL often suggests valid fields in errors
+
+curl -s -X POST "https://target.com/graphql" \
+    -H "Content-Type: application/json" \
+    -d '{"query":"{ user { asdfghjkl } }"}' | jq .
+
+# Response might contain:
+# "Did you mean \"id\", \"name\", \"email\"?"
+
+# Automate extraction
+#!/bin/bash
+WORDLIST="id name email password username role admin secret token key api"
+
+for word in $WORDLIST; do
+    response=$(curl -s -X POST "https://target.com/graphql" \
+        -H "Content-Type: application/json" \
+        -d "{\"query\":\"{ user { $word } }\"}")
+    
+    if ! echo "$response" | grep -qi "cannot query\|unknown field"; then
+        echo "[+] Valid field: $word"
+    fi
+done
+
+================================================================================
+PHASE 5: SCHEMA ANALYSIS
+================================================================================
+
+───────────────────────────────────────
+5.1 Extract Queries
+───────────────────────────────────────
+# Parse introspection output for queries
+
+cat outputs/graphql/introspection_raw.json | jq '
+    .data.__schema.queryType.name as $queryType |
+    .data.__schema.types[] |
+    select(.name == $queryType) |
+    .fields[] |
+    {name: .name, args: [.args[].name], returnType: .type.name}
+' > outputs/graphql/queries_list.txt
+
+───────────────────────────────────────
+5.2 Extract Mutations
+───────────────────────────────────────
+cat outputs/graphql/introspection_raw.json | jq '
+    .data.__schema.mutationType.name as $mutationType |
+    .data.__schema.types[] |
+    select(.name == $mutationType) |
+    .fields[] |
+    {name: .name, args: [.args[].name], returnType: .type.name}
+' > outputs/graphql/mutations_list.txt
+
+───────────────────────────────────────
+5.3 Identify Sensitive Types
+───────────────────────────────────────
+# Look for security-relevant types
+
+cat outputs/graphql/introspection_raw.json | jq '
+    .data.__schema.types[] |
+    select(.name | test("User|Admin|Auth|Token|Secret|Password|Key|Config"; "i")) |
+    {name: .name, fields: [.fields[]?.name]}
+'
+
+───────────────────────────────────────
+5.4 Generate Schema Visualization
+───────────────────────────────────────
+# Use graphql-voyager or generate SDL
+
+# Convert introspection to SDL
+npm install -g get-graphql-schema
+
+get-graphql-schema https://target.com/graphql > schema.graphql
+
+# Or manually analyze
+cat outputs/graphql/introspection_raw.json | jq '.data.__schema.types[] | select(.kind == "OBJECT") | .name'
+
+================================================================================
+PHASE 6: AUTOMATED DISCOVERY SCRIPT
+================================================================================
+
+#!/bin/bash
+# complete_graphql_discovery.sh
+
+TARGET="$1"
+OUTPUT_DIR="outputs/graphql"
+mkdir -p "$OUTPUT_DIR"
+
+echo "═══════════════════════════════════════════════════════════════"
+echo " GraphQL Discovery & Fingerprinting - $TARGET"
+echo "═══════════════════════════════════════════════════════════════"
+
+# Phase 1: Find endpoint
+echo ""
+echo "[PHASE 1] Endpoint Discovery"
+echo "─────────────────────────────"
+
+ENDPOINTS=("graphql" "graphiql" "api/graphql" "v1/graphql" "query" "gql")
+FOUND_ENDPOINT=""
+
+for ep in "${ENDPOINTS[@]}"; do
+    response=$(curl -s -X POST "${TARGET}/${ep}" \
+        -H "Content-Type: application/json" \
+        -d '{"query":"{__typename}"}' \
+        --max-time 5 2>/dev/null)
+    
+    if echo "$response" | grep -qi "typename\|data\|errors"; then
+        echo "[+] GraphQL found: ${TARGET}/${ep}"
+        FOUND_ENDPOINT="${TARGET}/${ep}"
+        echo "$FOUND_ENDPOINT" >> "$OUTPUT_DIR/endpoints.txt"
+        break
+    fi
+done
+
+if [ -z "$FOUND_ENDPOINT" ]; then
+    echo "[-] No GraphQL endpoint found"
+    exit 1
+fi
+
+# Phase 2: Fingerprint
+echo ""
+echo "[PHASE 2] Engine Fingerprinting"
+echo "─────────────────────────────────"
+
+# Check headers
+curl -s -I -X POST "$FOUND_ENDPOINT" \
+    -H "Content-Type: application/json" \
+    -d '{"query":"{__typename}"}' 2>/dev/null | \
+    grep -iE "server|x-powered|apollo|hasura" | \
+    tee "$OUTPUT_DIR/fingerprints.txt"
+
+# Check batching
+batch_response=$(curl -s -X POST "$FOUND_ENDPOINT" \
+    -H "Content-Type: application/json" \
+    -d '[{"query":"{__typename}"},{"query":"{__typename}"}]' 2>/dev/null)
+
+if echo "$batch_response" | grep -q '^\['; then
+    echo "[+] Batching supported - DoS attack vector!"
+    echo "Batching: ENABLED" >> "$OUTPUT_DIR/fingerprints.txt"
+fi
+
+# Phase 3: Introspection
+echo ""
+echo "[PHASE 3] Introspection"
+echo "─────────────────────────────────"
+
+INTRO_QUERY='{"query":"{ __schema { queryType { name } mutationType { name } types { name kind fields { name } } } }"}'
+
+intro_response=$(curl -s -X POST "$FOUND_ENDPOINT" \
+    -H "Content-Type: application/json" \
+    -d "$INTRO_QUERY")
+
+if echo "$intro_response" | grep -qi "introspection.*disabled\|not allowed"; then
+    echo "[-] Introspection disabled - trying bypasses..."
+    
+    # Try GET
+    intro_response=$(curl -s "${FOUND_ENDPOINT}?query={__schema{types{name}}}")
+fi
+
+if echo "$intro_response" | grep -qi "__schema"; then
+    echo "[+] Introspection successful!"
+    echo "$intro_response" | jq . > "$OUTPUT_DIR/introspection_raw.json"
+    
+    # Extract types
+    echo "$intro_response" | jq '.data.__schema.types[].name' 2>/dev/null | \
+        grep -v "^__" | sort -u > "$OUTPUT_DIR/types.txt"
+    
+    type_count=$(wc -l < "$OUTPUT_DIR/types.txt")
+    echo "[*] Found $type_count types"
+else
+    echo "[-] Introspection blocked"
+fi
+
+echo ""
+echo "[*] Results saved to $OUTPUT_DIR"
+
+================================================================================
+🧠 YOU ARE AN INTELLIGENT AGENT 🧠
+================================================================================
+
+DISCOVERY PRIORITY:
+───────────────────
+1. Find GraphQL endpoint (try all common paths)
+2. Verify with {__typename} query
+3. Fingerprint engine (affects attack approach)
+4. Dump schema via introspection
+5. If blocked, use Clairvoyance for inference
+
+CRITICAL OBSERVATIONS:
+──────────────────────
+□ Is introspection enabled? (Full schema = big attack surface)
+□ Is batching supported? (DoS vector)
+□ What auth is required? (Test all contexts)
+□ What mutations exist? (Write operations)
+□ Are there admin/sensitive types? (High-value targets)
+
+================================================================================
+TOOLS REFERENCE
+================================================================================
+- graphw00f: Engine fingerprinting
+- Clairvoyance: Schema inference when introspection disabled
+- InQL: Burp extension (CLI mode available)
+- graphql-voyager: Schema visualization
+- get-graphql-schema: SDL extraction
+
+================================================================================
+SUCCESS CRITERIA
+================================================================================
+✓ GraphQL endpoint(s) discovered and documented
+✓ Engine fingerprinted (Apollo, Hasura, etc.)
+✓ Introspection attempted (success or blocked noted)
+✓ Schema extracted or inference attempted
+✓ Queries, mutations, subscriptions enumerated
+✓ Batching support tested
+✓ Sensitive types identified
+

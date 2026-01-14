@@ -17,7 +17,7 @@ Run (PowerShell; from repo root)
 New-Item -ItemType Directory -Force temp/agent1 | Out-Null
 New-Item -ItemType Directory -Force outputs | Out-Null
 
-# Basic probe (fast, safe defaults)
+# Basic probe (fast, aggressive discovery)
 httpx -l outputs/activesubdomain.txt -silent -timeout 9 -retries 1 -threads 50 -o outputs/live_base_urls.txt
 
 # ------------------------------------------------------------

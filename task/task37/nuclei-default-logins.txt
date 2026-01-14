@@ -1,0 +1,220 @@
+# ==============================================================================
+# TASK 37: NUCLEI DEFAULT LOGINS SCAN
+# ==============================================================================
+# TOOL: Nuclei
+# MODE: AGGRESSIVE - No limits (own target)
+# TEMPLATES: default-logins/
+# ==============================================================================
+
+## OBJECTIVE
+
+Test for default credentials on admin panels, management interfaces,
+databases, monitoring systems, and network devices.
+
+## PREREQUISITES
+
+✅ Nuclei installed: `nuclei -version`
+✅ Templates updated: `nuclei -update-templates`
+✅ Task 36 completed (found admin panels, login pages)
+✅ Input: live URLs + discovered admin panels
+
+## AGGRESSIVE MODE SETTINGS
+
+```bash
+# AGGRESSIVE - Your own target, no limits
+nuclei -l targets.txt \
+    -t default-logins/ \
+    -c 100 -rl 0 -timeout 10 -retries 3 \
+    -bulk-size 100 -stats -json -nc \
+    -o outputs/nuclei/default_logins_results.json
+```
+
+## TEMPLATE CATEGORIES COVERED
+
+### Default Logins (~200 templates)
+- **Databases**: MongoDB, Elasticsearch, Redis, CouchDB, Cassandra
+- **Admin Panels**: phpMyAdmin, Adminer, Grafana, Kibana
+- **Web Servers**: Tomcat Manager, JBoss, WebLogic, Jetty
+- **Network Devices**: Routers, switches, firewalls, printers
+- **Monitoring**: Nagios, Zabbix, Prometheus, Alertmanager
+- **CI/CD**: Jenkins, GitLab, TeamCity, Bamboo
+- **CMS**: WordPress, Drupal, Joomla admin
+- **Containers**: Docker, Kubernetes dashboard, Portainer
+- **IoT**: Cameras, NVRs, smart devices
+
+## 🧠 DYNAMIC BRAIN INTELLIGENCE
+
+### Learns from Actual Findings (Not Hardcoded)
+```python
+# Brain learns which hosts have login panels from ACTUAL findings
+
+class IntelligentTechKnowledge:
+    """Learns dynamically - no hardcoded tech→credential mappings."""
+    
+    def get_smart_targets_for_scan(self, scan_type):
+        if scan_type == ScanType.DEFAULT_LOGINS:
+            targets = set()
+            
+            # DYNAMICALLY find hosts with login-related tags
+            # (learned from previous scans, not hardcoded)
+            for tag in self.tech_to_hosts:
+                if any(hint in tag for hint in [
+                    'admin', 'login', 'manager', 'console', 
+                    'dashboard', 'panel', 'portal'
+                ]):
+                    targets.update(self.tech_to_hosts[tag])
+            
+            return list(targets)
+```
+
+### AI-Learned Correlations
+```python
+# After finding Tomcat on host X, brain learns:
+# - "tomcat" tag → host X
+# - Next time: if we see "tomcat", prioritize for default-logins
+
+# After CVE-2024-XXXX found on Grafana:
+# - "grafana" → CVE-2024-XXXX (learns correlation)
+# - Next scan: hosts with grafana get higher priority
+```
+
+### Template Effectiveness Learning
+```python
+# Brain tracks which templates ACTUALLY work
+template_success = {
+    'default-logins/tomcat-manager': 5,   # Hit 5 times
+    'default-logins/grafana-default': 3,  # Hit 3 times
+    # ... grows with each scan
+}
+
+# Most effective templates get suggested for similar hosts
+```
+
+## 9-MINUTE BATCH APPROACH
+
+```
+[Batch Structure for Login Testing]
+┌─────────────────────────────────────────────────────┐
+│ Focus: Discovered admin/login endpoints             │
+│ BATCH_SIZE = 200 (smaller batches for login tests) │
+├─────────────────────────────────────────────────────┤
+│ Phase 1: High-value targets (Tomcat, Jenkins, etc) │
+│ Phase 2: Database management (phpMyAdmin, Adminer) │
+│ Phase 3: Network devices and IoT                   │
+│ Phase 4: All remaining default-login templates     │
+└─────────────────────────────────────────────────────┘
+```
+
+## CREDENTIAL DISCOVERY HANDLING
+
+### When Default Creds Found
+```python
+def handle_default_login(finding):
+    """Escalate default credential findings."""
+    
+    # Extract credentials from finding
+    creds = extract_credentials(finding)
+    host = finding['host']
+    
+    # 1. Write CRITICAL vulnerability report
+    write_vuln_report(
+        finding,
+        severity='CRITICAL',
+        title=f'Default Credentials: {finding["template-id"]}'
+    )
+    
+    # 2. Add to credentials file
+    with open('outputs/nuclei/default_creds_found.txt', 'a') as f:
+        f.write(f'{host}\t{creds["username"]}\t{creds["password"]}\n')
+    
+    # 3. Queue for deeper exploitation
+    queue_for_exploitation(host, creds)
+```
+
+## EXECUTION
+
+### Using Python Script
+```bash
+cd d:\wallet\Mylab
+python task/task35/nuclei_scanner.py \
+    --scan-type default-logins \
+    --targets outputs/live_base_urls.txt \
+    --output outputs \
+    --temp temp/task37
+```
+
+### Using Nuclei Directly
+```bash
+nuclei -l outputs/live_base_urls.txt \
+    -t default-logins/ \
+    -c 100 -rl 0 -timeout 10 -retries 3 \
+    -json -stats -nc \
+    -o outputs/nuclei/default_logins_results.json
+```
+
+### Targeted Scan (Based on Tech Stack)
+```bash
+# If Tomcat detected in Task 35
+nuclei -l outputs/nuclei/tech_tomcat_hosts.txt \
+    -t default-logins/tomcat/ \
+    -c 100 -rl 0 \
+    -json -o outputs/nuclei/tomcat_defaults.json
+```
+
+## OUTPUT FILES
+
+| File | Description |
+|------|-------------|
+| `outputs/nuclei/default_logins_results.json` | All login findings |
+| `outputs/nuclei/default_creds_found.txt` | Host + username + password |
+| `outputs/vulnerabilities/NUCLEI-CRIT-*.md` | Critical vuln reports |
+| `temp/task37/checkpoint.json` | Resume checkpoint |
+
+## VULNERABILITY REPORTING
+
+### Critical Login Findings
+```markdown
+# Vulnerability Report: NUCLEI-0042
+
+## Overview
+| Field | Value |
+|-------|-------|
+| **Template** | tomcat-manager-default-credentials |
+| **Severity** | CRITICAL |
+| **Host** | https://target.com:8080 |
+| **Matched At** | /manager/html |
+
+## Credentials Found
+- **Username**: tomcat
+- **Password**: tomcat
+
+## Impact
+Complete administrative access to Tomcat application server.
+Can deploy/undeploy applications, execute arbitrary code.
+
+## Remediation
+1. Immediately change default credentials
+2. Restrict access to management interface
+3. Use strong, unique passwords
+```
+
+## CHAIN TO NEXT TASK
+
+```
+Task 37 (Default Logins) → Task 38 (CVEs Critical/High)
+
+# If default creds found:
+# → Document in credentials file
+# → Report as CRITICAL immediately
+# → Consider for manual exploitation
+
+# Update tech_stack.json with authentication status:
+# hosts[x]['auth_status'] = 'default_creds_found'
+```
+
+## SUCCESS CRITERIA
+
+- [ ] All hosts tested against ~200 default login templates
+- [ ] Tech-aware targeting (Tomcat hosts get Tomcat templates)
+- [ ] Any default credential → CRITICAL report in vulnerabilities/
+- [ ] Credentials documented in default_creds_found.txt

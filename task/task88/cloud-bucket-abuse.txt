@@ -1,0 +1,1003 @@
+================================================================================
+TASK 88 - CLOUD BUCKET ENUMERATION & ABUSE
+================================================================================
+Covers testing_toolkit.txt Phase 13 Step 42
+Find and exploit misconfigured cloud storage buckets
+
+BUCKETS ARE TREASURE CHESTS:
+- Source code backups
+- Database dumps
+- Credentials & secrets
+- Customer PII
+- Internal documents
+
+One misconfigured bucket = massive data breach.
+
+================================================================================
+INPUTS
+================================================================================
+outputs/live_base_urls.txt                 <- Live hosts
+temp/agent1/js_files.txt                   <- JS files (contain bucket refs)
+outputs/api_endpoints_from_openapi.txt     <- API docs (bucket references)
+outputs/url_corpus_all_in_scope.txt        <- All discovered URLs
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/cloud/
+    buckets_discovered.txt                 <- All found bucket names
+    buckets_public_read.txt                <- Readable buckets
+    buckets_public_write.txt               <- WRITABLE buckets (CRITICAL)
+    bucket_contents_sample.txt             <- Sample listings
+    bucket_secrets.txt                     <- Secrets found in buckets
+    bucket_provider_map.txt                <- Bucket → provider mapping
+
+outputs/vulnerabilities/BUCKET-*-CRITICAL.md
+
+================================================================================
+🧠 AGENT DECISION FRAMEWORK
+================================================================================
+
+THINK: Where do bucket names come from?
+
+    Discovery Sources:
+    |
+    +-- JavaScript Files
+    |   +-- AWS SDK configs: new AWS.S3({bucket: 'name'})
+    |   +-- Direct URLs: https://bucket.s3.amazonaws.com/
+    |   +-- Config objects: {bucket: 'company-assets'}
+    |
+    +-- HTML/Responses
+    |   +-- <img src="https://bucket.s3.amazonaws.com/...">
+    |   +-- Background images, assets, uploads
+    |
+    +-- API Endpoints
+    |   +-- Presigned URLs expose bucket names
+    |   +-- Upload endpoints reveal bucket paths
+    |
+    +-- Subdomains
+    |   +-- assets.company.com → CNAME to S3
+    |   +-- cdn.company.com → CloudFront → S3
+    |
+    +-- CSP Headers
+    |   +-- Content-Security-Policy: img-src https://bucket.s3...
+    |
+    +-- Error Messages
+        +-- "NoSuchBucket" reveals bucket patterns
+        +-- "AccessDenied" confirms bucket exists
+
+    What to test once found?
+    |
+    +-- Public READ (list objects)
+    |   +-- Anyone can see bucket contents
+    |   +-- May expose sensitive files
+    |
+    +-- Public WRITE (upload objects)
+    |   +-- CRITICAL - can upload malware
+    |   +-- Deface websites using bucket assets
+    |
+    +-- Authenticated Access
+    |   +-- Sometimes public for auth users only
+    |   +-- Test with stolen creds from Task 87
+    |
+    +-- Specific Object Access
+        +-- Bucket private but individual objects public
+        +-- Try common paths: backup.sql, .env, secrets
+
+================================================================================
+PHASE 1: BUCKET DISCOVERY
+================================================================================
+
+-----------------------------------------
+1.1 Extract Bucket Names from JS
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+bucket_extract.py - Extract bucket names from JavaScript files
+
+JS files are goldmines for bucket names.
+"""
+
+import re
+import os
+import requests
+
+requests.packages.urllib3.disable_warnings()
+
+# Regex patterns for bucket discovery
+BUCKET_PATTERNS = [
+    # S3 URL patterns
+    r'https?://([a-zA-Z0-9.-]+)\.s3[.-]([a-z0-9-]+)?\.amazonaws\.com',
+    r's3://([a-zA-Z0-9.-]+)',
+    r'arn:aws:s3:::([a-zA-Z0-9.-]+)',
+    
+    # S3 path style
+    r'https?://s3[.-]([a-z0-9-]+)?\.amazonaws\.com/([a-zA-Z0-9.-]+)',
+    
+    # GCS patterns
+    r'https?://storage\.googleapis\.com/([a-zA-Z0-9._-]+)',
+    r'https?://([a-zA-Z0-9._-]+)\.storage\.googleapis\.com',
+    r'gs://([a-zA-Z0-9._-]+)',
+    
+    # Azure Blob patterns
+    r'https?://([a-zA-Z0-9]+)\.blob\.core\.windows\.net',
+    r'https?://([a-zA-Z0-9]+)\.blob\.core\.windows\.net/([a-zA-Z0-9-]+)',
+    
+    # DigitalOcean Spaces
+    r'https?://([a-zA-Z0-9.-]+)\.([a-z0-9]+)\.digitaloceanspaces\.com',
+    
+    # Generic bucket references in code
+    r'["\']bucket["\']:\s*["\']([a-zA-Z0-9._-]+)["\']',
+    r'bucketName["\']?\s*[:=]\s*["\']([a-zA-Z0-9._-]+)["\']',
+    r'BUCKET_NAME\s*=\s*["\']([a-zA-Z0-9._-]+)["\']',
+]
+
+def extract_buckets_from_text(text):
+    """Extract all bucket names from text"""
+    
+    buckets = set()
+    
+    for pattern in BUCKET_PATTERNS:
+        matches = re.findall(pattern, text, re.IGNORECASE)
+        for match in matches:
+            if isinstance(match, tuple):
+                for m in match:
+                    if m and len(m) > 2:
+                        buckets.add(m)
+            elif match and len(match) > 2:
+                buckets.add(match)
+    
+    return buckets
+
+def extract_from_js_files(js_list_file):
+    """Extract buckets from all JS files"""
+    
+    all_buckets = set()
+    
+    with open(js_list_file) as f:
+        js_urls = [l.strip() for l in f if l.strip()]
+    
+    print(f"[*] Scanning {len(js_urls)} JS files for bucket names...")
+    
+    for js_url in js_urls:
+        try:
+            resp = requests.get(js_url, verify=False, timeout=10)
+            buckets = extract_buckets_from_text(resp.text)
+            
+            if buckets:
+                print(f"[+] {js_url}: {len(buckets)} buckets found")
+                all_buckets.update(buckets)
+                
+        except Exception as e:
+            pass
+    
+    return all_buckets
+
+# Extract from JS files
+os.makedirs('outputs/cloud', exist_ok=True)
+
+buckets = set()
+
+# From JS files
+if os.path.exists('temp/agent1/js_files.txt'):
+    js_buckets = extract_from_js_files('temp/agent1/js_files.txt')
+    buckets.update(js_buckets)
+
+# From URL corpus
+if os.path.exists('temp/agent1/url_corpus_all_in_scope.txt'):
+    with open('temp/agent1/url_corpus_all_in_scope.txt') as f:
+        corpus_text = f.read()
+    corpus_buckets = extract_buckets_from_text(corpus_text)
+    buckets.update(corpus_buckets)
+
+# Save discovered buckets
+with open('outputs/cloud/buckets_discovered.txt', 'w') as f:
+    for bucket in sorted(buckets):
+        f.write(f"{bucket}\n")
+
+print(f"\n[*] Total unique buckets discovered: {len(buckets)}")
+
+-----------------------------------------
+1.2 CSP Header Extraction
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+csp_bucket_extract.py - Extract bucket names from CSP headers
+
+CSP headers often allowlist legitimate storage buckets.
+"""
+
+import requests
+import re
+
+requests.packages.urllib3.disable_warnings()
+
+def extract_buckets_from_csp(url):
+    """Extract bucket URLs from CSP headers"""
+    
+    buckets = set()
+    
+    try:
+        resp = requests.get(url, verify=False, timeout=10)
+        
+        csp = resp.headers.get('Content-Security-Policy', '')
+        csp += resp.headers.get('Content-Security-Policy-Report-Only', '')
+        
+        # S3
+        s3_matches = re.findall(r'https?://[a-zA-Z0-9.-]+\.s3[a-zA-Z0-9.-]*\.amazonaws\.com', csp)
+        buckets.update(s3_matches)
+        
+        # GCS
+        gcs_matches = re.findall(r'https?://storage\.googleapis\.com/[a-zA-Z0-9._-]+', csp)
+        buckets.update(gcs_matches)
+        
+        # Azure
+        azure_matches = re.findall(r'https?://[a-zA-Z0-9]+\.blob\.core\.windows\.net', csp)
+        buckets.update(azure_matches)
+        
+    except:
+        pass
+    
+    return buckets
+
+# Scan all hosts
+csp_buckets = set()
+
+with open('outputs/live_base_urls.txt') as f:
+    for line in f:
+        url = line.strip()
+        found = extract_buckets_from_csp(url)
+        if found:
+            print(f"[+] {url}: {found}")
+            csp_buckets.update(found)
+
+# Append to discovered
+with open('outputs/cloud/buckets_discovered.txt', 'a') as f:
+    for bucket in csp_buckets:
+        f.write(f"{bucket}\n")
+
+-----------------------------------------
+1.3 Subdomain → Bucket CNAME
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+subdomain_bucket.py - Check if subdomains point to cloud storage
+"""
+
+import subprocess
+import re
+
+def check_cname(subdomain):
+    """Check if subdomain CNAMEs to cloud storage"""
+    
+    try:
+        result = subprocess.run(
+            ['nslookup', '-type=CNAME', subdomain],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        output = result.stdout
+        
+        # Check for cloud storage CNAMEs
+        storage_patterns = [
+            r's3[.-][a-z0-9-]*\.amazonaws\.com',
+            r'storage\.googleapis\.com',
+            r'blob\.core\.windows\.net',
+            r'digitaloceanspaces\.com',
+        ]
+        
+        for pattern in storage_patterns:
+            if re.search(pattern, output, re.IGNORECASE):
+                return True, output
+                
+    except:
+        pass
+    
+    return False, None
+
+# Check subdomains
+bucket_subdomains = []
+
+with open('outputs/activesubdomain.txt') as f:
+    for line in f:
+        subdomain = line.strip()
+        
+        is_bucket, cname = check_cname(subdomain)
+        if is_bucket:
+            print(f"[+] BUCKET CNAME: {subdomain}")
+            bucket_subdomains.append(subdomain)
+
+with open('outputs/cloud/bucket_subdomains.txt', 'w') as f:
+    for sub in bucket_subdomains:
+        f.write(f"{sub}\n")
+
+================================================================================
+PHASE 2: BUCKET ENUMERATION TOOLS
+================================================================================
+
+-----------------------------------------
+2.1 cloud_enum
+-----------------------------------------
+# Comprehensive cloud resource enumerator
+
+# Install
+pip install cloud_enum
+
+# OR from source
+git clone https://github.com/initstring/cloud_enum
+cd cloud_enum
+pip install -r requirements.txt
+
+# Run enumeration based on keyword
+python3 cloud_enum.py -k COMPANY_NAME \
+    --disable-gcp \
+    --disable-azure \
+    -l outputs/cloud/cloud_enum_results.txt
+
+# With mutations (find variations)
+python3 cloud_enum.py -k COMPANY_NAME \
+    -m mutations.txt \
+    -l outputs/cloud/cloud_enum_mutations.txt
+
+-----------------------------------------
+2.2 S3Scanner
+-----------------------------------------
+# AWS S3 specific enumeration
+
+# Install
+pip install s3scanner
+
+# Scan bucket list
+s3scanner scan --bucket-file outputs/cloud/buckets_discovered.txt \
+    --out-file outputs/cloud/s3scanner_results.txt
+
+# Dump accessible bucket contents
+s3scanner dump --bucket BUCKET_NAME \
+    --out-file outputs/cloud/bucket_dump/
+
+-----------------------------------------
+2.3 lazys3
+-----------------------------------------
+# Brute-force S3 bucket names
+
+# Install
+git clone https://github.com/nahamsec/lazys3
+cd lazys3
+
+# Run with company name
+ruby lazys3.rb COMPANY_NAME > outputs/cloud/lazys3_results.txt
+
+-----------------------------------------
+2.4 GCPBucketBrute
+-----------------------------------------
+# GCS bucket enumeration
+
+# Install
+git clone https://github.com/RhinoSecurityLabs/GCPBucketBrute
+cd GCPBucketBrute
+pip install -r requirements.txt
+
+# Run
+python3 gcpbucketbrute.py -k COMPANY_NAME \
+    -w wordlist.txt \
+    -o outputs/cloud/gcp_buckets.txt
+
+================================================================================
+PHASE 3: ACCESS TESTING
+================================================================================
+
+-----------------------------------------
+3.1 Test S3 Bucket Permissions
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+s3_access_test.py - Test S3 bucket permissions without AWS CLI
+
+Test: List, Read, Write permissions
+"""
+
+import requests
+import xml.etree.ElementTree as ET
+import os
+
+requests.packages.urllib3.disable_warnings()
+
+def test_s3_bucket(bucket_name, region='us-east-1'):
+    """Test S3 bucket permissions"""
+    
+    results = {
+        'bucket': bucket_name,
+        'exists': False,
+        'public_list': False,
+        'public_read': False,
+        'public_write': False,
+        'sample_objects': []
+    }
+    
+    # Try different URL formats
+    urls = [
+        f"https://{bucket_name}.s3.amazonaws.com/",
+        f"https://{bucket_name}.s3.{region}.amazonaws.com/",
+        f"https://s3.amazonaws.com/{bucket_name}/",
+    ]
+    
+    for base_url in urls:
+        try:
+            # Test 1: List bucket (GET)
+            resp = requests.get(base_url, timeout=10)
+            
+            if resp.status_code == 200:
+                results['exists'] = True
+                
+                # Check if listing returned
+                if '<Contents>' in resp.text or '<Key>' in resp.text:
+                    results['public_list'] = True
+                    print(f"[CRITICAL] {bucket_name}: PUBLIC LISTING!")
+                    
+                    # Extract sample objects
+                    try:
+                        root = ET.fromstring(resp.text)
+                        ns = {'s3': 'http://s3.amazonaws.com/doc/2006-03-01/'}
+                        
+                        for content in root.findall('.//s3:Contents', ns):
+                            key = content.find('s3:Key', ns)
+                            if key is not None:
+                                results['sample_objects'].append(key.text)
+                                if len(results['sample_objects']) >= 20:
+                                    break
+                    except:
+                        pass
+                    
+                    break
+                    
+            elif resp.status_code == 403:
+                results['exists'] = True
+                # Bucket exists but not listable
+                
+            elif resp.status_code == 404:
+                # Bucket doesn't exist
+                pass
+            
+        except Exception as e:
+            pass
+    
+    # Test 2: Write access (PUT)
+    if results['exists']:
+        test_key = '.permission_test_delete_me.txt'
+        put_url = f"https://{bucket_name}.s3.amazonaws.com/{test_key}"
+        
+        try:
+            resp = requests.put(
+                put_url,
+                data='permission test',
+                timeout=10
+            )
+            
+            if resp.status_code in [200, 201]:
+                results['public_write'] = True
+                print(f"[CRITICAL] {bucket_name}: PUBLIC WRITE ACCESS!")
+                
+                # Clean up
+                try:
+                    requests.delete(put_url, timeout=5)
+                except:
+                    pass
+                    
+        except:
+            pass
+    
+    return results
+
+# Test all discovered buckets
+os.makedirs('outputs/cloud', exist_ok=True)
+
+public_read = []
+public_write = []
+
+with open('outputs/cloud/buckets_discovered.txt') as f:
+    buckets = [l.strip() for l in f if l.strip()]
+
+print(f"[*] Testing {len(buckets)} S3 buckets...")
+
+for bucket in buckets:
+    # Extract just bucket name if full URL
+    if 's3.amazonaws.com' in bucket:
+        bucket = bucket.split('.s3')[0].split('//')[1] if '//' in bucket else bucket
+    
+    result = test_s3_bucket(bucket)
+    
+    if result['public_list']:
+        public_read.append({
+            'bucket': bucket,
+            'objects': result['sample_objects']
+        })
+    
+    if result['public_write']:
+        public_write.append(bucket)
+
+# Save results
+with open('outputs/cloud/buckets_public_read.txt', 'w') as f:
+    for item in public_read:
+        f.write(f"Bucket: {item['bucket']}\n")
+        f.write(f"Sample objects:\n")
+        for obj in item['objects'][:10]:
+            f.write(f"  - {obj}\n")
+        f.write("\n")
+
+with open('outputs/cloud/buckets_public_write.txt', 'w') as f:
+    for bucket in public_write:
+        f.write(f"{bucket}\n")
+
+print(f"\n[*] Public READ: {len(public_read)}")
+print(f"[*] Public WRITE: {len(public_write)}")
+
+-----------------------------------------
+3.2 Test GCS Bucket Permissions
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+gcs_access_test.py - Test GCS bucket permissions
+"""
+
+import requests
+import json
+
+requests.packages.urllib3.disable_warnings()
+
+def test_gcs_bucket(bucket_name):
+    """Test GCS bucket permissions"""
+    
+    results = {
+        'bucket': bucket_name,
+        'exists': False,
+        'public_list': False,
+        'public_read': False,
+        'sample_objects': []
+    }
+    
+    # List objects (JSON API)
+    list_url = f"https://storage.googleapis.com/storage/v1/b/{bucket_name}/o"
+    
+    try:
+        resp = requests.get(list_url, timeout=10)
+        
+        if resp.status_code == 200:
+            results['exists'] = True
+            results['public_list'] = True
+            print(f"[CRITICAL] {bucket_name}: PUBLIC LISTING!")
+            
+            data = resp.json()
+            for item in data.get('items', [])[:20]:
+                results['sample_objects'].append(item.get('name'))
+                
+        elif resp.status_code == 403:
+            results['exists'] = True
+            
+    except:
+        pass
+    
+    return results
+
+# Test GCS buckets
+gcs_public = []
+
+with open('outputs/cloud/buckets_discovered.txt') as f:
+    for line in f:
+        bucket = line.strip()
+        
+        # Only test GCS-like names
+        if 'storage.googleapis.com' in bucket or not 's3' in bucket.lower():
+            if 'storage.googleapis.com' in bucket:
+                bucket = bucket.split('storage.googleapis.com/')[1].split('/')[0]
+            
+            result = test_gcs_bucket(bucket)
+            if result['public_list']:
+                gcs_public.append(result)
+
+-----------------------------------------
+3.3 Test Azure Blob Permissions
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+azure_access_test.py - Test Azure Blob Storage permissions
+"""
+
+import requests
+
+def test_azure_container(storage_account, container):
+    """Test Azure Blob container permissions"""
+    
+    results = {
+        'storage_account': storage_account,
+        'container': container,
+        'public_list': False,
+        'sample_blobs': []
+    }
+    
+    # List blobs (requires restype=container&comp=list)
+    list_url = f"https://{storage_account}.blob.core.windows.net/{container}?restype=container&comp=list"
+    
+    try:
+        resp = requests.get(list_url, timeout=10)
+        
+        if resp.status_code == 200 and '<Blob>' in resp.text:
+            results['public_list'] = True
+            print(f"[CRITICAL] {storage_account}/{container}: PUBLIC LISTING!")
+            
+            # Extract blob names
+            import re
+            blobs = re.findall(r'<Name>([^<]+)</Name>', resp.text)
+            results['sample_blobs'] = blobs[:20]
+            
+    except:
+        pass
+    
+    return results
+
+================================================================================
+PHASE 4: SENSITIVE DATA HUNTING
+================================================================================
+
+-----------------------------------------
+4.1 Hunt Secrets in Buckets
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+bucket_secret_hunt.py - Search for sensitive files in accessible buckets
+"""
+
+import requests
+import re
+
+requests.packages.urllib3.disable_warnings()
+
+# High-value file patterns
+SENSITIVE_PATTERNS = [
+    # Credentials & secrets
+    r'\.env$',
+    r'\.env\..*',
+    r'credentials',
+    r'secrets?\.json',
+    r'config\.json',
+    r'\.htpasswd',
+    r'\.pgpass',
+    r'\.netrc',
+    r'id_rsa',
+    r'\.pem$',
+    r'\.key$',
+    r'\.p12$',
+    
+    # Backups
+    r'backup',
+    r'\.sql$',
+    r'\.sql\.gz$',
+    r'\.tar\.gz$',
+    r'\.zip$',
+    r'dump',
+    r'\.bak$',
+    
+    # Code
+    r'\.git/',
+    r'source',
+    r'src/',
+    
+    # Data
+    r'\.csv$',
+    r'\.xlsx?$',
+    r'users',
+    r'customers',
+    r'passwords',
+    r'accounts',
+    
+    # Logs
+    r'\.log$',
+    r'access.*log',
+    r'error.*log',
+]
+
+def search_bucket_for_secrets(bucket_name, objects):
+    """Search bucket objects for sensitive files"""
+    
+    sensitive = []
+    
+    for obj in objects:
+        obj_lower = obj.lower()
+        
+        for pattern in SENSITIVE_PATTERNS:
+            if re.search(pattern, obj_lower):
+                sensitive.append({
+                    'bucket': bucket_name,
+                    'object': obj,
+                    'pattern': pattern,
+                    'url': f"https://{bucket_name}.s3.amazonaws.com/{obj}"
+                })
+                break
+    
+    return sensitive
+
+def download_and_check_secrets(url):
+    """Download object and check for hardcoded secrets"""
+    
+    secrets_found = []
+    
+    SECRET_PATTERNS = [
+        (r'AKIA[0-9A-Z]{16}', 'AWS Access Key'),
+        (r'[a-zA-Z0-9/+]{40}', 'Potential AWS Secret Key'),
+        (r'AIza[0-9A-Za-z\\-_]{35}', 'Google API Key'),
+        (r'ya29\.[0-9A-Za-z\\-_]+', 'Google OAuth Token'),
+        (r'ghp_[0-9A-Za-z]{36}', 'GitHub Token'),
+        (r'sk-[0-9A-Za-z]{48}', 'OpenAI Key'),
+        (r'password\s*[:=]\s*["\']?([^"\'\\s]+)', 'Hardcoded Password'),
+        (r'api[_-]?key\s*[:=]\s*["\']?([^"\'\\s]+)', 'API Key'),
+    ]
+    
+    try:
+        resp = requests.get(url, verify=False, timeout=30)
+        content = resp.text[:100000]  # First 100KB
+        
+        for pattern, secret_type in SECRET_PATTERNS:
+            matches = re.findall(pattern, content)
+            if matches:
+                secrets_found.append({
+                    'url': url,
+                    'type': secret_type,
+                    'sample': matches[0][:20] + '...' if len(matches[0]) > 20 else matches[0]
+                })
+                
+    except:
+        pass
+    
+    return secrets_found
+
+# Hunt for secrets
+all_secrets = []
+all_sensitive_files = []
+
+with open('outputs/cloud/buckets_public_read.txt') as f:
+    content = f.read()
+    
+# Parse bucket contents and search
+# ... process and hunt
+
+# Save findings
+with open('outputs/cloud/bucket_secrets.txt', 'w') as f:
+    f.write("# SECRETS FOUND IN CLOUD BUCKETS\n\n")
+    for secret in all_secrets:
+        f.write(f"URL: {secret['url']}\n")
+        f.write(f"Type: {secret['type']}\n")
+        f.write(f"Sample: {secret['sample']}\n")
+        f.write("---\n")
+
+================================================================================
+PHASE 5: FULL AUTOMATION
+================================================================================
+
+#!/usr/bin/env python3
+"""
+bucket_audit_full.py - Complete cloud bucket security audit
+"""
+
+import os
+import json
+import re
+import requests
+import hashlib
+import subprocess
+
+requests.packages.urllib3.disable_warnings()
+
+class BucketAuditor:
+    
+    def __init__(self):
+        self.results = {
+            'discovered': [],
+            'public_read': [],
+            'public_write': [],
+            'sensitive_files': [],
+            'secrets': []
+        }
+        os.makedirs('outputs/cloud', exist_ok=True)
+        os.makedirs('outputs/vulnerabilities', exist_ok=True)
+    
+    def discover_from_js(self, js_file):
+        """Extract bucket names from JS files"""
+        
+        patterns = [
+            r'https?://([a-zA-Z0-9.-]+)\.s3[.-]',
+            r's3://([a-zA-Z0-9.-]+)',
+            r'gs://([a-zA-Z0-9._-]+)',
+            r'["\']bucket["\']:\s*["\']([a-zA-Z0-9._-]+)',
+        ]
+        
+        buckets = set()
+        
+        with open(js_file) as f:
+            for line in f:
+                url = line.strip()
+                try:
+                    resp = requests.get(url, verify=False, timeout=10)
+                    for pattern in patterns:
+                        matches = re.findall(pattern, resp.text)
+                        buckets.update(matches)
+                except:
+                    pass
+        
+        self.results['discovered'] = list(buckets)
+        return buckets
+    
+    def test_s3_access(self, bucket):
+        """Test S3 bucket permissions"""
+        
+        url = f"https://{bucket}.s3.amazonaws.com/"
+        
+        try:
+            # List test
+            resp = requests.get(url, timeout=10)
+            
+            if resp.status_code == 200 and '<Contents>' in resp.text:
+                self.results['public_read'].append({
+                    'bucket': bucket,
+                    'provider': 'AWS',
+                    'url': url
+                })
+                
+            # Write test
+            test_url = f"{url}.write_test_delete.txt"
+            put_resp = requests.put(test_url, data='test', timeout=10)
+            
+            if put_resp.status_code in [200, 201]:
+                self.results['public_write'].append({
+                    'bucket': bucket,
+                    'provider': 'AWS'
+                })
+                requests.delete(test_url, timeout=5)
+                
+        except:
+            pass
+    
+    def generate_report(self, finding, vuln_type):
+        """Generate vulnerability report"""
+        
+        vuln_id = hashlib.md5(str(finding).encode()).hexdigest()[:8]
+        
+        severity = 'CRITICAL' if vuln_type == 'WRITE' else 'HIGH'
+        
+        report = f"""# Cloud Bucket Misconfiguration - {vuln_type}
+
+**Severity**: {severity}
+**Bucket**: {finding.get('bucket', 'N/A')}
+**Provider**: {finding.get('provider', 'Unknown')}
+
+## Description
+Cloud storage bucket is publicly accessible with {vuln_type} permissions.
+
+## URL
+{finding.get('url', 'N/A')}
+
+## Impact
+"""
+        if vuln_type == 'WRITE':
+            report += """- **Website defacement** via modified assets
+- **Malware distribution** through trusted domain
+- **Supply chain compromise**
+- **Data tampering**
+"""
+        else:
+            report += """- **Data breach** - sensitive files exposed
+- **Credential theft** - secrets in bucket
+- **Reconnaissance** - internal structure revealed
+"""
+        
+        report += """
+## Recommendations
+1. Enable bucket access logging
+2. Apply principle of least privilege
+3. Use bucket policies to restrict access
+4. Enable server-side encryption
+5. Audit bucket permissions regularly
+"""
+        
+        with open(f"outputs/vulnerabilities/BUCKET-{vuln_type}-{vuln_id}-{severity}.md", 'w') as f:
+            f.write(report)
+    
+    def scan(self, js_file=None):
+        """Full bucket audit"""
+        
+        print("[*] Starting cloud bucket audit...")
+        
+        # Discover buckets
+        if js_file and os.path.exists(js_file):
+            self.discover_from_js(js_file)
+        
+        if os.path.exists('outputs/cloud/buckets_discovered.txt'):
+            with open('outputs/cloud/buckets_discovered.txt') as f:
+                for line in f:
+                    if line.strip():
+                        self.results['discovered'].append(line.strip())
+        
+        print(f"[*] Testing {len(self.results['discovered'])} buckets...")
+        
+        # Test each bucket
+        for bucket in set(self.results['discovered']):
+            self.test_s3_access(bucket)
+        
+        # Generate reports
+        for finding in self.results['public_write']:
+            print(f"[CRITICAL] PUBLIC WRITE: {finding['bucket']}")
+            self.generate_report(finding, 'WRITE')
+        
+        for finding in self.results['public_read']:
+            print(f"[HIGH] PUBLIC READ: {finding['bucket']}")
+            self.generate_report(finding, 'READ')
+        
+        return self.results
+    
+    def save(self):
+        """Save results"""
+        
+        with open('outputs/cloud/bucket_audit_results.json', 'w') as f:
+            json.dump(self.results, f, indent=2)
+        
+        with open('outputs/cloud/buckets_public_read.txt', 'w') as f:
+            for item in self.results['public_read']:
+                f.write(f"{item['bucket']}|{item['provider']}|{item.get('url', '')}\n")
+        
+        with open('outputs/cloud/buckets_public_write.txt', 'w') as f:
+            for item in self.results['public_write']:
+                f.write(f"{item['bucket']}|{item['provider']}\n")
+
+# Run
+if __name__ == "__main__":
+    auditor = BucketAuditor()
+    auditor.scan('temp/agent1/js_files.txt')
+    auditor.save()
+    
+    print(f"\n{'='*60}")
+    print(f"[*] Buckets discovered: {len(auditor.results['discovered'])}")
+    print(f"[*] PUBLIC READ: {len(auditor.results['public_read'])}")
+    print(f"[*] PUBLIC WRITE: {len(auditor.results['public_write'])}")
+
+================================================================================
+SUMMARY CHECKLIST
+================================================================================
+
+[ ] Bucket names extracted from JS files
+[ ] Bucket names extracted from CSP headers
+[ ] Subdomain CNAMEs checked
+[ ] cloud_enum run with company keywords
+[ ] S3Scanner run on discovered buckets
+[ ] Access permissions tested (list/read/write)
+[ ] Sensitive files identified
+[ ] Secrets searched in accessible objects
+[ ] Vulnerability reports generated
+
+================================================================================
+TOOLS REFERENCE
+================================================================================
+
+DISCOVERY:
+- cloud_enum - Multi-cloud resource enumeration
+- S3Scanner - AWS S3 focused scanning
+- lazys3 - Brute-force bucket names
+- GCPBucketBrute - GCS bucket enumeration
+
+TESTING:
+- aws s3 ls s3://bucket/ - List bucket (requires AWS CLI)
+- curl https://bucket.s3.amazonaws.com/ - Direct access test
+- Custom Python scripts - Permission testing
+
+SENSITIVE FILES:
+- .env, credentials.json, secrets.json
+- backup.sql, dump.tar.gz
+- .git/, id_rsa, .pem files
+
+SEVERITY:
+- Public WRITE: CRITICAL (defacement, malware)
+- Public READ: HIGH (data breach, secrets)
+
+================================================================================
+NEXT TASK
+================================================================================
+Task 89: Subdomain Takeover (subjack + nuclei takeovers)

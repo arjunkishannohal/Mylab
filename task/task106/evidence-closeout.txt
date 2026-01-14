@@ -1,0 +1,572 @@
+================================================================================
+TASK 106 - EVIDENCE COMPILATION & CLOSEOUT
+================================================================================
+Covers testing_toolkit.txt Phase 16 Step 61
+Final evidence packaging, cleanup, and engagement closeout
+
+THE FINAL TASK - WRAP IT ALL UP
+Package evidence, clean sensitive data, prepare deliverables.
+
+================================================================================
+INPUTS
+================================================================================
+outputs/**/*                               <- All output files
+temp/agent1/**/*                           <- All temp/working files
+outputs/reports/*.md                       <- Generated reports
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/final_delivery/
+    FINAL_PENETRATION_TEST_REPORT.md      <- Main report
+    executive_summary.md                   <- Executive summary
+    remediation_plan.md                    <- Remediation guidance
+    evidence/                              <- Organized evidence
+        critical/
+        high/
+        medium/
+    raw_outputs/                           <- Raw tool outputs (sanitized)
+    MANIFEST.txt                           <- File listing
+
+outputs/engagement_closeout.md             <- Closeout checklist
+
+================================================================================
+🧠 AGENT DECISION FRAMEWORK
+================================================================================
+
+CLOSEOUT WORKFLOW:
+
+    Evidence Packaging:
+    |
+    +-- Organize by severity
+    |   +-- Critical findings evidence
+    |   +-- High findings evidence
+    |   +-- Medium/Low/Info evidence
+    |
+    +-- Sanitize sensitive data
+    |   +-- Remove credentials
+    |   +-- Redact internal IPs
+    |   +-- Clean API keys
+    |
+    +-- Create manifest
+        +-- List all files
+        +-- Describe contents
+        +-- Note any exclusions
+
+    Cleanup:
+    |
+    +-- Remove temp files (optional)
+    +-- Archive raw data
+    +-- Clear session tokens
+
+    Deliverables:
+    |
+    +-- Final report package
+    +-- Evidence archive
+    +-- Closeout documentation
+
+================================================================================
+PHASE 1: EVIDENCE ORGANIZATION
+================================================================================
+
+-----------------------------------------
+1.1 Organize Evidence by Severity
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+organize_evidence.py - Organize all evidence for delivery
+"""
+
+import os
+import json
+import shutil
+import glob
+from collections import defaultdict
+
+# Create delivery structure
+os.makedirs('outputs/final_delivery/evidence/critical', exist_ok=True)
+os.makedirs('outputs/final_delivery/evidence/high', exist_ok=True)
+os.makedirs('outputs/final_delivery/evidence/medium', exist_ok=True)
+os.makedirs('outputs/final_delivery/evidence/low', exist_ok=True)
+os.makedirs('outputs/final_delivery/evidence/info', exist_ok=True)
+os.makedirs('outputs/final_delivery/raw_outputs', exist_ok=True)
+
+class EvidenceOrganizer:
+    
+    def __init__(self):
+        self.manifest = []
+    
+    def copy_reports(self):
+        """Copy main reports to delivery folder"""
+        
+        reports = [
+            'outputs/reports/FINAL_PENETRATION_TEST_REPORT.md',
+            'outputs/reports/executive_summary.md',
+            'outputs/reports/remediation_plan.md',
+            'outputs/reports/vulnerability_summary.md',
+            'outputs/reports/master_vulnerability_list.json'
+        ]
+        
+        for report in reports:
+            if os.path.exists(report):
+                dest = f"outputs/final_delivery/{os.path.basename(report)}"
+                shutil.copy2(report, dest)
+                self.manifest.append({
+                    'file': os.path.basename(report),
+                    'type': 'report',
+                    'description': 'Main deliverable report'
+                })
+    
+    def organize_vulnerabilities(self):
+        """Organize vulnerability evidence by severity"""
+        
+        # Load master list
+        try:
+            with open('outputs/reports/master_vulnerability_list.json') as f:
+                findings = json.load(f)
+        except:
+            findings = []
+        
+        # Copy individual vulnerability reports
+        vuln_files = glob.glob('outputs/vulnerabilities/*.md')
+        
+        for vuln_file in vuln_files:
+            filename = os.path.basename(vuln_file)
+            
+            # Determine severity from filename
+            severity = 'medium'
+            for sev in ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO']:
+                if sev in filename.upper():
+                    severity = sev.lower()
+                    break
+            
+            dest = f"outputs/final_delivery/evidence/{severity}/{filename}"
+            shutil.copy2(vuln_file, dest)
+            
+            self.manifest.append({
+                'file': f"evidence/{severity}/{filename}",
+                'type': 'vulnerability_report',
+                'severity': severity.upper()
+            })
+    
+    def copy_raw_outputs(self):
+        """Copy sanitized raw outputs"""
+        
+        raw_files = [
+            'outputs/url_corpus_all_in_scope.txt',
+            'outputs/activesubdomain.txt',
+            'outputs/coverage_open_ports_hostport.txt',
+        ]
+        
+        for raw_file in raw_files:
+            if os.path.exists(raw_file):
+                dest = f"outputs/final_delivery/raw_outputs/{os.path.basename(raw_file)}"
+                shutil.copy2(raw_file, dest)
+                
+                self.manifest.append({
+                    'file': f"raw_outputs/{os.path.basename(raw_file)}",
+                    'type': 'raw_output',
+                    'description': 'Tool output'
+                })
+    
+    def generate_manifest(self):
+        """Generate manifest file"""
+        
+        manifest_text = """# Deliverables Manifest
+
+## Contents
+
+"""
+        
+        # Group by type
+        by_type = defaultdict(list)
+        for item in self.manifest:
+            by_type[item['type']].append(item)
+        
+        for item_type, items in by_type.items():
+            manifest_text += f"\n### {item_type.replace('_', ' ').title()}\n\n"
+            for item in items:
+                manifest_text += f"- `{item['file']}`"
+                if item.get('severity'):
+                    manifest_text += f" ({item['severity']})"
+                if item.get('description'):
+                    manifest_text += f" - {item['description']}"
+                manifest_text += "\n"
+        
+        manifest_text += f"""
+---
+
+**Total Files**: {len(self.manifest)}
+**Generated**: {__import__('datetime').datetime.now().isoformat()}
+"""
+        
+        with open('outputs/final_delivery/MANIFEST.txt', 'w') as f:
+            f.write(manifest_text)
+
+================================================================================
+PHASE 2: DATA SANITIZATION
+================================================================================
+
+-----------------------------------------
+2.1 Remove Sensitive Data
+-----------------------------------------
+import re
+
+class DataSanitizer:
+    
+    def __init__(self):
+        self.patterns = [
+            # API keys
+            (r'(?i)(api[_-]?key|apikey)\s*[=:]\s*["\']?([a-zA-Z0-9_-]{20,})["\']?', r'\1=REDACTED'),
+            
+            # Passwords
+            (r'(?i)(password|passwd|pwd)\s*[=:]\s*["\']?([^\s"\']+)["\']?', r'\1=REDACTED'),
+            
+            # Tokens
+            (r'(?i)(token|bearer|auth)\s*[=:]\s*["\']?([a-zA-Z0-9_.-]{20,})["\']?', r'\1=REDACTED'),
+            
+            # AWS keys
+            (r'(?i)AKIA[0-9A-Z]{16}', 'REDACTED_AWS_KEY'),
+            
+            # Private IPs (optional - may want to keep for context)
+            # (r'\b(10\.\d{1,3}\.\d{1,3}\.\d{1,3})\b', 'INTERNAL_IP'),
+            # (r'\b(172\.(1[6-9]|2[0-9]|3[0-1])\.\d{1,3}\.\d{1,3})\b', 'INTERNAL_IP'),
+            # (r'\b(192\.168\.\d{1,3}\.\d{1,3})\b', 'INTERNAL_IP'),
+            
+            # JWT tokens
+            (r'eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*', 'REDACTED_JWT'),
+            
+            # Session IDs
+            (r'(?i)(session[_-]?id|sid)\s*[=:]\s*["\']?([a-zA-Z0-9_-]{20,})["\']?', r'\1=REDACTED'),
+        ]
+    
+    def sanitize_file(self, filepath):
+        """Sanitize a single file"""
+        
+        try:
+            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+            
+            modified = False
+            for pattern, replacement in self.patterns:
+                new_content = re.sub(pattern, replacement, content)
+                if new_content != content:
+                    modified = True
+                    content = new_content
+            
+            if modified:
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                return True
+            
+            return False
+            
+        except:
+            return False
+    
+    def sanitize_directory(self, directory):
+        """Sanitize all files in directory"""
+        
+        sanitized = 0
+        
+        for root, dirs, files in os.walk(directory):
+            for filename in files:
+                filepath = os.path.join(root, filename)
+                if self.sanitize_file(filepath):
+                    sanitized += 1
+        
+        return sanitized
+
+================================================================================
+PHASE 3: ENGAGEMENT CLOSEOUT
+================================================================================
+
+-----------------------------------------
+3.1 Closeout Documentation
+-----------------------------------------
+def generate_closeout():
+    """Generate engagement closeout document"""
+    
+    from datetime import datetime
+    
+    closeout = f"""# Engagement Closeout
+
+## Assessment Complete
+
+**Date**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+**Status**: ✅ Complete
+
+---
+
+## Deliverables Checklist
+
+### Reports
+- [ ] Executive Summary delivered
+- [ ] Technical Findings Report delivered
+- [ ] Remediation Plan delivered
+- [ ] Final Penetration Test Report delivered
+
+### Evidence
+- [ ] All vulnerability evidence organized
+- [ ] Raw tool outputs included
+- [ ] Screenshots/PoCs archived
+- [ ] Manifest generated
+
+### Data Handling
+- [ ] Sensitive data sanitized
+- [ ] No credentials in deliverables
+- [ ] API keys redacted
+- [ ] Internal IPs handled appropriately
+
+---
+
+## Post-Engagement Actions
+
+### Client Actions Required
+1. Review findings with development team
+2. Prioritize remediation based on severity
+3. Schedule remediation verification testing
+4. Implement security monitoring
+
+### Tester Actions
+1. Securely delete working files
+2. Clear cached credentials
+3. Remove temporary tokens
+4. Document lessons learned
+
+---
+
+## Files to Delete After Delivery
+
+The following files contain sensitive data and should be securely deleted:
+
+```
+temp/agent1/*.txt
+temp/agent1/*_results.*
+outputs/har/accounts/*.json (contains session tokens)
+```
+
+---
+
+## Verification Testing
+
+Recommend scheduling verification testing in:
+- **2 weeks**: Critical/High findings
+- **4 weeks**: Medium findings
+- **Quarterly**: Full re-assessment
+
+---
+
+## Contact Information
+
+For questions about findings:
+- Technical queries: [Security team contact]
+- Remediation guidance: [Development team contact]
+
+---
+
+**Engagement Closed**
+"""
+    
+    with open('outputs/engagement_closeout.md', 'w') as f:
+        f.write(closeout)
+    
+    print("[*] Engagement closeout document generated")
+
+================================================================================
+PHASE 4: FULL AUTOMATION
+================================================================================
+
+#!/usr/bin/env python3
+"""
+closeout_engagement.py - Complete engagement closeout
+"""
+
+import os
+import json
+import shutil
+import glob
+import re
+from datetime import datetime
+from collections import defaultdict
+
+# Create directories
+os.makedirs('outputs/final_delivery/evidence/critical', exist_ok=True)
+os.makedirs('outputs/final_delivery/evidence/high', exist_ok=True)
+os.makedirs('outputs/final_delivery/evidence/medium', exist_ok=True)
+os.makedirs('outputs/final_delivery/evidence/low', exist_ok=True)
+os.makedirs('outputs/final_delivery/evidence/info', exist_ok=True)
+os.makedirs('outputs/final_delivery/raw_outputs', exist_ok=True)
+
+def organize_deliverables():
+    """Organize all deliverables"""
+    
+    manifest = []
+    
+    # Copy main reports
+    reports = glob.glob('outputs/reports/*.md') + glob.glob('outputs/reports/*.json')
+    for report in reports:
+        if os.path.exists(report):
+            dest = f"outputs/final_delivery/{os.path.basename(report)}"
+            shutil.copy2(report, dest)
+            manifest.append(os.path.basename(report))
+    
+    # Copy vulnerability evidence
+    for vuln_file in glob.glob('outputs/vulnerabilities/*.md'):
+        filename = os.path.basename(vuln_file)
+        
+        severity = 'medium'
+        for sev in ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO']:
+            if sev in filename.upper():
+                severity = sev.lower()
+                break
+        
+        dest = f"outputs/final_delivery/evidence/{severity}/{filename}"
+        shutil.copy2(vuln_file, dest)
+        manifest.append(f"evidence/{severity}/{filename}")
+    
+    # Generate manifest
+    manifest_content = "# Deliverables Manifest\n\n"
+    manifest_content += f"Generated: {datetime.now().isoformat()}\n\n"
+    manifest_content += "## Files\n\n"
+    for f in sorted(manifest):
+        manifest_content += f"- {f}\n"
+    
+    with open('outputs/final_delivery/MANIFEST.txt', 'w') as f:
+        f.write(manifest_content)
+    
+    return len(manifest)
+
+def sanitize_deliverables():
+    """Remove sensitive data from deliverables"""
+    
+    patterns = [
+        (r'(?i)(api[_-]?key|apikey)\s*[=:]\s*["\']?([a-zA-Z0-9_-]{20,})["\']?', r'\1=REDACTED'),
+        (r'(?i)(password|passwd|pwd)\s*[=:]\s*["\']?([^\s"\']+)["\']?', r'\1=REDACTED'),
+        (r'eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*', 'REDACTED_JWT'),
+    ]
+    
+    sanitized = 0
+    
+    for root, dirs, files in os.walk('outputs/final_delivery'):
+        for filename in files:
+            if filename.endswith(('.md', '.txt', '.json')):
+                filepath = os.path.join(root, filename)
+                
+                try:
+                    with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                    
+                    modified = False
+                    for pattern, replacement in patterns:
+                        new_content = re.sub(pattern, replacement, content)
+                        if new_content != content:
+                            modified = True
+                            content = new_content
+                    
+                    if modified:
+                        with open(filepath, 'w') as f:
+                            f.write(content)
+                        sanitized += 1
+                        
+                except:
+                    continue
+    
+    return sanitized
+
+def generate_closeout():
+    """Generate closeout document"""
+    
+    closeout = f"""# Engagement Closeout
+
+**Date**: {datetime.now().strftime('%Y-%m-%d')}
+**Status**: ✅ Complete
+
+## Deliverables
+- [x] Final Report
+- [x] Executive Summary
+- [x] Remediation Plan
+- [x] Evidence Archive
+- [x] Manifest
+
+## Next Steps
+1. Client to review findings
+2. Schedule remediation
+3. Plan verification testing
+
+## Data Handling
+- Working files can be deleted
+- Deliverables in outputs/final_delivery/
+- Sanitization complete
+
+---
+**Engagement Closed**
+"""
+    
+    with open('outputs/engagement_closeout.md', 'w') as f:
+        f.write(closeout)
+
+def main():
+    print("[*] Starting engagement closeout...")
+    
+    # Organize
+    file_count = organize_deliverables()
+    print(f"[*] Organized {file_count} deliverables")
+    
+    # Sanitize
+    sanitized = sanitize_deliverables()
+    print(f"[*] Sanitized {sanitized} files")
+    
+    # Closeout
+    generate_closeout()
+    print("[*] Closeout document generated")
+    
+    print("\n" + "="*60)
+    print("ENGAGEMENT COMPLETE")
+    print("="*60)
+    print(f"\nDeliverables: outputs/final_delivery/")
+    print(f"Closeout doc: outputs/engagement_closeout.md")
+    print("\n✅ All tasks complete!")
+
+if __name__ == "__main__":
+    main()
+
+================================================================================
+SUMMARY CHECKLIST
+================================================================================
+
+[ ] All evidence organized by severity
+[ ] Main reports copied to delivery folder
+[ ] Raw outputs included
+[ ] Manifest generated
+[ ] Sensitive data sanitized
+[ ] Closeout document created
+[ ] Ready for client delivery
+
+================================================================================
+🎉 CONGRATULATIONS - ALL 106 TASKS COMPLETE! 🎉
+================================================================================
+
+You have completed the entire penetration testing workflow:
+
+Phase 0: Setup & Preparation
+Phase 1: Subdomain Enumeration  
+Phase 2: URL Discovery
+Phase 3: Analysis & Prioritization
+Phase 4: Initial Scanning
+Phase 5: WAF & Infrastructure Analysis
+Phase 6: Authentication Testing
+Phase 7: Deep API Testing
+Phase 8: Fuzzing & Parameter Discovery
+Phase 9: Injection Testing
+Phase 10: SSRF & Backend Access
+Phase 11: File & Code Exposure
+Phase 12: Business Logic Testing
+Phase 13: Advanced Exploitation
+Phase 14: Supply Chain & Second-Order
+Phase 15: Misc Advanced Testing
+Phase 16: Closeout & Reporting
+
+================================================================================
+END OF TASK LIBRARY
+================================================================================

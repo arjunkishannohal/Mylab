@@ -1,0 +1,13 @@
+{
+  "name": "task31-playwright-ui-capture",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "capture": "node capture.mjs",
+    "install-browser": "npx playwright install chromium"
+  },
+  "devDependencies": {
+    "playwright": "^1.40.0"
+  }
+}

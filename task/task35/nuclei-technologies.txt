@@ -1,0 +1,235 @@
+================================================================================
+TASK 35: NUCLEI TECHNOLOGIES FINGERPRINTING (RUN FIRST)
+================================================================================
+Maps to: testing_toolkit.txt → Step 8 (Nuclei sweep - technologies)
+Purpose: Fingerprint ALL technologies to inform subsequent CVE/exposure scans
+Mode:    AGGRESSIVE - No limits, full coverage, your own target
+Impact:  FOUNDATION — tells us what to scan for in Tasks 36-39
+
+================================================================================
+AGGRESSIVE MODE SETTINGS
+================================================================================
+This is YOUR target — no rate limits, no politeness:
+  - Concurrency: 100+ threads
+  - Rate limit: NONE (0 = unlimited)
+  - Timeout: 10s (catch slow endpoints)
+  - Retries: 3 (catch flaky responses)
+  - Bulk size: 100 (batch requests)
+  - No interactsh needed (passive fingerprinting)
+
+================================================================================
+INPUTS
+================================================================================
+PRIMARY (from pipeline):
+  outputs/live_base_urls.txt           — live hosts (from httpx)
+  outputs/queue_api_endpoints_kiterunner.txt — API routes
+  outputs/queue_dynamic_endpoints_urls.txt   — parameterized URLs
+  
+COMBINED TARGET LIST:
+  temp/task35/all_targets.txt          — deduplicated merge of above
+
+================================================================================
+TEMPLATE CATEGORIES
+================================================================================
+technologies/               — ~800 templates
+├── tech-detect/           — Server/framework detection
+├── cms/                   — CMS fingerprinting (WordPress, Drupal, Joomla)
+├── waf-detect/            — WAF identification
+├── cloud/                 — Cloud service detection (AWS, Azure, GCP)
+├── database/              — Database exposure detection
+└── default-login.yaml     — Default credential pages (detected, not tested)
+
+================================================================================
+BRAIN INTELLIGENCE (USE BRAIN)
+================================================================================
+1. LEARN TECH STACK:
+   - Build: host → [technologies] mapping
+   - Detect: PHP, Java, .NET, Python, Node.js, Ruby, Go
+   - Identify: WordPress, Laravel, Spring, Django, Express, Rails
+
+2. INFORM SUBSEQUENT SCANS:
+   - If WordPress detected → enable WP CVE templates in Task 38
+   - If Java/Spring detected → enable Java CVE templates
+   - If nginx detected → enable nginx-specific checks
+   - Save tech_stack.json for use by Tasks 36-39
+
+3. DETECT INTERESTING PATTERNS:
+   - Multiple technologies = complex app = more attack surface
+   - Debug headers = development mode = likely vulns
+   - Version numbers = exact CVE matching
+
+4. WAF AWARENESS:
+   - Detect WAF type (Cloudflare, AWS WAF, ModSecurity)
+   - Record for bypass techniques in injection phases
+
+================================================================================
+WORKFLOW
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ PHASE A: PREPARE TARGETS                                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  A.1 Merge all URL sources:                                                 │
+│      cat outputs/live_base_urls.txt \                                       │
+│          outputs/queue_api_endpoints_kiterunner.txt \                       │
+│          outputs/queue_dynamic_endpoints_urls.txt \                         │
+│      | sort -u > temp/task35/all_targets.txt                                │
+│                                                                             │
+│  A.2 Count targets for batching:                                            │
+│      TOTAL=$(wc -l < temp/task35/all_targets.txt)                           │
+│      BATCH_SIZE=500  # URLs per 9-minute batch                              │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ PHASE B: AGGRESSIVE NUCLEI SCAN                                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Command (AGGRESSIVE MODE):                                                  │
+│                                                                             │
+│  nuclei -l temp/task35/all_targets.txt \                                    │
+│         -t technologies/ \                                                  │
+│         -c 100 \                      # 100 concurrent templates            │
+│         -rl 0 \                       # No rate limit (unlimited)           │
+│         -timeout 10 \                 # 10s timeout                         │
+│         -retries 3 \                  # Retry failed requests               │
+│         -bulk-size 100 \              # Batch 100 hosts                     │
+│         -nc \                         # No color (clean output)             │
+│         -stats \                      # Show progress stats                 │
+│         -json -o temp/task35/tech_results.json \                            │
+│         -markdown-export temp/task35/tech_report.md \                       │
+│         2>&1 | tee temp/task35/nuclei.log                                   │
+│                                                                             │
+│  Alternative with resume (for large scans):                                 │
+│                                                                             │
+│  nuclei -l temp/task35/all_targets.txt \                                    │
+│         -t technologies/ \                                                  │
+│         -resume temp/task35/resume.cfg \                                    │
+│         ... (same flags as above)                                           │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ PHASE C: BUILD KNOWLEDGE BASE                                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  C.1 Parse results and build tech_stack.json:                               │
+│      {                                                                      │
+│        "hosts": {                                                           │
+│          "https://example.com": {                                           │
+│            "technologies": ["nginx", "php", "wordpress"],                   │
+│            "versions": {"nginx": "1.18.0", "php": "7.4", "wp": "6.1"},      │
+│            "waf": "cloudflare",                                             │
+│            "cms": "wordpress",                                              │
+│            "language": "php",                                               │
+│            "framework": null                                                │
+│          }                                                                  │
+│        },                                                                   │
+│        "technology_hosts": {                                                │
+│          "wordpress": ["https://example.com", "https://blog.example.com"], │
+│          "spring": ["https://api.example.com"],                            │
+│          "nginx": ["https://example.com", "https://api.example.com"]       │
+│        },                                                                   │
+│        "waf_hosts": {                                                       │
+│          "cloudflare": ["https://example.com"],                            │
+│          "aws-waf": ["https://api.example.com"]                            │
+│        }                                                                    │
+│      }                                                                      │
+│                                                                             │
+│  C.2 Generate priority lists for subsequent tasks:                          │
+│      outputs/nuclei/tech_wordpress_hosts.txt                                │
+│      outputs/nuclei/tech_java_hosts.txt                                     │
+│      outputs/nuclei/tech_php_hosts.txt                                      │
+│      outputs/nuclei/tech_dotnet_hosts.txt                                   │
+│      outputs/nuclei/tech_waf_detected.txt                                   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+OUTPUT FILES
+================================================================================
+outputs/nuclei/
+├── tech_stack.json                    — THE BRAIN (host → technologies)
+├── tech_results.json                  — raw Nuclei JSON output
+├── tech_summary.md                    — human-readable summary
+├── tech_wordpress_hosts.txt           — hosts with WordPress
+├── tech_java_hosts.txt                — hosts with Java/Spring
+├── tech_php_hosts.txt                 — hosts with PHP
+├── tech_dotnet_hosts.txt              — hosts with .NET
+├── tech_node_hosts.txt                — hosts with Node.js
+├── tech_waf_detected.txt              — hosts behind WAF
+└── all_detected_technologies.txt      — unique tech list
+
+temp/task35/
+├── all_targets.txt                    — merged target list
+├── tech_results.json                  — raw results
+├── nuclei.log                         — execution log
+├── resume.cfg                         — Nuclei resume state
+└── checkpoint.json                    — batch checkpoint
+
+================================================================================
+9-MINUTE BATCH APPROACH
+================================================================================
+If target list is huge (>5000 URLs), split into batches:
+
+BATCH_SIZE=500
+TOTAL=$(wc -l < all_targets.txt)
+BATCHES=$((TOTAL / BATCH_SIZE + 1))
+
+for i in $(seq 1 $BATCHES); do
+    START=$(((i-1) * BATCH_SIZE + 1))
+    END=$((i * BATCH_SIZE))
+    
+    sed -n "${START},${END}p" all_targets.txt > batch_${i}.txt
+    
+    nuclei -l batch_${i}.txt -t technologies/ \
+           -json -o results_batch_${i}.json \
+           ... (aggressive flags)
+    
+    # Save checkpoint
+    echo "{\"batch\": $i, \"completed\": true}" > checkpoint.json
+    
+    # Check if 9 minutes approaching (optional)
+done
+
+# Merge results
+cat results_batch_*.json > tech_results.json
+
+================================================================================
+EXPECTED FINDINGS
+================================================================================
+This task FINGERPRINTS, not exploits. Findings include:
+
+| Detection Type | Example | Informs |
+|----------------|---------|---------|
+| Web Server | nginx/1.18.0, Apache/2.4 | Server CVEs |
+| Language | PHP 7.4, Java 11, Python 3.9 | Language CVEs |
+| Framework | Laravel, Spring, Django | Framework CVEs |
+| CMS | WordPress 6.1, Drupal 9 | CMS CVEs |
+| WAF | Cloudflare, AWS WAF | Bypass techniques |
+| Database | MySQL, PostgreSQL exposed | DB exploitation |
+| Cloud | AWS, Azure, GCP services | Cloud misconfig |
+| Debug Mode | X-Debug, Stack traces | Info disclosure |
+
+================================================================================
+CHAIN TO NEXT TASKS
+================================================================================
+Task 35 (this) → Task 36 (Exposures) → Task 37 (Default logins) → 
+Task 38 (CVEs High) → Task 39 (CVEs All)
+
+tech_stack.json is used by all subsequent tasks to:
+- Filter relevant templates (only Java CVEs for Java hosts)
+- Prioritize scans (WordPress hosts first if WP detected)
+- Plan WAF bypasses (if WAF detected)
+
+================================================================================
+VERIFICATION
+================================================================================
+After run, verify:
+□ tech_stack.json exists and has entries
+□ At least one technology detected per live host
+□ WAF detection working (check known WAF hosts)
+□ Results feed into Task 36-39
+
+================================================================================

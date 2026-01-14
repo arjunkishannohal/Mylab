@@ -1,5 +1,5 @@
 # Amass (passive)
-# Run ONLY on targets you are authorized to test.
+# YOUR TARGET = GO AGGRESSIVE - Push to maximum output
 # try to get meximuim output, push to your hard limit
 
 Install

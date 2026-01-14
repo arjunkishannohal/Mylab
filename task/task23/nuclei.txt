@@ -75,7 +75,7 @@
 # 4) Run nuclei (baseline)
 # ----------------------------
 # Notes:
-# - Keep concurrency moderate to avoid WAF/rate-limits.
+# - YOUR target = GO AGGRESSIVE. Maximum concurrency, no rate limits.
 # - -timeout is per request; keep low to fit 9-minute rule.
 # - If your target program forbids certain template classes, add excludes via -etags/-exclude.
 #

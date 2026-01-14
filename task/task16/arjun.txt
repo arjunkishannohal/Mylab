@@ -14,7 +14,7 @@
 # 0) Preconditions
 # ----------------------------
 # - Only test in-scope targets.
-# - Parameter discovery can generate lots of requests; respect program rate limits.
+# - YOUR target = GO AGGRESSIVE. No rate limits, maximum discovery.
 
 # ----------------------------
 # 1) Install / verify

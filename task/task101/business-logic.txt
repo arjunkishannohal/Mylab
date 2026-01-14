@@ -1,0 +1,668 @@
+================================================================================
+TASK 101 - BUSINESS LOGIC FLAWS
+================================================================================
+Covers testing_toolkit.txt Phase 15 Step 56
+Application logic abuse and workflow bypass
+
+BUSINESS LOGIC = THE REAL MONEY
+Technical vulns are cool, but logic flaws pay.
+Buy $1000 item for $0.01? That's business logic.
+
+================================================================================
+INPUTS
+================================================================================
+outputs/live_base_urls.txt                 <- Live hosts
+outputs/url_corpus_all_in_scope.txt        <- URL corpus
+outputs/har/accounts/*_auth.json           <- Auth tokens
+outputs/har/common_data.txt                <- Workflow data from HAR
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/business_logic/
+    logic_flaws.txt                        <- Identified logic issues
+    price_manipulation.txt                 <- Price/quantity manipulation
+    workflow_bypass.txt                    <- Workflow bypass issues
+    privilege_escalation.txt               <- Logic-based privilege escalation
+    rate_abuse.txt                         <- Promo/coupon abuse
+
+outputs/vulnerabilities/BUSINESS-LOGIC-*-HIGH.md
+
+================================================================================
+🧠 AGENT DECISION FRAMEWORK
+================================================================================
+
+UNDERSTAND BUSINESS LOGIC ATTACKS:
+
+    Categories of business logic flaws:
+    |
+    +-- Price Manipulation
+    |   +-- Negative quantities
+    |   +-- Price parameter tampering
+    |   +-- Currency conversion abuse
+    |   +-- Discount stacking
+    |
+    +-- Workflow Bypass
+    |   +-- Skip payment step
+    |   +-- Skip verification step
+    |   +-- Race conditions
+    |   +-- State manipulation
+    |
+    +-- Authentication Logic
+    |   +-- Password reset abuse
+    |   +-- Account enumeration
+    |   +-- 2FA bypass
+    |   +-- "Remember me" abuse
+    |
+    +-- Authorization Logic
+    |   +-- Role confusion
+    |   +-- Cross-tenant access
+    |   +-- Feature flag abuse
+    |
+    +-- Abuse of Functionality
+        +-- Referral/promo abuse
+        +-- Trial extension
+        +-- Free tier abuse
+
+================================================================================
+PHASE 1: PRICE & QUANTITY MANIPULATION
+================================================================================
+
+-----------------------------------------
+1.1 Test Price Manipulation
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+business_logic_scanner.py - Business logic flaw testing
+"""
+
+import requests
+import json
+import os
+from urllib.parse import urlparse, parse_qs
+
+os.makedirs('outputs/business_logic', exist_ok=True)
+os.makedirs('outputs/vulnerabilities', exist_ok=True)
+
+requests.packages.urllib3.disable_warnings()
+
+class BusinessLogicScanner:
+    
+    def __init__(self):
+        self.session = requests.Session()
+        self.findings = []
+    
+    def test_price_manipulation(self, cart_url, auth_token=None):
+        """Test for price manipulation vulnerabilities"""
+        
+        headers = {}
+        if auth_token:
+            headers['Authorization'] = f'Bearer {auth_token}'
+        
+        tests = []
+        
+        # Test cases for price manipulation
+        manipulations = [
+            {'price': -100, 'quantity': 1},      # Negative price
+            {'price': 0, 'quantity': 1},         # Zero price
+            {'price': 0.01, 'quantity': 1},      # Minimal price
+            {'price': 100, 'quantity': -1},      # Negative quantity
+            {'price': 100, 'quantity': 0},       # Zero quantity
+            {'price': 100, 'quantity': 99999},   # Huge quantity
+            {'price': 100, 'quantity': 0.1},     # Fractional quantity
+        ]
+        
+        for manip in manipulations:
+            try:
+                resp = self.session.post(
+                    cart_url,
+                    json=manip,
+                    headers=headers,
+                    timeout=15,
+                    verify=False
+                )
+                
+                # Check if manipulation was accepted
+                if resp.status_code in [200, 201]:
+                    tests.append({
+                        'manipulation': manip,
+                        'accepted': True,
+                        'response': resp.text[:200]
+                    })
+                    
+            except:
+                continue
+        
+        return tests
+    
+    def test_discount_stacking(self, checkout_url, coupon_param='coupon',
+                               auth_token=None):
+        """Test for discount/coupon stacking"""
+        
+        headers = {}
+        if auth_token:
+            headers['Authorization'] = f'Bearer {auth_token}'
+        
+        # Try applying multiple coupons
+        coupons = ['SAVE10', 'DISCOUNT20', 'FREESHIP', 'SUMMER2024']
+        
+        tests = []
+        
+        # Try single coupon
+        for coupon in coupons:
+            try:
+                resp = self.session.post(
+                    checkout_url,
+                    json={coupon_param: coupon},
+                    headers=headers,
+                    timeout=15,
+                    verify=False
+                )
+                
+                if 'discount' in resp.text.lower() or 'applied' in resp.text.lower():
+                    tests.append({'single_coupon': coupon, 'worked': True})
+                    
+            except:
+                continue
+        
+        # Try multiple coupons
+        try:
+            resp = self.session.post(
+                checkout_url,
+                json={coupon_param: ','.join(coupons)},
+                headers=headers,
+                timeout=15,
+                verify=False
+            )
+            
+            if resp.status_code == 200:
+                tests.append({'multiple_coupons': True, 'response': resp.text[:200]})
+                
+        except:
+            pass
+        
+        # Try coupon as array
+        try:
+            resp = self.session.post(
+                checkout_url,
+                json={coupon_param: coupons},
+                headers=headers,
+                timeout=15,
+                verify=False
+            )
+            
+            if resp.status_code == 200:
+                tests.append({'coupon_array': True, 'response': resp.text[:200]})
+                
+        except:
+            pass
+        
+        return tests
+
+================================================================================
+PHASE 2: WORKFLOW BYPASS
+================================================================================
+
+-----------------------------------------
+2.1 Step Skipping Tests
+-----------------------------------------
+def test_workflow_bypass(workflow_steps, auth_token=None):
+    """Test if workflow steps can be skipped"""
+    
+    """
+    Example workflow:
+    1. Add to cart -> /cart/add
+    2. Enter shipping -> /checkout/shipping  
+    3. Enter payment -> /checkout/payment
+    4. Confirm order -> /checkout/confirm
+    5. Complete -> /checkout/complete
+    
+    Test: Skip step 3 (payment) and go directly to confirm
+    """
+    
+    session = requests.Session()
+    
+    headers = {}
+    if auth_token:
+        headers['Authorization'] = f'Bearer {auth_token}'
+    
+    findings = []
+    
+    # Try accessing final step directly
+    if len(workflow_steps) > 2:
+        final_step = workflow_steps[-1]
+        
+        try:
+            resp = session.get(
+                final_step['url'],
+                headers=headers,
+                timeout=15,
+                verify=False
+            )
+            
+            # Check if step was accessible
+            if resp.status_code == 200:
+                # Look for success indicators
+                success_indicators = ['complete', 'success', 'confirmed', 'thank']
+                
+                if any(ind in resp.text.lower() for ind in success_indicators):
+                    findings.append({
+                        'type': 'workflow_bypass',
+                        'skipped_to': final_step['url'],
+                        'severity': 'HIGH'
+                    })
+                    
+        except:
+            pass
+    
+    # Try accessing each step out of order
+    for i, step in enumerate(workflow_steps):
+        if i == 0:
+            continue
+            
+        try:
+            resp = session.get(
+                step['url'],
+                headers=headers,
+                timeout=15,
+                verify=False
+            )
+            
+            if resp.status_code == 200:
+                findings.append({
+                    'type': 'step_accessible_directly',
+                    'step': i + 1,
+                    'url': step['url']
+                })
+                
+        except:
+            continue
+    
+    return findings
+
+-----------------------------------------
+2.2 Race Condition Testing
+-----------------------------------------
+import threading
+import time
+
+def test_race_condition(url, data, auth_token=None, threads=10):
+    """Test for race conditions in business logic"""
+    
+    """
+    Race condition scenarios:
+    - Redeem coupon multiple times before check
+    - Withdraw money multiple times before balance update
+    - Use limited item multiple times
+    """
+    
+    results = []
+    lock = threading.Lock()
+    
+    def make_request():
+        session = requests.Session()
+        headers = {}
+        if auth_token:
+            headers['Authorization'] = f'Bearer {auth_token}'
+        
+        try:
+            resp = session.post(
+                url,
+                json=data,
+                headers=headers,
+                timeout=15,
+                verify=False
+            )
+            
+            with lock:
+                results.append({
+                    'status': resp.status_code,
+                    'response': resp.text[:200]
+                })
+                
+        except Exception as e:
+            with lock:
+                results.append({'error': str(e)})
+    
+    # Launch all threads simultaneously
+    threads_list = []
+    for _ in range(threads):
+        t = threading.Thread(target=make_request)
+        threads_list.append(t)
+    
+    # Start all at once
+    for t in threads_list:
+        t.start()
+    
+    # Wait for completion
+    for t in threads_list:
+        t.join()
+    
+    # Analyze results
+    success_count = sum(1 for r in results if r.get('status') == 200)
+    
+    return {
+        'url': url,
+        'threads': threads,
+        'successful_requests': success_count,
+        'potential_race': success_count > 1,
+        'results': results
+    }
+
+================================================================================
+PHASE 3: AUTHORIZATION LOGIC TESTING
+================================================================================
+
+-----------------------------------------
+3.1 Role Manipulation
+-----------------------------------------
+def test_role_manipulation(url, user_token, admin_role='admin'):
+    """Test for role manipulation in requests"""
+    
+    session = requests.Session()
+    
+    findings = []
+    
+    # Try adding role parameter
+    role_params = [
+        {'role': admin_role},
+        {'user_role': admin_role},
+        {'userRole': admin_role},
+        {'is_admin': True},
+        {'isAdmin': True},
+        {'admin': True},
+        {'privilege': 'admin'},
+        {'access_level': 'admin'},
+    ]
+    
+    for params in role_params:
+        try:
+            resp = session.get(
+                url,
+                params=params,
+                headers={'Authorization': f'Bearer {user_token}'},
+                timeout=15,
+                verify=False
+            )
+            
+            # Check for admin indicators in response
+            admin_indicators = ['admin', 'management', 'users', 'settings']
+            
+            if resp.status_code == 200:
+                if any(ind in resp.text.lower() for ind in admin_indicators):
+                    findings.append({
+                        'type': 'role_escalation',
+                        'params': params,
+                        'severity': 'CRITICAL'
+                    })
+                    
+        except:
+            continue
+    
+    return findings
+
+-----------------------------------------
+3.2 Feature Flag Abuse
+-----------------------------------------
+def test_feature_flags(url, auth_token=None):
+    """Test for feature flag manipulation"""
+    
+    session = requests.Session()
+    
+    headers = {}
+    if auth_token:
+        headers['Authorization'] = f'Bearer {auth_token}'
+    
+    findings = []
+    
+    # Common feature flag parameters
+    feature_params = [
+        {'beta': True},
+        {'feature': 'premium'},
+        {'features': ['premium', 'enterprise']},
+        {'tier': 'enterprise'},
+        {'plan': 'enterprise'},
+        {'preview': True},
+        {'experimental': True},
+        {'flags': 'all'},
+    ]
+    
+    for params in feature_params:
+        try:
+            resp = session.get(
+                url,
+                params=params,
+                headers=headers,
+                timeout=15,
+                verify=False
+            )
+            
+            # Check for premium/enterprise features
+            premium_indicators = ['premium', 'enterprise', 'pro', 'unlimited']
+            
+            if any(ind in resp.text.lower() for ind in premium_indicators):
+                findings.append({
+                    'type': 'feature_flag_bypass',
+                    'params': params
+                })
+                
+        except:
+            continue
+    
+    return findings
+
+================================================================================
+PHASE 4: FULL AUTOMATION
+================================================================================
+
+#!/usr/bin/env python3
+"""
+business_logic_complete.py - Complete business logic testing
+"""
+
+import os
+import json
+import requests
+import threading
+from urllib.parse import urlparse
+
+os.makedirs('outputs/business_logic', exist_ok=True)
+os.makedirs('outputs/vulnerabilities', exist_ok=True)
+
+requests.packages.urllib3.disable_warnings()
+
+class BusinessLogicAudit:
+    
+    def __init__(self):
+        self.session = requests.Session()
+        self.findings = []
+    
+    def find_business_endpoints(self, urls):
+        """Find business-critical endpoints"""
+        
+        business_patterns = {
+            'payment': ['checkout', 'payment', 'pay', 'purchase', 'buy'],
+            'cart': ['cart', 'basket', 'order'],
+            'discount': ['coupon', 'promo', 'discount', 'voucher'],
+            'transfer': ['transfer', 'send', 'withdraw'],
+            'subscription': ['subscribe', 'upgrade', 'plan', 'tier'],
+            'account': ['profile', 'settings', 'account'],
+        }
+        
+        categorized = {cat: [] for cat in business_patterns}
+        
+        for url in urls:
+            url_lower = url.lower()
+            for category, patterns in business_patterns.items():
+                if any(p in url_lower for p in patterns):
+                    categorized[category].append(url)
+                    break
+        
+        return categorized
+    
+    def test_price_tampering(self, cart_url, auth_token=None):
+        """Test price and quantity manipulation"""
+        
+        headers = {}
+        if auth_token:
+            headers['Authorization'] = f'Bearer {auth_token}'
+        
+        manipulations = [
+            {'price': -100}, {'quantity': -1},
+            {'price': 0}, {'total': 0},
+            {'discount': 100}, {'discount_percent': 100},
+        ]
+        
+        for manip in manipulations:
+            try:
+                resp = self.session.post(
+                    cart_url, json=manip,
+                    headers=headers,
+                    timeout=15, verify=False
+                )
+                
+                if resp.status_code == 200:
+                    self.findings.append({
+                        'url': cart_url,
+                        'type': 'price_manipulation',
+                        'payload': manip,
+                        'severity': 'HIGH'
+                    })
+                    
+            except:
+                continue
+    
+    def test_race_condition(self, url, data, auth_token=None):
+        """Test for race conditions"""
+        
+        results = []
+        lock = threading.Lock()
+        
+        def request():
+            try:
+                resp = requests.post(
+                    url, json=data,
+                    headers={'Authorization': f'Bearer {auth_token}'} if auth_token else {},
+                    timeout=15, verify=False
+                )
+                with lock:
+                    results.append(resp.status_code)
+            except:
+                pass
+        
+        threads = [threading.Thread(target=request) for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        
+        success = results.count(200)
+        if success > 1:
+            self.findings.append({
+                'url': url,
+                'type': 'race_condition',
+                'successful_concurrent': success,
+                'severity': 'HIGH'
+            })
+    
+    def scan_all(self, urls, auth_token=None):
+        """Scan all URLs"""
+        
+        endpoints = self.find_business_endpoints(urls)
+        
+        # Test cart/payment endpoints
+        for url in endpoints.get('cart', [])[:5]:
+            self.test_price_tampering(url, auth_token)
+        
+        for url in endpoints.get('payment', [])[:5]:
+            self.test_price_tampering(url, auth_token)
+        
+        # Test discount endpoints for race
+        for url in endpoints.get('discount', [])[:3]:
+            self.test_race_condition(url, {'coupon': 'TEST'}, auth_token)
+    
+    def generate_reports(self):
+        """Generate vulnerability reports"""
+        
+        for i, finding in enumerate(self.findings):
+            report = f"""# Business Logic Vulnerability
+
+**URL**: {finding['url']}
+**Type**: {finding['type']}
+**Severity**: {finding.get('severity', 'HIGH')}
+
+## Description
+{'Price/quantity manipulation accepted by the application.' if 'price' in finding['type']
+ else 'Race condition allows multiple redemptions.' if 'race' in finding['type']
+ else 'Business logic flaw identified.'}
+
+## Payload/Details
+```json
+{json.dumps(finding.get('payload', finding), indent=2)}
+```
+
+## Impact
+- Financial loss
+- Service abuse
+- Data integrity issues
+
+## Recommendations
+1. Validate all business parameters server-side
+2. Use database transactions with proper locking
+3. Implement idempotency tokens
+4. Log and monitor for anomalous activity
+"""
+            
+            with open(f'outputs/vulnerabilities/BUSINESS-LOGIC-{i}-HIGH.md', 'w') as f:
+                f.write(report)
+    
+    def save_results(self):
+        """Save all results"""
+        
+        with open('outputs/business_logic/logic_flaws.txt', 'w') as f:
+            for finding in self.findings:
+                f.write(f"{finding['type']}|{finding['url']}\n")
+        
+        price = [f for f in self.findings if 'price' in f['type']]
+        with open('outputs/business_logic/price_manipulation.txt', 'w') as f:
+            for finding in price:
+                f.write(f"{finding['url']}\n")
+        
+        race = [f for f in self.findings if 'race' in f['type']]
+        with open('outputs/business_logic/race_conditions.txt', 'w') as f:
+            for finding in race:
+                f.write(f"{finding['url']}\n")
+        
+        with open('outputs/business_logic/findings.json', 'w') as f:
+            json.dump(self.findings, f, indent=2)
+
+# Run
+if __name__ == "__main__":
+    with open('outputs/url_corpus_all_in_scope.txt') as f:
+        urls = [l.strip() for l in f if l.strip()]
+    
+    print(f"[*] Testing business logic...")
+    
+    audit = BusinessLogicAudit()
+    audit.scan_all(urls)
+    audit.save_results()
+    audit.generate_reports()
+    
+    print(f"\n[*] Business logic findings: {len(audit.findings)}")
+
+================================================================================
+SUMMARY CHECKLIST
+================================================================================
+
+[ ] Price/quantity manipulation tested
+[ ] Discount/coupon stacking tested
+[ ] Workflow bypass tested
+[ ] Race conditions tested
+[ ] Role manipulation tested
+[ ] Feature flag abuse tested
+[ ] All findings documented
+
+================================================================================
+NEXT TASK
+================================================================================
+Task 102: GraphQL-Specific Attacks (Phase 15 - Misc Advanced)

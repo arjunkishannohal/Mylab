@@ -1,0 +1,580 @@
+================================================================================
+TASK 98 - HTTP VERB TAMPERING / METHOD OVERRIDE
+================================================================================
+Covers testing_toolkit.txt Phase 15 Step 53
+HTTP method manipulation for access control bypass
+
+VERB TAMPERING = BYPASS ACCESS CONTROLS
+Security rules often specify: "POST to /admin requires auth"
+But what if you send GET? Or PUT? Or HEAD?
+Sometimes, forgotten methods slip through!
+
+================================================================================
+INPUTS
+================================================================================
+outputs/live_base_urls.txt                 <- Live hosts
+outputs/url_corpus_all_in_scope.txt        <- URL corpus
+outputs/har/accounts/*_auth.json           <- Auth tokens
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/verb_tampering/
+    method_differences.txt                 <- Endpoints with different responses
+    bypass_successful.txt                  <- Successful bypasses
+    method_override_working.txt            <- Method override headers that work
+
+outputs/vulnerabilities/VERB-TAMPERING-*-MEDIUM.md
+
+================================================================================
+🧠 AGENT DECISION FRAMEWORK
+================================================================================
+
+UNDERSTAND VERB TAMPERING:
+
+    HTTP Methods to test:
+    |
+    +-- Standard methods:
+    |   +-- GET, POST, PUT, DELETE, PATCH
+    |   +-- HEAD, OPTIONS, TRACE
+    |
+    +-- Non-standard/Extended:
+    |   +-- CONNECT, PROPFIND, PROPPATCH
+    |   +-- MKCOL, COPY, MOVE, LOCK, UNLOCK
+    |   +-- ARBITRARY (custom methods)
+
+    Method override headers:
+    |
+    +-- X-HTTP-Method-Override
+    +-- X-Method-Override
+    +-- X-HTTP-Method
+    +-- _method (in body/query)
+    +-- Override (custom)
+
+    Attack scenarios:
+    |
+    1. ACL bypass:
+       - POST /admin/delete -> 403 Forbidden
+       - GET /admin/delete -> 200 OK (oops!)
+    |
+    2. Method override:
+       - POST blocked
+       - GET + X-HTTP-Method-Override: POST -> works!
+    |
+    3. Cache bypass:
+       - GET cached (stale data)
+       - HEAD bypasses cache
+
+================================================================================
+PHASE 1: METHOD ENUMERATION
+================================================================================
+
+-----------------------------------------
+1.1 Test All Methods
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+verb_tampering_scanner.py - HTTP method manipulation testing
+"""
+
+import requests
+import os
+from urllib.parse import urlparse
+
+os.makedirs('outputs/verb_tampering', exist_ok=True)
+os.makedirs('outputs/vulnerabilities', exist_ok=True)
+
+requests.packages.urllib3.disable_warnings()
+
+HTTP_METHODS = [
+    'GET', 'POST', 'PUT', 'DELETE', 'PATCH',
+    'HEAD', 'OPTIONS', 'TRACE', 'CONNECT',
+    'PROPFIND', 'PROPPATCH', 'MKCOL', 'COPY',
+    'MOVE', 'LOCK', 'UNLOCK', 'ARBITRARY'
+]
+
+METHOD_OVERRIDE_HEADERS = [
+    'X-HTTP-Method-Override',
+    'X-Method-Override', 
+    'X-HTTP-Method',
+    'Override',
+]
+
+class VerbTamperingScanner:
+    
+    def __init__(self):
+        self.session = requests.Session()
+        self.results = []
+    
+    def test_methods(self, url, auth_token=None):
+        """Test all HTTP methods on URL"""
+        
+        responses = {}
+        
+        headers = {}
+        if auth_token:
+            headers['Authorization'] = f'Bearer {auth_token}'
+        
+        for method in HTTP_METHODS:
+            try:
+                resp = self.session.request(
+                    method,
+                    url,
+                    headers=headers,
+                    timeout=15,
+                    verify=False
+                )
+                
+                responses[method] = {
+                    'status': resp.status_code,
+                    'length': len(resp.text),
+                    'headers': dict(resp.headers)
+                }
+                
+            except Exception as e:
+                responses[method] = {'error': str(e)}
+        
+        return responses
+    
+    def analyze_responses(self, url, responses):
+        """Find interesting method differences"""
+        
+        findings = []
+        
+        # Group by status code
+        status_groups = {}
+        for method, resp in responses.items():
+            status = resp.get('status', 'error')
+            if status not in status_groups:
+                status_groups[status] = []
+            status_groups[status].append(method)
+        
+        # If different methods give different results, interesting!
+        if len(status_groups) > 1:
+            findings.append({
+                'url': url,
+                'type': 'method_difference',
+                'groups': status_groups
+            })
+        
+        # Check for successful unusual methods
+        success_codes = [200, 201, 204]
+        unusual_methods = ['TRACE', 'PROPFIND', 'ARBITRARY']
+        
+        for method in unusual_methods:
+            if responses.get(method, {}).get('status') in success_codes:
+                findings.append({
+                    'url': url,
+                    'type': 'unusual_method_allowed',
+                    'method': method
+                })
+        
+        return findings
+
+-----------------------------------------
+1.2 Compare Auth vs No-Auth
+-----------------------------------------
+def test_auth_bypass_via_method(url, auth_token):
+    """Test if different methods bypass auth"""
+    
+    session = requests.Session()
+    findings = []
+    
+    # First, get authenticated response
+    auth_resp = session.get(
+        url,
+        headers={'Authorization': f'Bearer {auth_token}'},
+        timeout=15,
+        verify=False
+    )
+    
+    # Then test each method without auth
+    for method in HTTP_METHODS:
+        try:
+            unauth_resp = session.request(
+                method,
+                url,
+                timeout=15,
+                verify=False
+            )
+            
+            # If unauth gets similar response as auth, potential bypass!
+            if (unauth_resp.status_code == auth_resp.status_code and
+                abs(len(unauth_resp.text) - len(auth_resp.text)) < 100):
+                
+                findings.append({
+                    'url': url,
+                    'method': method,
+                    'type': 'potential_auth_bypass',
+                    'auth_status': auth_resp.status_code,
+                    'unauth_status': unauth_resp.status_code
+                })
+                
+        except:
+            continue
+    
+    return findings
+
+================================================================================
+PHASE 2: METHOD OVERRIDE TESTING
+================================================================================
+
+-----------------------------------------
+2.1 Test Method Override Headers
+-----------------------------------------
+def test_method_override(url, blocked_method='POST'):
+    """Test if method override headers work"""
+    
+    session = requests.Session()
+    findings = []
+    
+    # First check if method is actually blocked
+    try:
+        direct = session.request(blocked_method, url, timeout=15, verify=False)
+    except:
+        return findings
+    
+    # Now try override headers
+    for header in METHOD_OVERRIDE_HEADERS:
+        try:
+            resp = session.get(
+                url,
+                headers={header: blocked_method},
+                timeout=15,
+                verify=False
+            )
+            
+            # If response differs from direct request, override might work
+            if resp.status_code != direct.status_code:
+                findings.append({
+                    'url': url,
+                    'header': header,
+                    'override_to': blocked_method,
+                    'direct_status': direct.status_code,
+                    'override_status': resp.status_code
+                })
+                
+        except:
+            continue
+    
+    # Also test _method parameter
+    for param_type in ['query', 'body']:
+        try:
+            if param_type == 'query':
+                resp = session.get(f"{url}?_method={blocked_method}", timeout=15, verify=False)
+            else:
+                resp = session.post(url, data={'_method': blocked_method}, timeout=15, verify=False)
+            
+            if resp.status_code != direct.status_code:
+                findings.append({
+                    'url': url,
+                    'method': f'_method ({param_type})',
+                    'override_to': blocked_method,
+                    'direct_status': direct.status_code,
+                    'override_status': resp.status_code
+                })
+                
+        except:
+            continue
+    
+    return findings
+
+================================================================================
+PHASE 3: SPECIFIC BYPASS TESTS
+================================================================================
+
+-----------------------------------------
+3.1 ACL Bypass via Method
+-----------------------------------------
+def test_acl_bypass(url, auth_token):
+    """Test ACL bypass via method tampering"""
+    
+    session = requests.Session()
+    
+    # Test protected endpoint with different methods
+    protected_endpoints = [
+        '/admin', '/api/admin', '/management', '/config',
+        '/users', '/settings', '/private', '/internal'
+    ]
+    
+    base = url.rstrip('/')
+    findings = []
+    
+    for endpoint in protected_endpoints:
+        test_url = f"{base}{endpoint}"
+        
+        # Test without auth
+        for method in ['GET', 'POST', 'PUT', 'HEAD', 'OPTIONS']:
+            try:
+                resp = session.request(method, test_url, timeout=15, verify=False)
+                
+                # 2xx response without auth = potential issue
+                if 200 <= resp.status_code < 300:
+                    findings.append({
+                        'url': test_url,
+                        'method': method,
+                        'status': resp.status_code,
+                        'type': 'potential_acl_bypass'
+                    })
+                    
+            except:
+                continue
+    
+    return findings
+
+-----------------------------------------
+3.2 TRACE Method XSS
+-----------------------------------------
+def test_trace_method(url):
+    """Test TRACE method for XST (Cross-Site Tracing)"""
+    
+    session = requests.Session()
+    
+    try:
+        # Send TRACE with custom header
+        resp = session.request(
+            'TRACE',
+            url,
+            headers={'X-Custom-Header': '<script>alert(1)</script>'},
+            timeout=15,
+            verify=False
+        )
+        
+        # If TRACE reflects headers, XST possible
+        if resp.status_code == 200:
+            if 'X-Custom-Header' in resp.text or '<script>' in resp.text:
+                return {
+                    'url': url,
+                    'type': 'trace_enabled',
+                    'xst_possible': '<script>' in resp.text
+                }
+                
+    except:
+        pass
+    
+    return None
+
+================================================================================
+PHASE 4: FULL AUTOMATION
+================================================================================
+
+#!/usr/bin/env python3
+"""
+verb_tampering_complete.py - Complete HTTP method testing
+"""
+
+import os
+import json
+import requests
+from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+os.makedirs('outputs/verb_tampering', exist_ok=True)
+os.makedirs('outputs/vulnerabilities', exist_ok=True)
+
+requests.packages.urllib3.disable_warnings()
+
+class VerbTamperingAudit:
+    
+    def __init__(self):
+        self.session = requests.Session()
+        self.findings = []
+    
+    def test_url(self, url, auth_token=None):
+        """Test single URL for verb tampering issues"""
+        
+        results = []
+        methods = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 
+                   'HEAD', 'OPTIONS', 'TRACE']
+        
+        responses = {}
+        
+        # Test each method
+        for method in methods:
+            try:
+                resp = self.session.request(
+                    method, url,
+                    timeout=15, verify=False
+                )
+                responses[method] = resp.status_code
+            except:
+                responses[method] = 'error'
+        
+        # Analyze differences
+        status_set = set(responses.values())
+        
+        if len(status_set) > 2:  # Multiple different responses
+            results.append({
+                'url': url,
+                'type': 'method_differences',
+                'responses': responses
+            })
+        
+        # Check TRACE
+        if responses.get('TRACE') == 200:
+            results.append({
+                'url': url,
+                'type': 'trace_enabled',
+                'severity': 'LOW'
+            })
+        
+        # Check for unusual 2xx
+        unusual = ['PUT', 'DELETE', 'PATCH']
+        for method in unusual:
+            if 200 <= responses.get(method, 0) < 300:
+                results.append({
+                    'url': url,
+                    'type': 'dangerous_method_allowed',
+                    'method': method,
+                    'severity': 'MEDIUM'
+                })
+        
+        return results
+    
+    def test_method_override(self, url):
+        """Test method override headers"""
+        
+        results = []
+        override_headers = [
+            'X-HTTP-Method-Override',
+            'X-Method-Override',
+            'X-HTTP-Method',
+        ]
+        
+        # Get baseline
+        try:
+            baseline = self.session.post(url, timeout=15, verify=False)
+        except:
+            return results
+        
+        # Try override
+        for header in override_headers:
+            try:
+                resp = self.session.get(
+                    url,
+                    headers={header: 'POST'},
+                    timeout=15,
+                    verify=False
+                )
+                
+                # If behaves like POST, override works
+                if abs(len(resp.text) - len(baseline.text)) < 50:
+                    results.append({
+                        'url': url,
+                        'type': 'method_override_works',
+                        'header': header,
+                        'severity': 'MEDIUM'
+                    })
+                    
+            except:
+                continue
+        
+        return results
+    
+    def scan_all(self, urls, threads=10):
+        """Scan all URLs"""
+        
+        with ThreadPoolExecutor(max_workers=threads) as executor:
+            futures = {executor.submit(self.test_url, url): url 
+                      for url in urls}
+            
+            for future in as_completed(futures):
+                results = future.result()
+                self.findings.extend(results)
+        
+        # Also test method override on subset
+        sample_urls = urls[:50]  # Test first 50
+        for url in sample_urls:
+            results = self.test_method_override(url)
+            self.findings.extend(results)
+    
+    def generate_reports(self):
+        """Generate vulnerability reports"""
+        
+        for i, finding in enumerate(self.findings):
+            if finding.get('severity') not in ['MEDIUM', 'HIGH']:
+                continue
+            
+            report = f"""# HTTP Verb Tampering Vulnerability
+
+**URL**: {finding['url']}
+**Type**: {finding['type']}
+**Severity**: {finding.get('severity', 'MEDIUM')}
+
+## Description
+{'Dangerous HTTP method is allowed on this endpoint.' if 'dangerous' in finding['type']
+ else 'Method override header is accepted.'}
+
+## Impact
+- Bypass access controls
+- Modify data via unexpected methods
+- Information disclosure via TRACE
+
+## PoC
+```http
+{finding.get('method', 'PUT')} {urlparse(finding['url']).path} HTTP/1.1
+Host: {urlparse(finding['url']).netloc}
+```
+
+## Remediation
+1. Explicitly allow only required HTTP methods
+2. Disable TRACE method
+3. Be cautious with method override headers
+4. Apply same security controls to all methods
+"""
+            
+            with open(f'outputs/vulnerabilities/VERB-TAMPERING-{i}-MEDIUM.md', 'w') as f:
+                f.write(report)
+    
+    def save_results(self):
+        """Save all results"""
+        
+        with open('outputs/verb_tampering/method_differences.txt', 'w') as f:
+            for finding in self.findings:
+                if 'differences' in finding['type']:
+                    f.write(f"{finding['url']}|{finding.get('responses', {})}\n")
+        
+        bypasses = [f for f in self.findings 
+                   if 'bypass' in f['type'] or 'override' in f['type'] or 'dangerous' in f['type']]
+        with open('outputs/verb_tampering/bypass_successful.txt', 'w') as f:
+            for b in bypasses:
+                f.write(f"{b['url']}|{b['type']}\n")
+        
+        overrides = [f for f in self.findings if 'override' in f['type']]
+        with open('outputs/verb_tampering/method_override_working.txt', 'w') as f:
+            for o in overrides:
+                f.write(f"{o['url']}|{o.get('header', '')}\n")
+        
+        with open('outputs/verb_tampering/findings.json', 'w') as f:
+            json.dump(self.findings, f, indent=2)
+
+# Run
+if __name__ == "__main__":
+    with open('outputs/url_corpus_all_in_scope.txt') as f:
+        urls = [l.strip() for l in f if l.strip()]
+    
+    print(f"[*] Testing {len(urls)} URLs for verb tampering...")
+    
+    audit = VerbTamperingAudit()
+    audit.scan_all(urls)
+    audit.save_results()
+    audit.generate_reports()
+    
+    print(f"\n[*] Verb tampering findings: {len(audit.findings)}")
+
+================================================================================
+SUMMARY CHECKLIST
+================================================================================
+
+[ ] All HTTP methods tested on endpoints
+[ ] TRACE method checked (XST risk)
+[ ] Method override headers tested
+[ ] _method parameter tested
+[ ] Dangerous methods (PUT/DELETE) flagged
+[ ] Auth bypass via method checked
+[ ] Reports generated for findings
+
+================================================================================
+NEXT TASK
+================================================================================
+Task 99: Rate Limiting & Brute Force (Phase 15 - Misc Advanced)

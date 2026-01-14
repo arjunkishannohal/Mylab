@@ -1,0 +1,255 @@
+# Task 32 — WAF/CDN Fingerprinting — STRICT RUN-CARD
+# Goal: Identify WAF/CDN/reverse-proxy layers BEFORE injection testing.
+# Why: Knowing the WAF informs bypass strategies (encoding, chunked, null bytes, etc.)
+#
+# This is Phase 0 Step 4 in testing_toolkit.txt — run BEFORE any fuzzing/injection.
+
+# ============================================================================
+# INPUTS (from prior 31 tasks) — COMBINE ALL AVAILABLE
+# ============================================================================
+# Combine all these (wafw00f is fast with threads — 1000 URLs in ~5 min):
+#   - outputs/live_base_urls.txt         (from Task 8 httpx)
+#   - outputs/live_hostport_urls.txt     (from Task 12/13 if non-standard ports)
+#   - outputs/api_endpoints_live.txt     (from Task 18/19 kiterunner probe)
+#
+# Cross-reference (passive, already collected):
+#   - outputs/nuclei_findings.txt        (may already contain WAF signatures)
+#   - outputs/har/common_data.txt        (response headers from real browser)
+#
+# Performance with threads (-t flag):
+#   | URLs  | Threads | Time (with -a) |
+#   |-------|---------|----------------|
+#   | 100   | 10      | ~2 min         |
+#   | 500   | 20      | ~6 min         |
+#   | 1000  | 40      | ~5 min         |
+#   | 2000  | 50      | ~8 min         |
+
+# ============================================================================
+# OUTPUTS (contract)
+# ============================================================================
+#   - outputs/waf_fingerprints.txt       (per-host WAF detection results)
+#   - outputs/waf_summary.json           (structured summary for automation)
+#   - temp/agent1/waf_raw.txt            (raw wafw00f output)
+
+# ============================================================================
+# 1) INSTALL wafw00f
+# ============================================================================
+# pip install wafw00f
+# wafw00f --version
+
+# ============================================================================
+# 2) PREFLIGHT
+# ============================================================================
+# New-Item -ItemType Directory -Force temp\agent1 | Out-Null
+# New-Item -ItemType Directory -Force outputs | Out-Null
+#
+# # Verify inputs exist
+# if (!(Test-Path outputs\live_base_urls.txt)) {
+#   throw "Missing outputs\live_base_urls.txt — run Task 8 httpx first"
+# }
+
+# ============================================================================
+# 3) BUILD COMBINED TARGET LIST + RUN wafw00f
+# ============================================================================
+# Combine all available URL sources into one deduplicated list:
+
+# $inputs = @(
+#   'outputs\live_base_urls.txt',
+#   'outputs\live_hostport_urls.txt',
+#   'outputs\api_endpoints_live.txt'
+# )
+#
+# $all = @()
+# foreach ($f in $inputs) {
+#   if (Test-Path $f) { $all += Get-Content $f }
+# }
+#
+# $all | Where-Object { $_ -and $_.Trim() } |
+#   ForEach-Object { $_.Trim() } |
+#   Sort-Object -Unique |
+#   Set-Content temp\agent1\waf_targets.txt
+#
+# $count = (Get-Content temp\agent1\waf_targets.txt).Count
+# Write-Host "[waf] Combined targets: $count URLs"
+
+# Run wafw00f with threads (adjust -t based on target count):
+#   - Under 200 URLs:  -t 10
+#   - 200-500 URLs:    -t 20
+#   - 500-1000 URLs:   -t 40
+#   - 1000+ URLs:      -t 50
+
+# Fast scan (first-match, ~1 min for 1000 URLs):
+# wafw00f -i temp\agent1\waf_targets.txt -t 40 -o temp\agent1\waf_raw.txt
+
+# Thorough scan (test all WAFs, ~5 min for 1000 URLs):
+# wafw00f -i temp\agent1\waf_targets.txt -a -t 40 -o temp\agent1\waf_raw.txt
+
+# JSON output (recommended for automation):
+# wafw00f -i temp\agent1\waf_targets.txt -a -t 40 -f json -o outputs\waf_summary.json
+
+# ============================================================================
+# 4) ALTERNATIVE: httpx headers (already collected in Task 8)
+# ============================================================================
+# If wafw00f is blocked or you want quick passive detection:
+#
+# Common WAF/CDN headers to grep for in responses:
+#   - Server: cloudflare, AkamaiGHost, Imperva, nginx (behind WAF), etc.
+#   - X-CDN: Incapsula, Akamai, Fastly
+#   - X-Sucuri-ID, X-Sucuri-Cache
+#   - X-Powered-By-Plesk, X-Mod-Security
+#   - Set-Cookie: __cfduid, __cf_bm (Cloudflare)
+#   - Set-Cookie: incap_ses_ (Incapsula)
+#   - Via: 1.1 varnish, 1.1 akamai
+#   - X-Cache: HIT from Fastly
+#
+# If you ran httpx with -include-response-header, you can grep:
+# Select-String -Path temp\agent1\httpx_responses.txt -Pattern 'cloudflare|akamai|incapsula|sucuri|imperva|modsec|f5|fortiweb|barracuda' -AllMatches
+
+# ============================================================================
+# 5) ALTERNATIVE: Nuclei WAF detection templates
+# ============================================================================
+# Nuclei has WAF fingerprinting templates:
+#
+# nuclei -l outputs\live_base_urls.txt -t technologies/waf-detect.yaml -o temp\agent1\nuclei_waf.txt
+#
+# Or run the full tech detection set:
+# nuclei -l outputs\live_base_urls.txt -tags tech,waf -o temp\agent1\nuclei_tech_waf.txt
+
+# ============================================================================
+# 6) PARSE & SUMMARIZE
+# ============================================================================
+# Parse wafw00f output to create actionable summary:
+#
+# $wafResults = Get-Content temp\agent1\waf_raw.txt |
+#   Where-Object { $_ -match 'is behind' -or $_ -match 'No WAF' } |
+#   ForEach-Object { $_.Trim() }
+#
+# $wafResults | Set-Content outputs\waf_fingerprints.txt
+#
+# # Count by WAF type
+# $wafResults | Group-Object { ($_ -split 'is behind ')[1] -replace '\).*','' } |
+#   Sort-Object Count -Descending |
+#   Format-Table Name, Count
+
+# ============================================================================
+# 7) DECISION MATRIX (what to do with results)
+# ============================================================================
+# Use this output to inform injection phases (Steps 12-15 in testing_toolkit.txt):
+#
+# | WAF Detected      | Bypass Strategy                                          |
+# |-------------------|----------------------------------------------------------|
+# | Cloudflare        | IP rotation, browser fingerprint, chunked encoding       |
+# | Akamai            | Long delays, case tricks, comment injection              |
+# | Imperva/Incapsula | HTTP/2, header pollution, Unicode normalization          |
+# | ModSecurity       | Null bytes, double-URL encoding, ${IFS} for shell        |
+# | AWS WAF           | Unicode, case variation, HTTP method override            |
+# | F5 ASM            | Paramter pollution, multipart/form-data abuse            |
+# | Sucuri            | IP warm-up, low rate, obfuscated payloads                |
+# | No WAF            | Standard payloads, full speed                            |
+#
+# Also inform:
+# - Step 59 (WAF bypass techniques) for advanced testing
+# - Nuclei/SQLMap tamper scripts selection
+
+# ============================================================================
+# 8) RECOMMENDED COMMAND SEQUENCE (COPY-PASTE READY)
+# ============================================================================
+# From repo root (PowerShell):
+
+# # Ensure dirs exist
+# New-Item -ItemType Directory -Force temp\agent1 | Out-Null
+# New-Item -ItemType Directory -Force outputs | Out-Null
+#
+# # Combine all URL sources
+# $inputs = @('outputs\live_base_urls.txt', 'outputs\live_hostport_urls.txt', 'outputs\api_endpoints_live.txt')
+# $all = @()
+# foreach ($f in $inputs) { if (Test-Path $f) { $all += Get-Content $f } }
+# $all | Where-Object { $_ -and $_.Trim() } | ForEach-Object { $_.Trim() } | Sort-Object -Unique | Set-Content temp\agent1\waf_targets.txt
+# Write-Host "[waf] targets: $((Get-Content temp\agent1\waf_targets.txt).Count)"
+#
+# # Run wafw00f (thorough + JSON, ~5 min for 1000 URLs)
+# wafw00f -i temp\agent1\waf_targets.txt -a -t 40 -f json -o outputs\waf_summary.json
+#
+# # Also create human-readable version
+# wafw00f -i temp\agent1\waf_targets.txt -a -t 40 -o temp\agent1\waf_raw.txt
+#
+# # Parse JSON to CSV summary
+# $json = Get-Content outputs\waf_summary.json | ConvertFrom-Json
+# $json | ForEach-Object {
+#   [PSCustomObject]@{
+#     URL = $_.url
+#     WAF = if ($_.detected) { $_.firewall } else { 'None' }
+#   }
+# } | Export-Csv outputs\waf_fingerprints.csv -NoTypeInformation
+#
+# # Summary stats
+# Write-Host "`n[waf] Summary:"
+# $json | Group-Object { if ($_.detected) { $_.firewall } else { 'None' } } |
+#   Sort-Object Count -Descending |
+#   Format-Table Name, Count
+
+# ============================================================================
+# 9) PRIORITIZATION (if 2000+ URLs — pick best 2000 candidates)
+# ============================================================================
+# With -t 50 threads, wafw00f handles 2000 URLs in ~8 min (under 9-min rule).
+# If you have more than 2000 URLs, prioritize instead of batching.
+#
+# Priority order (highest value first):
+#   1. API endpoints (injection targets — most value from WAF detection)
+#   2. Non-standard ports (may have different WAF config)
+#   3. One URL per unique host (coverage over depth)
+#   4. Base URLs
+
+# $maxTargets = 2000
+# $all = @()
+#
+# # Priority 1: API endpoints (highest value)
+# if (Test-Path outputs\api_endpoints_live.txt) {
+#   $all += Get-Content outputs\api_endpoints_live.txt | ForEach-Object { [PSCustomObject]@{URL=$_; Priority=1} }
+# }
+#
+# # Priority 2: Non-standard ports
+# if (Test-Path outputs\live_hostport_urls.txt) {
+#   $all += Get-Content outputs\live_hostport_urls.txt |
+#     Where-Object { $_ -notmatch ':443/?$|:80/?$' } |
+#     ForEach-Object { [PSCustomObject]@{URL=$_; Priority=2} }
+# }
+#
+# # Priority 3: Base URLs (one per host for coverage)
+# if (Test-Path outputs\live_base_urls.txt) {
+#   $all += Get-Content outputs\live_base_urls.txt | ForEach-Object { [PSCustomObject]@{URL=$_; Priority=3} }
+# }
+#
+# # Dedupe by URL, keep highest priority, limit to 2000
+# $selected = $all |
+#   Sort-Object Priority |
+#   Sort-Object URL -Unique |
+#   Select-Object -First $maxTargets |
+#   Select-Object -ExpandProperty URL
+#
+# $selected | Set-Content temp\agent1\waf_targets.txt
+# Write-Host "[waf] Selected $($selected.Count) / $($all.Count) URLs (prioritized)"
+#
+# # Alternative: One URL per unique host (maximum coverage)
+# # $byHost = $all | ForEach-Object {
+# #   $host = ([Uri]$_.URL).Host
+# #   [PSCustomObject]@{Host=$host; URL=$_.URL; Priority=$_.Priority}
+# # } | Sort-Object Priority | Sort-Object Host -Unique | Select-Object -First $maxTargets
+# # $byHost | Select-Object -ExpandProperty URL | Set-Content temp\agent1\waf_targets.txt
+
+# ============================================================================
+# 10) CROSS-REFERENCE WITH EXISTING DATA
+# ============================================================================
+# Check if Nuclei already detected WAF signatures:
+#
+# if (Test-Path outputs\nuclei_findings.txt) {
+#   Select-String -Path outputs\nuclei_findings.txt -Pattern 'waf|cloudflare|akamai|incapsula' |
+#     Set-Content temp\agent1\nuclei_waf_hits.txt
+# }
+#
+# Check HAR data for CDN/WAF headers:
+#
+# if (Test-Path outputs\har\common_data.txt) {
+#   Select-String -Path outputs\har\common_data.txt -Pattern 'cloudflare|akamai|incapsula|sucuri|imperva' |
+#     Set-Content temp\agent1\har_waf_hints.txt
+# }

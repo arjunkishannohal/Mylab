@@ -1,0 +1,614 @@
+================================================================================
+TASK 100 - SESSION MANAGEMENT FLAWS
+================================================================================
+Covers testing_toolkit.txt Phase 15 Step 55
+Session handling vulnerabilities
+
+SESSION = IDENTITY
+Whoever holds the session token IS that user.
+Weak session management = account takeover.
+
+================================================================================
+INPUTS
+================================================================================
+outputs/live_base_urls.txt                 <- Live hosts
+outputs/url_corpus_all_in_scope.txt        <- URL corpus
+outputs/har/accounts/*_auth.json           <- Auth tokens & sessions
+outputs/har/common_data.txt                <- Cookie/session data from HAR
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/session/
+    session_analysis.txt                   <- Session token analysis
+    weak_sessions.txt                      <- Weak session implementations
+    fixation_vulnerable.txt                <- Session fixation issues
+    logout_issues.txt                      <- Logout not invalidating session
+    prediction_possible.txt                <- Predictable session tokens
+
+outputs/vulnerabilities/SESSION-*-HIGH.md
+
+================================================================================
+🧠 AGENT DECISION FRAMEWORK
+================================================================================
+
+UNDERSTAND SESSION ATTACKS:
+
+    Session attack vectors:
+    |
+    +-- Session Fixation
+    |   +-- Attacker sets victim's session ID
+    |   +-- Victim logs in, session ID unchanged
+    |   +-- Attacker uses same session = authenticated!
+    |
+    +-- Session Prediction
+    |   +-- Weak randomness in token generation
+    |   +-- Sequential IDs, timestamp-based
+    |   +-- Predict valid session = account takeover
+    |
+    +-- Session Hijacking
+    |   +-- Steal session via XSS
+    |   +-- Network sniffing (no HTTPS)
+    |   +-- Session in URL (referer leak)
+    |
+    +-- Improper Logout
+    |   +-- Session not invalidated server-side
+    |   +-- Token still works after logout
+    |
+    +-- Concurrent Sessions
+        +-- No limit on active sessions
+        +-- Can't invalidate other sessions
+
+================================================================================
+PHASE 1: SESSION TOKEN ANALYSIS
+================================================================================
+
+-----------------------------------------
+1.1 Analyze Session Token Strength
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+session_analyzer.py - Analyze session token security
+"""
+
+import requests
+import re
+import math
+import string
+from collections import Counter
+import os
+
+os.makedirs('outputs/session', exist_ok=True)
+os.makedirs('outputs/vulnerabilities', exist_ok=True)
+
+requests.packages.urllib3.disable_warnings()
+
+class SessionAnalyzer:
+    
+    def __init__(self):
+        self.session = requests.Session()
+        self.tokens = []
+    
+    def collect_tokens(self, url, count=10):
+        """Collect multiple session tokens"""
+        
+        tokens = []
+        
+        for _ in range(count):
+            try:
+                resp = self.session.get(url, timeout=15, verify=False)
+                
+                # Get session from cookies
+                for cookie in resp.cookies:
+                    if any(name in cookie.name.lower() for name in 
+                           ['session', 'sess', 'sid', 'token', 'auth']):
+                        tokens.append({
+                            'name': cookie.name,
+                            'value': cookie.value,
+                            'secure': cookie.secure,
+                            'httponly': cookie.has_nonstandard_attr('HttpOnly'),
+                            'samesite': cookie.get_nonstandard_attr('SameSite', 'None')
+                        })
+                        
+            except:
+                continue
+        
+        self.tokens = tokens
+        return tokens
+    
+    def calculate_entropy(self, token):
+        """Calculate Shannon entropy of token"""
+        
+        if not token:
+            return 0
+        
+        # Character frequency
+        freq = Counter(token)
+        probs = [count / len(token) for count in freq.values()]
+        
+        # Shannon entropy
+        entropy = -sum(p * math.log2(p) for p in probs if p > 0)
+        
+        # Entropy per character
+        total_entropy = entropy * len(token)
+        
+        return {
+            'token_length': len(token),
+            'unique_chars': len(freq),
+            'entropy_per_char': entropy,
+            'total_entropy_bits': total_entropy,
+            'strong': total_entropy > 64  # OWASP recommends 64+ bits
+        }
+    
+    def check_predictability(self, tokens):
+        """Check for predictable patterns in tokens"""
+        
+        issues = []
+        
+        if len(tokens) < 2:
+            return issues
+        
+        values = [t['value'] for t in tokens]
+        
+        # Check for sequential patterns
+        if all(v.isdigit() for v in values):
+            nums = [int(v) for v in values]
+            diffs = [nums[i+1] - nums[i] for i in range(len(nums)-1)]
+            
+            if len(set(diffs)) == 1:
+                issues.append({
+                    'type': 'sequential',
+                    'pattern': f'Increment: {diffs[0]}'
+                })
+        
+        # Check for timestamp patterns
+        for value in values:
+            # Unix timestamp pattern
+            if re.match(r'^1[0-9]{9}', value):
+                issues.append({
+                    'type': 'timestamp',
+                    'pattern': 'Contains Unix timestamp'
+                })
+                break
+        
+        # Check for common prefix/suffix
+        if len(values) > 1:
+            prefix_len = 0
+            for i in range(min(len(v) for v in values)):
+                if len(set(v[i] for v in values)) == 1:
+                    prefix_len += 1
+                else:
+                    break
+            
+            if prefix_len > len(values[0]) * 0.5:
+                issues.append({
+                    'type': 'common_prefix',
+                    'pattern': f'First {prefix_len} chars are constant'
+                })
+        
+        return issues
+    
+    def analyze_cookie_security(self, tokens):
+        """Check cookie security attributes"""
+        
+        issues = []
+        
+        for token in tokens:
+            if not token.get('secure'):
+                issues.append({
+                    'type': 'missing_secure',
+                    'cookie': token['name'],
+                    'risk': 'Token sent over HTTP'
+                })
+            
+            if not token.get('httponly'):
+                issues.append({
+                    'type': 'missing_httponly',
+                    'cookie': token['name'],
+                    'risk': 'Accessible via JavaScript (XSS)'
+                })
+            
+            if token.get('samesite') in ['None', None]:
+                issues.append({
+                    'type': 'weak_samesite',
+                    'cookie': token['name'],
+                    'risk': 'Vulnerable to CSRF'
+                })
+        
+        return issues
+
+================================================================================
+PHASE 2: SESSION FIXATION TESTING
+================================================================================
+
+-----------------------------------------
+2.1 Test Session Fixation
+-----------------------------------------
+def test_session_fixation(url, login_url, credentials):
+    """Test for session fixation vulnerability"""
+    
+    session = requests.Session()
+    
+    # Step 1: Get session as unauthenticated user
+    try:
+        resp = session.get(url, timeout=15, verify=False)
+        pre_auth_cookies = dict(resp.cookies)
+    except:
+        return None
+    
+    # Get session ID before auth
+    pre_session = None
+    for name, value in pre_auth_cookies.items():
+        if any(s in name.lower() for s in ['session', 'sess', 'sid']):
+            pre_session = value
+            break
+    
+    if not pre_session:
+        return {'error': 'No session cookie found'}
+    
+    # Step 2: Authenticate
+    try:
+        resp = session.post(
+            login_url,
+            json=credentials,
+            timeout=15,
+            verify=False
+        )
+        post_auth_cookies = dict(session.cookies)
+    except:
+        return None
+    
+    # Get session ID after auth
+    post_session = None
+    for name, value in post_auth_cookies.items():
+        if any(s in name.lower() for s in ['session', 'sess', 'sid']):
+            post_session = value
+            break
+    
+    # Step 3: Compare
+    if pre_session == post_session:
+        return {
+            'vulnerable': True,
+            'type': 'session_fixation',
+            'pre_auth_session': pre_session,
+            'post_auth_session': post_session,
+            'risk': 'Session ID not regenerated after authentication'
+        }
+    
+    return {
+        'vulnerable': False,
+        'pre_auth_session': pre_session[:20] + '...',
+        'post_auth_session': post_session[:20] + '...'
+    }
+
+================================================================================
+PHASE 3: LOGOUT & SESSION INVALIDATION
+================================================================================
+
+-----------------------------------------
+3.1 Test Logout Effectiveness
+-----------------------------------------
+def test_logout(url, login_url, logout_url, credentials):
+    """Test if logout properly invalidates session"""
+    
+    session = requests.Session()
+    
+    # Step 1: Login
+    try:
+        session.post(login_url, json=credentials, timeout=15, verify=False)
+    except:
+        return None
+    
+    # Get authenticated session
+    auth_cookies = dict(session.cookies)
+    
+    # Step 2: Verify authenticated
+    try:
+        resp = session.get(url, timeout=15, verify=False)
+        if resp.status_code != 200:
+            return {'error': 'Authentication failed'}
+    except:
+        return None
+    
+    # Step 3: Logout
+    try:
+        session.post(logout_url, timeout=15, verify=False)
+    except:
+        return None
+    
+    # Step 4: Try to use old session
+    new_session = requests.Session()
+    for name, value in auth_cookies.items():
+        new_session.cookies.set(name, value)
+    
+    try:
+        resp = new_session.get(url, timeout=15, verify=False)
+        
+        # Check if still authenticated
+        if resp.status_code == 200:
+            # Check for auth indicators in response
+            auth_indicators = ['logout', 'profile', 'dashboard', 'welcome']
+            if any(ind in resp.text.lower() for ind in auth_indicators):
+                return {
+                    'vulnerable': True,
+                    'type': 'session_not_invalidated',
+                    'risk': 'Session token remains valid after logout'
+                }
+    except:
+        pass
+    
+    return {'vulnerable': False}
+
+================================================================================
+PHASE 4: CONCURRENT SESSION TESTING
+================================================================================
+
+-----------------------------------------
+4.1 Test Session Concurrency
+-----------------------------------------
+def test_concurrent_sessions(login_url, credentials, protected_url):
+    """Test concurrent session handling"""
+    
+    # Create multiple sessions
+    sessions = []
+    
+    for i in range(5):
+        session = requests.Session()
+        try:
+            session.post(login_url, json=credentials, timeout=15, verify=False)
+            sessions.append(session)
+        except:
+            continue
+    
+    # Verify all sessions work
+    valid_count = 0
+    for session in sessions:
+        try:
+            resp = session.get(protected_url, timeout=15, verify=False)
+            if resp.status_code == 200:
+                valid_count += 1
+        except:
+            continue
+    
+    return {
+        'sessions_created': len(sessions),
+        'sessions_valid': valid_count,
+        'unlimited_sessions': valid_count == len(sessions),
+        'risk': 'No limit on concurrent sessions' if valid_count == len(sessions) else None
+    }
+
+================================================================================
+PHASE 5: FULL AUTOMATION
+================================================================================
+
+#!/usr/bin/env python3
+"""
+session_audit_complete.py - Complete session security audit
+"""
+
+import os
+import json
+import requests
+import math
+from collections import Counter
+
+os.makedirs('outputs/session', exist_ok=True)
+os.makedirs('outputs/vulnerabilities', exist_ok=True)
+
+requests.packages.urllib3.disable_warnings()
+
+class SessionAudit:
+    
+    def __init__(self):
+        self.findings = []
+    
+    def analyze_tokens(self, url, count=10):
+        """Collect and analyze session tokens"""
+        
+        tokens = []
+        
+        for _ in range(count):
+            session = requests.Session()
+            try:
+                resp = session.get(url, timeout=15, verify=False)
+                
+                for cookie in resp.cookies:
+                    if 'session' in cookie.name.lower() or 'token' in cookie.name.lower():
+                        tokens.append({
+                            'name': cookie.name,
+                            'value': cookie.value,
+                            'secure': cookie.secure,
+                            'httponly': 'httponly' in str(cookie).lower(),
+                        })
+                        
+            except:
+                continue
+        
+        if not tokens:
+            return None
+        
+        # Analyze entropy
+        token_values = [t['value'] for t in tokens]
+        for value in token_values:
+            entropy = self.calculate_entropy(value)
+            if entropy['total_entropy_bits'] < 64:
+                self.findings.append({
+                    'url': url,
+                    'type': 'weak_entropy',
+                    'entropy': entropy['total_entropy_bits'],
+                    'severity': 'HIGH'
+                })
+        
+        # Check cookie security
+        for token in tokens:
+            if not token.get('secure'):
+                self.findings.append({
+                    'url': url,
+                    'type': 'missing_secure_flag',
+                    'cookie': token['name'],
+                    'severity': 'MEDIUM'
+                })
+            
+            if not token.get('httponly'):
+                self.findings.append({
+                    'url': url,
+                    'type': 'missing_httponly_flag',
+                    'cookie': token['name'],
+                    'severity': 'MEDIUM'
+                })
+        
+        return tokens
+    
+    def calculate_entropy(self, token):
+        """Calculate Shannon entropy"""
+        
+        if not token:
+            return {'total_entropy_bits': 0}
+        
+        freq = Counter(token)
+        probs = [count / len(token) for count in freq.values()]
+        entropy_per_char = -sum(p * math.log2(p) for p in probs if p > 0)
+        
+        return {
+            'token_length': len(token),
+            'entropy_per_char': entropy_per_char,
+            'total_entropy_bits': entropy_per_char * len(token)
+        }
+    
+    def test_fixation(self, base_url, login_url, creds):
+        """Test session fixation"""
+        
+        session = requests.Session()
+        
+        # Get pre-auth session
+        try:
+            resp = session.get(base_url, timeout=15, verify=False)
+            pre_session = {c.name: c.value for c in resp.cookies 
+                         if 'session' in c.name.lower()}
+        except:
+            return None
+        
+        if not pre_session:
+            return None
+        
+        # Authenticate
+        try:
+            session.post(login_url, json=creds, timeout=15, verify=False)
+            post_session = {c.name: c.value for c in session.cookies 
+                          if 'session' in c.name.lower()}
+        except:
+            return None
+        
+        # Compare
+        for name, value in pre_session.items():
+            if name in post_session and post_session[name] == value:
+                self.findings.append({
+                    'url': login_url,
+                    'type': 'session_fixation',
+                    'cookie': name,
+                    'severity': 'HIGH'
+                })
+                return True
+        
+        return False
+    
+    def scan_all(self, urls):
+        """Scan all URLs"""
+        
+        # Get unique base URLs
+        from urllib.parse import urlparse
+        base_urls = list(set([
+            f"{urlparse(url).scheme}://{urlparse(url).netloc}"
+            for url in urls
+        ]))
+        
+        for base in base_urls:
+            self.analyze_tokens(base)
+    
+    def generate_reports(self):
+        """Generate vulnerability reports"""
+        
+        for i, finding in enumerate(self.findings):
+            report = f"""# Session Management Vulnerability
+
+**URL**: {finding['url']}
+**Type**: {finding['type']}
+**Severity**: {finding.get('severity', 'MEDIUM')}
+
+## Description
+{'Session tokens have insufficient entropy.' if 'entropy' in finding['type']
+ else 'Session cookie missing security flag.' if 'flag' in finding['type']
+ else 'Session ID not regenerated after authentication.'}
+
+## Impact
+{'Session tokens may be predictable.' if 'entropy' in finding['type']
+ else 'Session vulnerable to XSS theft.' if 'httponly' in finding['type']
+ else 'Attacker can fixate session and hijack after victim login.'}
+
+## Details
+```
+{json.dumps(finding, indent=2)}
+```
+
+## Recommendations
+1. Use cryptographically secure random session IDs
+2. Regenerate session ID after authentication
+3. Set Secure, HttpOnly, and SameSite flags
+4. Implement session timeout
+5. Invalidate sessions on logout
+"""
+            
+            with open(f'outputs/vulnerabilities/SESSION-{i}-{finding.get("severity", "MEDIUM")}.md', 'w') as f:
+                f.write(report)
+    
+    def save_results(self):
+        """Save all results"""
+        
+        with open('outputs/session/session_analysis.txt', 'w') as f:
+            for finding in self.findings:
+                f.write(f"{finding['type']}|{finding['url']}\n")
+        
+        weak = [f for f in self.findings 
+               if 'entropy' in f['type'] or 'flag' in f['type']]
+        with open('outputs/session/weak_sessions.txt', 'w') as f:
+            for finding in weak:
+                f.write(f"{finding['url']}\n")
+        
+        fixation = [f for f in self.findings if 'fixation' in f['type']]
+        with open('outputs/session/fixation_vulnerable.txt', 'w') as f:
+            for finding in fixation:
+                f.write(f"{finding['url']}\n")
+        
+        with open('outputs/session/findings.json', 'w') as f:
+            json.dump(self.findings, f, indent=2)
+
+# Run
+if __name__ == "__main__":
+    with open('outputs/url_corpus_all_in_scope.txt') as f:
+        urls = [l.strip() for l in f if l.strip()]
+    
+    print(f"[*] Auditing session management...")
+    
+    audit = SessionAudit()
+    audit.scan_all(urls)
+    audit.save_results()
+    audit.generate_reports()
+    
+    print(f"\n[*] Session findings: {len(audit.findings)}")
+
+================================================================================
+SUMMARY CHECKLIST
+================================================================================
+
+[ ] Session token entropy analyzed
+[ ] Cookie security flags checked (Secure, HttpOnly, SameSite)
+[ ] Session fixation tested
+[ ] Logout invalidation tested
+[ ] Concurrent session limits tested
+[ ] Token predictability analyzed
+[ ] All HIGH findings documented
+
+================================================================================
+NEXT TASK
+================================================================================
+Task 101: Business Logic Flaws (Phase 15 - Misc Advanced)

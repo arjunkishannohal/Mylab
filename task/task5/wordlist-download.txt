@@ -1,5 +1,5 @@
 # Wordlist download (subdomain bruteforce)
-# Run ONLY on targets you are authorized to test.
+# YOUR TARGET = Use maximum wordlist size for full coverage
 
 Recommended approach (best coverage vs time)
 1) Start with SecLists ~110k list (good coverage, manageable)

